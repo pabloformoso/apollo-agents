@@ -1,0 +1,26 @@
+{
+  "name": "Session 2",
+  "description": "Deep focus journey: ambient opening, through chillwave and synthwave, to retro-future peaks, and back down to ambient close.",
+  "playlist": [
+    {"display_name": "Kernel Space", "file": "Kernel Space.wav", "camelot_key": "6A", "genre": "Ambient"},
+    {"display_name": "Deep Stack", "file": "Deep Stack.wav", "camelot_key": "3A", "genre": "Ambient"},
+    {"display_name": "Golden Hour Deploy", "file": "Golden Hour Deploy.wav", "camelot_key": "2A", "genre": "Chillwave"},
+    {"display_name": "Pastel Merge", "file": "Pastel Merge.wav", "camelot_key": "5B", "genre": "Chillwave"},
+    {"display_name": "Packet Stream", "file": "Packet Stream.wav", "camelot_key": "8A", "genre": "Chill-synth"},
+    {"display_name": "Deep Stack", "file": "Deep Stack (Clip 2).wav", "camelot_key": "3B", "genre": "Ambient"},
+    {"display_name": "Neon Compile", "file": "Neon Compile.wav", "camelot_key": "1A", "genre": "Synthwave"},
+    {"display_name": "Final Push", "file": "Final Push.wav", "camelot_key": "9A", "genre": "Synthwave"},
+    {"display_name": "Chrome Refactor", "file": "Chrome Refactor.wav", "camelot_key": "4A", "genre": "Retrowave"},
+    {"display_name": "Packet Stream", "file": "Packet Stream (Clip 2).wav", "camelot_key": "8B", "genre": "Chill-synth"},
+    {"display_name": "Neon Compile", "file": "Neon Compile (Clip 2).wav", "camelot_key": "1B", "genre": "Synthwave"},
+    {"display_name": "Zero Day", "file": "Zero Day.wav", "camelot_key": "7A", "genre": "Futurewave"},
+    {"display_name": "Ship It", "file": "Ship It.wav", "camelot_key": "10A", "genre": "Retro-future"},
+    {"display_name": "Chrome Refactor", "file": "Chrome Refactor (Clip 2).wav", "camelot_key": "4B", "genre": "Retrowave"},
+    {"display_name": "Zero Day", "file": "Zero Day (Clip 2).wav", "camelot_key": "7B", "genre": "Futurewave"},
+    {"display_name": "Ship It", "file": "Ship It (Clip 2).wav", "camelot_key": "10B", "genre": "Retro-future"},
+    {"display_name": "Final Push", "file": "Final Push (Clip 2).wav", "camelot_key": "9B", "genre": "Synthwave"},
+    {"display_name": "Pastel Merge", "file": "Pastel Merge (Clip 2).wav", "camelot_key": "5A", "genre": "Chillwave"},
+    {"display_name": "Golden Hour Deploy", "file": "Golden Hour Deploy (Clip 2).wav", "camelot_key": "2B", "genre": "Chillwave"},
+    {"display_name": "Kernel Space", "file": "Kernel Space (Clip 2).wav", "camelot_key": "6B", "genre": "Ambient"}
+  ]
+}

@@ -9,3 +9,25 @@ wheels/
 # Virtual environments
 .venv
 .env
+
+# Generated artwork (per-session)
+artwork/
+
+# Generated output
+output/
+
+# Audio / video source files (too large for git)
+tracks/**/*.wav
+tracks/**/*.mp3
+tracks/**/*.flac
+tracks/**/*.m4a
+tracks/**/*.ogg
+tracks/**/videos/
+vids/
+
+# macOS metadata
+.DS_Store
+tracks/.DS_Store
+
+# Claude project config
+.claude/

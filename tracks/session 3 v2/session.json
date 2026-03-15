@@ -1,0 +1,24 @@
+{
+  "name": "Session 3 v2",
+  "description": "Cyberpunk descent with looped video backgrounds: warming up through dark synths, rising into high-energy grid sectors, peaking at full-drive intensity, then winding down through corrupted memory into rebirth.",
+  "video_backgrounds": [
+    "../../vids/Cyborg_and_Cyberpunk_Video_Generated.mp4",
+    "../../vids/Deep Stack.mp4",
+    "../../vids/Golder Hour Deploy.mp4",
+    "../../vids/Kernel Space.mp4"
+  ],
+  "playlist": [
+    {"display_name": "Akira Warmup",     "file": "../session 3/Akira Warmup.wav",     "camelot_key": "2A",  "genre": "Cyberpunk"},
+    {"display_name": "Akira Boulevard",  "file": "../session 3/Akira Boulevard.wav",  "camelot_key": "4A",  "genre": "Cyberpunk"},
+    {"display_name": "Memory Overflow",  "file": "../session 3/Memory Overflow.wav",  "camelot_key": "4A",  "genre": "Cyberpunk"},
+    {"display_name": "Live Proccesor",   "file": "../session 3/Live Proccesor.wav",   "camelot_key": "4A",  "genre": "Cyberpunk"},
+    {"display_name": "Synapse Grid",     "file": "../session 3/Synapse Grid.wav",     "camelot_key": "7B",  "genre": "Cyberpunk"},
+    {"display_name": "Sector 41",        "file": "../session 3/Sector 41.wav",        "camelot_key": "7B",  "genre": "Cyberpunk"},
+    {"display_name": "Sector 9",         "file": "../session 3/Sector 9.wav",         "camelot_key": "4A",  "genre": "Cyberpunk"},
+    {"display_name": "Zero Day",         "file": "../session 3/Zero Day.wav",         "camelot_key": "11A", "genre": "Cyberpunk"},
+    {"display_name": "Chrome Wired",     "file": "../session 3/Chrome Wired.wav",     "camelot_key": "12A", "genre": "Cyberpunk"},
+    {"display_name": "Chrome Horizon",   "file": "../session 3/Chrome Horizon.wav",   "camelot_key": "9A",  "genre": "Cyberpunk"},
+    {"display_name": "Corrupt Memory",   "file": "../session 3/Corrupt Memory.wav",   "camelot_key": "8B",  "genre": "Cyberpunk"},
+    {"display_name": "The Rebirth",      "file": "../session 3/The Rebirth.wav",      "camelot_key": "2A",  "genre": "Cyberpunk"}
+  ]
+}
