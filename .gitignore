@@ -16,6 +16,9 @@ artwork/
 # Generated output
 output/
 
+# Track catalog (generated — use tracks.json.example as template)
+tracks/tracks.json
+
 # Audio / video source files (too large for git)
 tracks/**/*.wav
 tracks/**/*.mp3

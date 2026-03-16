@@ -7,48 +7,52 @@ waveform visualizations, AI-generated artwork, and retro animated titles.
 ## Running
 
 ```bash
-python main.py <session_number>
-# e.g. python main.py 2
+# Build/refresh the track catalog (run once after adding new WAV files)
+python main.py --build-catalog
+
+# Generate a session
+python main.py --name "midnight-lofi" --genre "lofi - ambient" --duration 60
 ```
+
+`--genre` must match a subfolder name under `tracks/` (case-insensitive).
+`--duration` is in minutes (soft target — last track is never cut).
 
 Requires an `.env` file with `OPENAI_API_KEY` for DALL-E 3 artwork generation.
 
 ## Project structure
 
 ```
-main.py                        # Single-file implementation (~2000 lines)
+main.py                        # Single-file implementation (~2500 lines)
 tracks/
-  session 1/                   # Flat dir, no session.json (legacy fallback)
-  session 2/                   # WAV files + session.json
-  session N/
-    session.json               # Playlist order, BPM, Camelot keys, artwork style
+  tracks.json                  # Unified catalog: id, display_name, file, genre_folder,
+                               #   genre, camelot_key, bpm, variant_of
+  lofi - ambient/              # WAV files per genre
+  deep house/
+  techno/
+  cyberpunk/
 output/
-  session N/                   # Final video and audio outputs
+  <session-name>/              # Final video and audio outputs
+    mix.wav
+    mix_video.mp4
+    short.mp4
+    session.json               # Saved playlist for reproducibility
+    youtube.md                 # Upload metadata: title, description, tracklist, tags
 artwork/
-  session N/                   # DALL-E 3 generated backgrounds (cached)
+  <session-name>/              # DALL-E 3 generated backgrounds (cached)
 fonts/
   PressStart2P-Regular.ttf     # Retro pixel font for titles
 ```
 
-## session.json format
+## youtube.md format
 
-```json
-{
-  "theme": {
-    "artwork_style": "deep-house-neon"
-  },
-  "tracks": [
-    {
-      "file": "Track Name.wav",
-      "display_name": "Track Name",
-      "bpm": 120,
-      "key": "8A"
-    }
-  ]
-}
-```
+Auto-generated at `output/<session-name>/youtube.md` after every full pipeline run. Contains:
 
-Tracks without `session.json` fall back to flat directory scan + BPM sort.
+- **Title** — `Deep Session // <Name> — <Duration> of <Genre>`
+- **Description** — intro paragraph, track count, timestamped tracklist, technical notes (lossless pipeline, Camelot harmonic progression), hashtags
+- **Tags** — comma-separated genre tag list
+- **Thumbnail Text Ideas** — 3 copy suggestions
+
+Genre-specific hashtags/tags/intros are defined in `_GENRE_HASHTAGS`, `_GENRE_TAGS`, and `_GENRE_DESCRIPTION_INTRO` constants in `main.py`.
 
 ## Architecture decisions
 

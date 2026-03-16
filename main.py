@@ -2,7 +2,9 @@ import base64
 import io
 import json
 import os
+import random
 import sys
+import wave
 
 import librosa
 import numpy as np
@@ -178,6 +180,76 @@ DEFAULT_THEME = {
     "artwork_style": "abstract",
 }
 
+# === Catalog constants ===
+
+CATALOG_PATH = "./tracks/tracks.json"
+
+# BPM ranges per genre folder — used for clamping auto-detected BPM
+BPM_GENRE_RANGES = {
+    "lofi - ambient": (60, 110),
+    "techno": (120, 160),
+    "cyberpunk": (120, 160),
+    "deep house": (115, 135),
+}
+
+# Default themes per genre folder for smart-generated sessions
+GENRE_THEMES = {
+    "lofi - ambient": {
+        "artwork_style": "anime",
+        "title_color": "#E8D5B7",
+        "title_stroke_color": "#5C4A32",
+        "bg_color": [18, 15, 12],
+        "waveform_color": [180, 160, 130],
+        "particle_color": [200, 180, 150],
+        "bg_darken": 0.85,
+        "title_font_size": 36,
+    },
+    "deep house": {
+        "artwork_style": "deep-house-neon",
+        "title_color": "#6A5AFF",
+        "title_stroke_color": "#1A0A3E",
+        "bg_color": [12, 8, 28],
+        "waveform_color": [106, 90, 255],
+        "particle_color": [140, 120, 255],
+        "bg_darken": 0.7,
+        "title_font_size": 32,
+    },
+    "techno": {
+        "artwork_style": "dark-techno",
+        "title_color": "#FF1744",
+        "title_stroke_color": "#4A0010",
+        "bg_color": [5, 2, 8],
+        "waveform_color": [255, 23, 68],
+        "particle_color": [255, 50, 80],
+        "bg_darken": 0.85,
+        "title_font_size": 32,
+    },
+    "cyberpunk": {
+        "artwork_style": "dark-techno",
+        "title_color": "#00FF88",
+        "title_stroke_color": "#004422",
+        "bg_color": [8, 8, 14],
+        "waveform_color": [0, 255, 136],
+        "particle_color": [0, 200, 100],
+        "bg_darken": 0.75,
+        "title_font_size": 32,
+    },
+}
+
+# Camelot wheel: pitch class (0=C … 11=B) → Camelot notation
+_CAMELOT_MAJOR = {
+    0: "8B", 1: "3B", 2: "10B", 3: "5B", 4: "12B", 5: "7B",
+    6: "2B", 7: "9B", 8: "4B", 9: "11B", 10: "6B", 11: "1B",
+}
+_CAMELOT_MINOR = {
+    0: "5A", 1: "12A", 2: "7A", 3: "2A", 4: "9A", 5: "4A",
+    6: "11A", 7: "6A", 8: "1A", 9: "8A", 10: "3A", 11: "10A",
+}
+
+# Krumhansl-Schmuckler tonal hierarchy profiles
+_KS_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+_KS_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
 
 def _get_session_theme(session_config):
     """Return a merged theme dict: defaults overridden by session-specific values.
@@ -290,103 +362,361 @@ def compute_transition_bpm(bpm_out, bpm_in):
 
 # === Session system ===
 
-def resolve_session(session_arg):
-    """Resolve session directory and config from CLI argument.
 
-    Returns (session_dir, session_config_or_None).
-    """
-    if session_arg is not None:
-        # Try as a number first: "2" → "tracks/session 2"
-        session_dir = os.path.join(TRACKS_BASE_DIR, f"session {session_arg}")
-        if not os.path.isdir(session_dir):
-            # Try as a direct path
-            session_dir = session_arg
-        if not os.path.isdir(session_dir):
-            print(f"Session not found: {session_arg}")
-            sys.exit(1)
-    else:
-        # Auto-detect: list subdirectories in tracks/
-        subdirs = sorted(
-            d for d in os.listdir(TRACKS_BASE_DIR)
-            if os.path.isdir(os.path.join(TRACKS_BASE_DIR, d))
-        )
-        if len(subdirs) == 0:
-            print(f"No session directories found in {TRACKS_BASE_DIR}")
-            sys.exit(1)
-        elif len(subdirs) == 1:
-            session_dir = os.path.join(TRACKS_BASE_DIR, subdirs[0])
-        else:
-            print("Available sessions:")
-            for d in subdirs:
-                print(f"  {d}")
-            print(f"\nUsage: python main.py <session_number>")
-            sys.exit(1)
-
-    # Load session.json if it exists
-    config_path = os.path.join(session_dir, "session.json")
-    session_config = None
-    if os.path.exists(config_path):
-        with open(config_path) as f:
-            session_config = json.load(f)
-
-    return session_dir, session_config
-
-
-def load_session_tracks(session_dir, session_config):
-    """Load track entries from session config or filesystem scan.
-
-    Returns list of dicts: [{"path", "display_name", "camelot_key", "genre"}, ...]
-    """
-    if session_config is not None:
-        # Playlist-ordered loading from session.json
-        entries = []
-        for item in session_config["playlist"]:
-            path = os.path.join(session_dir, item["file"])
-            if not os.path.exists(path):
-                print(f"Error: file not found: {path}")
-                sys.exit(1)
-            entries.append({
-                "path": path,
-                "display_name": item["display_name"],
-                "camelot_key": item.get("camelot_key"),
-                "genre": item.get("genre"),
-            })
-        print(f"Playlist: {len(entries)} entries")
-        for i, e in enumerate(entries, 1):
-            key = f" ({e['camelot_key']})" if e["camelot_key"] else ""
-            print(f"  {i:2d}. {e['display_name']}{key}")
-        return entries
-    else:
-        # Backward-compat: scan directory for audio files
-        files = sorted(
-            f for f in os.listdir(session_dir)
-            if any(f.lower().endswith(ext) for ext in AUDIO_EXTENSIONS)
-        )
-        if not files:
-            print(f"No audio files found in {session_dir}")
-            sys.exit(1)
-        print(f"Found {len(files)} tracks:")
-        entries = []
-        for f in files:
-            display_name = os.path.splitext(f)[0]
-            print(f"  {f}")
-            entries.append({
-                "path": os.path.join(session_dir, f),
-                "display_name": display_name,
-                "camelot_key": None,
-                "genre": None,
-            })
-        return entries
-
-
-def get_output_paths(session_dir):
-    """Compute per-session output and artwork directories."""
-    session_name = os.path.basename(session_dir)
+def get_output_paths(session_name):
+    """Compute per-session output and artwork directories from a session name."""
     output_dir = os.path.join(OUTPUT_BASE_DIR, session_name)
     artwork_dir = os.path.join(ARTWORK_BASE_DIR, session_name)
     audio_path = os.path.join(output_dir, "mix_output.wav")
     video_path = os.path.join(output_dir, "mix_video.mp4")
     return output_dir, artwork_dir, audio_path, video_path
+
+
+# === Catalog system ===
+
+def _slugify(text):
+    """Convert text to kebab-case slug for use in IDs."""
+    slug = text.lower()
+    for ch in [" ", "/", "\\", "(", ")", ".", ","]:
+        slug = slug.replace(ch, "-")
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-")
+
+
+def _make_track_id(genre_folder, display_name, is_variant=False):
+    suffix = "-v2" if is_variant else ""
+    return f"{_slugify(genre_folder)}--{_slugify(display_name)}{suffix}"
+
+
+def _wav_duration_sec(filepath):
+    """Read WAV duration from file header without decoding audio."""
+    try:
+        with wave.open(filepath, "r") as wf:
+            return wf.getnframes() / float(wf.getframerate())
+    except Exception:
+        return 0.0
+
+
+def scan_genre_folders():
+    """Scan tracks/ genre subfolders and return list of (genre_folder, wav_path) tuples."""
+    results = []
+    if not os.path.isdir(TRACKS_BASE_DIR):
+        return results
+    for folder in sorted(os.listdir(TRACKS_BASE_DIR)):
+        folder_path = os.path.join(TRACKS_BASE_DIR, folder)
+        if not os.path.isdir(folder_path):
+            continue
+        for fname in sorted(os.listdir(folder_path)):
+            if fname.lower().endswith(".wav"):
+                results.append((folder, os.path.join(folder_path, fname)))
+    return results
+
+
+def load_existing_session_jsons(genre_folder):
+    """Read all session N.json files in a genre folder.
+
+    Returns {display_name: {"camelot_key": ..., "genre": ...}} lookup.
+    """
+    folder_path = os.path.join(TRACKS_BASE_DIR, genre_folder)
+    lookup = {}
+    if not os.path.isdir(folder_path):
+        return lookup
+    for fname in os.listdir(folder_path):
+        if not fname.lower().endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(folder_path, fname)) as f:
+                data = json.load(f)
+            for item in data.get("playlist", []):
+                name = item.get("display_name")
+                if name and name not in lookup:
+                    lookup[name] = {
+                        "camelot_key": item.get("camelot_key"),
+                        "genre": item.get("genre"),
+                    }
+        except Exception:
+            pass
+    return lookup
+
+
+def detect_bpm(filepath, genre_folder=""):
+    """Detect BPM via librosa, clamped to the genre-appropriate range."""
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+    bpm = float(np.squeeze(tempo))
+    lo, hi = BPM_GENRE_RANGES.get(genre_folder.lower(), (60, 200))
+    if bpm < lo or bpm > hi:
+        print(f"  [BPM clamp] {os.path.basename(filepath)}: {bpm:.1f} → [{lo}, {hi}]")
+        bpm = float(max(lo, min(hi, bpm)))
+    return round(bpm, 1)
+
+
+def detect_camelot_key(filepath):
+    """Detect musical key via chromagram and Krumhansl-Schmuckler profiles.
+
+    Returns a Camelot notation string (e.g. '8A', '3B').
+    """
+    y, sr = librosa.load(filepath, sr=None, mono=True)
+    chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+    chroma_mean = chroma.mean(axis=1)  # (12,)
+    best_score = -np.inf
+    best_key = "8A"
+    for pc in range(12):
+        score_major = float(np.corrcoef(chroma_mean, np.roll(_KS_MAJOR, pc))[0, 1])
+        score_minor = float(np.corrcoef(chroma_mean, np.roll(_KS_MINOR, pc))[0, 1])
+        if score_major > best_score:
+            best_score = score_major
+            best_key = _CAMELOT_MAJOR[pc]
+        if score_minor > best_score:
+            best_score = score_minor
+            best_key = _CAMELOT_MINOR[pc]
+    return best_key
+
+
+def build_catalog():
+    """Scan all genre folders, detect BPM and Camelot key for new tracks, update tracks.json."""
+    print("=== Building Track Catalog ===\n")
+
+    # Load existing catalog
+    existing = {}
+    if os.path.exists(CATALOG_PATH):
+        with open(CATALOG_PATH) as f:
+            data = json.load(f)
+        for entry in data.get("tracks", []):
+            existing[entry["file"]] = entry
+        print(f"Loaded {len(existing)} existing entries from {CATALOG_PATH}")
+
+    wav_files = scan_genre_folders()
+    print(f"Found {len(wav_files)} WAV files across all genre folders\n")
+
+    updated = dict(existing)
+    new_count = 0
+    folder_lookups = {}
+
+    for genre_folder, wav_path in wav_files:
+        rel_path = os.path.relpath(wav_path).replace("\\", "/")
+        if rel_path in existing:
+            continue  # already cataloged, skip
+
+        if genre_folder not in folder_lookups:
+            folder_lookups[genre_folder] = load_existing_session_jsons(genre_folder)
+        lookup = folder_lookups[genre_folder]
+
+        fname = os.path.basename(wav_path)
+        name_no_ext = os.path.splitext(fname)[0]
+        if name_no_ext.endswith(" (1)"):
+            base_name = name_no_ext[:-4].strip()
+            is_variant = True
+        else:
+            base_name = name_no_ext
+            is_variant = False
+
+        seed = lookup.get(base_name, {})
+        camelot_key = seed.get("camelot_key")
+        genre = seed.get("genre") or genre_folder
+
+        print(f"  [{genre_folder}] {fname}")
+
+        bpm = detect_bpm(wav_path, genre_folder)
+        print(f"    BPM: {bpm}")
+
+        if not camelot_key:
+            camelot_key = detect_camelot_key(wav_path)
+            print(f"    Camelot key (detected): {camelot_key}")
+        else:
+            print(f"    Camelot key (from session.json): {camelot_key}")
+
+        updated[rel_path] = {
+            "id": _make_track_id(genre_folder, base_name, is_variant),
+            "display_name": base_name,
+            "file": rel_path,
+            "genre_folder": genre_folder,
+            "genre": genre,
+            "camelot_key": camelot_key,
+            "bpm": bpm,
+            "variant_of": base_name if is_variant else None,
+        }
+        new_count += 1
+
+    os.makedirs(TRACKS_BASE_DIR, exist_ok=True)
+    with open(CATALOG_PATH, "w") as f:
+        json.dump({"tracks": list(updated.values())}, f, indent=2, ensure_ascii=False)
+    print(f"\nCatalog written: {len(updated)} total entries ({new_count} new) → {CATALOG_PATH}")
+
+
+# === Smart session generation ===
+
+def load_catalog(genre):
+    """Load tracks.json and return entries matching genre_folder (case-insensitive)."""
+    if not os.path.exists(CATALOG_PATH):
+        print(f"Error: catalog not found at {CATALOG_PATH}. Run --build-catalog first.")
+        sys.exit(1)
+    with open(CATALOG_PATH) as f:
+        data = json.load(f)
+    genre_lower = genre.lower()
+    tracks = [t for t in data["tracks"] if t["genre_folder"].lower() == genre_lower]
+    if not tracks:
+        available = sorted({t["genre_folder"] for t in data["tracks"]})
+        print(f"Error: no tracks found for genre '{genre}'.")
+        print(f"Available genres: {', '.join(available)}")
+        sys.exit(1)
+    return tracks
+
+
+def bpm_cluster(tracks):
+    """Group tracks into ±10 BPM clusters and return the largest cluster."""
+    if not tracks:
+        return []
+    sorted_tracks = sorted(tracks, key=lambda t: t.get("bpm") or 0)
+    clusters = []
+    for track in sorted_tracks:
+        bpm = track.get("bpm") or 0
+        placed = False
+        for cluster in clusters:
+            median = sum(t.get("bpm") or 0 for t in cluster) / len(cluster)
+            if abs(bpm - median) <= 10:
+                cluster.append(track)
+                placed = True
+                break
+        if not placed:
+            clusters.append([track])
+    best = max(clusters, key=len)
+    bpms = [t.get("bpm") or 0 for t in best]
+    print(f"  BPM cluster: {len(best)} tracks, range {min(bpms):.0f}–{max(bpms):.0f} BPM")
+    return best
+
+
+def camelot_neighbors(key):
+    """Return the set of Camelot-compatible keys for a given Camelot key string."""
+    if not key or len(key) < 2:
+        return set()
+    try:
+        num = int(key[:-1])
+        letter = key[-1].upper()
+    except (ValueError, IndexError):
+        return set()
+    opposite = "B" if letter == "A" else "A"
+    return {
+        key,
+        f"{(num % 12) + 1}{letter}",
+        f"{((num - 2) % 12) + 1}{letter}",
+        f"{num}{opposite}",
+    }
+
+
+def harmonic_sort(tracks):
+    """Order tracks using Camelot harmonic walk with fallback to any remaining track."""
+    if not tracks:
+        return []
+    pool = list(tracks)
+    current = random.choice(pool)
+    pool.remove(current)
+    ordered = [current]
+    while pool:
+        neighbors = camelot_neighbors(current.get("camelot_key"))
+        candidates = [t for t in pool if t.get("camelot_key") in neighbors]
+        if candidates:
+            next_track = random.choice(candidates)
+        else:
+            print(f"  [Harmonic fallback] No neighbor for key {current.get('camelot_key')} "
+                  f"({current['display_name']}) — picking any remaining track")
+            next_track = random.choice(pool)
+        pool.remove(next_track)
+        ordered.append(next_track)
+        current = next_track
+    return ordered
+
+
+def fill_duration(ordered_tracks, duration_minutes):
+    """Accumulate tracks to meet or exceed duration_minutes (soft target).
+
+    Deduplicates display_name on first pass. Cycles with warning if pool is exhausted.
+    """
+    target_sec = duration_minutes * 60
+    playlist = []
+    total_sec = 0.0
+    seen_names = set()
+
+    # First pass: one entry per display_name
+    first_pass = []
+    for track in ordered_tracks:
+        if track["display_name"] not in seen_names:
+            first_pass.append(track)
+            seen_names.add(track["display_name"])
+
+    pool = list(first_pass)
+    cycling = False
+    while total_sec < target_sec:
+        if not pool:
+            if not cycling:
+                print(f"  [Pool exhausted] Cycling {len(first_pass)} tracks to meet duration.")
+                cycling = True
+            pool = list(first_pass)
+
+        track = pool.pop(0)
+        abs_file = os.path.join(_SCRIPT_DIR, track["file"]) if not os.path.isabs(track["file"]) else track["file"]
+        dur = _wav_duration_sec(abs_file)
+        if dur == 0:
+            try:
+                seg = AudioSegment.from_file(abs_file)
+                dur = len(seg) / 1000.0
+            except Exception:
+                dur = 0.0
+        playlist.append(track)
+        total_sec += dur
+
+    print(f"  Selected {len(playlist)} tracks, ~{total_sec / 60:.1f} min")
+    return playlist
+
+
+def generate_session(name, genre, duration_minutes):
+    """Select tracks for a session and return (session_config, track_entries).
+
+    session_config: matches existing session.json format (name, theme, playlist)
+    track_entries:  list of {"path", "display_name", "camelot_key", "genre"}
+    """
+    print(f"=== Generating Session: {name} ===")
+    print(f"Genre: {genre}  |  Duration: {duration_minutes} min\n")
+
+    catalog_tracks = load_catalog(genre)
+    print(f"Found {len(catalog_tracks)} tracks in catalog for '{genre}'")
+
+    cluster = bpm_cluster(catalog_tracks)
+    ordered = harmonic_sort(cluster)
+    playlist = fill_duration(ordered, duration_minutes)
+
+    genre_theme = dict(GENRE_THEMES.get(genre.lower(), {}))
+    session_config = {
+        "name": name,
+        "theme": genre_theme,
+        "playlist": [
+            {
+                "display_name": t["display_name"],
+                "file": t["file"],
+                "camelot_key": t.get("camelot_key"),
+                "genre": t.get("genre"),
+            }
+            for t in playlist
+        ],
+    }
+
+    track_entries = []
+    for t in playlist:
+        abs_file = os.path.join(_SCRIPT_DIR, t["file"]) if not os.path.isabs(t["file"]) else t["file"]
+        track_entries.append({
+            "path": abs_file,
+            "display_name": t["display_name"],
+            "camelot_key": t.get("camelot_key"),
+            "genre": t.get("genre"),
+        })
+
+    print(f"\nPlaylist ({len(playlist)} tracks):")
+    for i, t in enumerate(playlist, 1):
+        key = f" [{t.get('camelot_key')}]" if t.get("camelot_key") else ""
+        print(f"  {i:2d}. {t['display_name']}{key}  ({t.get('bpm', '?')} BPM)")
+
+    return session_config, track_entries
 
 
 # === Track analysis ===
@@ -571,6 +901,177 @@ def export_mix(mix, output_path, audio_format="wav"):
     mix.export(output_path, **export_kwargs)
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Done! {size_mb:.1f} MB")
+
+
+# === YouTube metadata generation ===
+
+_GENRE_HASHTAGS = {
+    "lofi - ambient": (
+        "#lofi #lofimix #ambient #studymusic #focusmusic #chillbeats #codingmusic "
+        "#backgroundmusic #deepsession #lofichill #relaxingmusic #lofihiphop "
+        "#concentrationmusic #ambientmusic #studyplaylist #workmix #quietmusic "
+        "#lofistudy #lofiaesthetic #chillmusic #studybeats #softmusic #deepfocus "
+        "#latenight #rainymusic #workmusic #2hourmix #cozymix #readingmusic #lofirainy"
+    ),
+    "deep house": (
+        "#deephouse #deephousemix #housemusic #electronicmusic #deepsession "
+        "#chillhouse #undergroundhouse #deepvibes #housemix #clubmusic "
+        "#electronicmix #nightmusic #deepgrooves #houseset #djset #deepelectronic"
+    ),
+    "techno": (
+        "#techno #technomix #electronicmusic #deepsession #undergroundtechno "
+        "#technoset #darkelectronic #technomusic #industrialtechno #djtechno "
+        "#berlintech #hardtechno #technovibes #electronicset #technodj"
+    ),
+    "cyberpunk": (
+        "#cyberpunk #synthwave #darkelectronic #deepsession #cyberpunkmusic "
+        "#futurebeats #synthpop #electronicmusic #darksynth #cyberbeats "
+        "#retrofuture #neonmusic #industrialelectronic #cyberpunkvibes"
+    ),
+}
+
+_GENRE_TAGS = {
+    "lofi - ambient": (
+        "lofi, lofi mix, ambient, study music, coding music, focus music, relaxing music, "
+        "lofi hip hop, chill beats, background music, deep session, lofi chill, quiet music, "
+        "lofi aesthetic, study beats, work music, chill music, lofi study, ambient music, "
+        "continuous mix, 2 hour mix, lofi set, lofi beats, soft music, late night study, "
+        "rainy day music, coding playlist, warm lofi, concentration music, cozy music, reading music"
+    ),
+    "deep house": (
+        "deep house, deep house mix, house music, electronic music, deep session, chill house, "
+        "underground house, deep vibes, house mix, club music, electronic mix, night music, "
+        "deep grooves, house set, dj set, deep electronic, continuous mix"
+    ),
+    "techno": (
+        "techno, techno mix, electronic music, deep session, underground techno, techno set, "
+        "dark electronic, techno music, industrial techno, dj techno, berlin techno, "
+        "hard techno, techno vibes, electronic set, continuous mix"
+    ),
+    "cyberpunk": (
+        "cyberpunk, synthwave, dark electronic, deep session, cyberpunk music, future beats, "
+        "synth pop, electronic music, dark synth, cyber beats, retro future, neon music, "
+        "industrial electronic, cyberpunk vibes, continuous mix"
+    ),
+}
+
+_GENRE_DESCRIPTION_INTRO = {
+    "lofi - ambient": "A continuous mix of handcrafted LoFi and ambient beats — harmonically sequenced and crossfaded into one unbroken flow. For deep focus, slow mornings, late nights, and anyone who needs the world to soften for a while.",
+    "deep house": "A continuous deep house journey — harmonically sequenced and mixed into one unbroken flow. Built for long nights, focused work, and the hours in between.",
+    "techno": "A continuous techno set — dark, driving, and harmonically sequenced into one relentless flow. Built for focus, movement, and the spaces where thought becomes rhythm.",
+    "cyberpunk": "A continuous cyberpunk electronic mix — neon-lit, dystopically calm, and harmonically sequenced into one unbroken flow. For late nights, code sessions, and cities that never sleep.",
+}
+
+
+def _format_timestamp(total_seconds):
+    total_seconds = int(total_seconds)
+    h = total_seconds // 3600
+    m = (total_seconds % 3600) // 60
+    s = total_seconds % 60
+    if h > 0:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
+
+
+def generate_youtube_md(session_name, genre, transitions, output_dir, track_entries=None):
+    """Write output/<session-name>/youtube.md with title, description, tracklist, tags."""
+    genre_key = genre.lower()
+    track_count = len(transitions)
+    total_sec = transitions[-1]["start_sec"] if transitions else 0
+
+    # Duration label (use last track start as approximate total)
+    duration_h = int(total_sec // 3600)
+    duration_m = int((total_sec % 3600) // 60)
+    if duration_h > 0:
+        duration_label = f"{duration_h} Hour{'s' if duration_h > 1 else ''} {duration_m} Min" if duration_m else f"{duration_h} Hour{'s' if duration_h > 1 else ''}"
+    else:
+        duration_label = f"{duration_m} Min"
+
+    # Camelot progression — ordered by transitions, keyed from track_entries lookup
+    name_to_camelot = {}
+    if track_entries:
+        for e in track_entries:
+            if e.get("camelot_key"):
+                name_to_camelot[e["display_name"]] = e["camelot_key"]
+    camelot_keys = [name_to_camelot[t["name"]] for t in transitions if t["name"] in name_to_camelot]
+    camelot_progression = " → ".join(dict.fromkeys(camelot_keys))  # deduplicated, order-preserving
+
+    # Title
+    display_name = session_name.replace("-", " ").title()
+    genre_display = {
+        "lofi - ambient": "LoFi & Ambient",
+        "deep house": "Deep House",
+        "techno": "Techno",
+        "cyberpunk": "Cyberpunk Electronic",
+    }.get(genre_key, genre.title())
+    title = f"Deep Session // {display_name} — {duration_label} of {genre_display}"
+
+    # Tracklist with timestamps
+    tracklist_lines = []
+    for t in transitions:
+        ts = _format_timestamp(t["start_sec"])
+        tracklist_lines.append(f"{ts} {t['name']}")
+    tracklist = "\n".join(tracklist_lines)
+
+    # Hashtags and tags
+    hashtags = _GENRE_HASHTAGS.get(genre_key, "")
+    tags = _GENRE_TAGS.get(genre_key, "")
+    intro = _GENRE_DESCRIPTION_INTRO.get(genre_key, "")
+
+    description = f"""{intro}
+
+{track_count} tracks. Harmonically mixed. One continuous flow.
+
+--
+
+TRACKLIST
+
+{tracklist}
+
+--
+
+TECHNICAL NOTES
+- Lossless WAV pipeline throughout mixing
+- Key-preserving time-stretch (Rubber Band) for BPM matching — no pitch damage
+- Automated BPM matching with meet-in-middle crossfading
+- Beat-reactive spectral waveform visualizer
+- AI-generated video backgrounds with transition crossfades
+- Full Camelot harmonic progression: {camelot_progression}
+- Mixed and rendered with Deep Session Generator (Python)
+
+--
+
+{hashtags}"""
+
+    content = f"""# YouTube Upload — {display_name}
+
+## Title
+
+{title}
+
+## Description
+
+```
+{description}
+```
+
+## Tags
+
+```
+{tags}
+```
+
+## Thumbnail Text Ideas
+
+- {display_name.upper()} // {track_count} TRACKS
+- {duration_label.upper()} / DEEP FOCUS
+- {genre_display.upper()}
+"""
+
+    out_path = os.path.join(output_dir, "youtube.md")
+    with open(out_path, "w") as f:
+        f.write(content)
+    print(f"YouTube metadata saved to {out_path}")
 
 
 # === YouTube Short generation ===
@@ -1922,8 +2423,14 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
 def _parse_args():
     import argparse
     parser = argparse.ArgumentParser(description="Deep Session Generator")
-    parser.add_argument("session", nargs="?", default=None,
-                        help="Session number or path")
+    parser.add_argument("--build-catalog", action="store_true",
+                        help="Scan all genre folders and build/update tracks/tracks.json")
+    parser.add_argument("--name", default=None,
+                        help="Session name (used as output folder name)")
+    parser.add_argument("--genre", default=None,
+                        help="Genre folder to draw tracks from (e.g. 'lofi - ambient')")
+    parser.add_argument("--duration", type=int, default=None,
+                        help="Target session duration in minutes")
     parser.add_argument("--short", action="store_true",
                         help="Generate a 20-second YouTube Short instead of full video")
     return parser.parse_args()
@@ -1934,24 +2441,42 @@ def main():
 
     args = _parse_args()
 
+    # --build-catalog: scan all genre folders and exit
+    if args.build_catalog:
+        build_catalog()
+        return
+
+    # Validate required args for session generation
+    missing = [f for f, v in [("--name", args.name), ("--genre", args.genre), ("--duration", args.duration)] if not v]
+    if missing:
+        print(f"Error: {', '.join(missing)} required to generate a session.")
+        print("Usage: python main.py --name <name> --genre <genre> --duration <minutes>")
+        print("       python main.py --build-catalog")
+        sys.exit(1)
+
     load_dotenv()
     if not os.environ.get("OPENAI_API_KEY"):
         print("Warning: OPENAI_API_KEY not set. Artwork generation will be skipped.\n")
 
-    # Session resolution
-    session_dir, session_config = resolve_session(args.session)
-    session_name = session_config["name"] if session_config else os.path.basename(session_dir)
-    print(f"Session: {session_name}")
-    print(f"Tracks:  {session_dir}\n")
+    # Slugify name for use as folder name
+    session_name = _slugify(args.name)
 
-    # Per-session paths
-    output_dir, artwork_dir, audio_path, video_path = get_output_paths(session_dir)
+    # Generate session: select tracks from catalog
+    session_config, track_entries = generate_session(args.name, args.genre, args.duration)
 
-    # Load and analyze tracks
-    track_entries = load_session_tracks(session_dir, session_config)
-    use_playlist_order = session_config is not None
-    target_duration = None if use_playlist_order else TARGET_DURATION_SEC
-    tracks = analyze_tracks(track_entries, use_playlist_order=use_playlist_order)
+    # Per-session output paths
+    output_dir, artwork_dir, audio_path, video_path = get_output_paths(session_name)
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(artwork_dir, exist_ok=True)
+
+    # Save session.json to output folder for reproducibility
+    session_json_path = os.path.join(output_dir, "session.json")
+    with open(session_json_path, "w") as f:
+        json.dump(session_config, f, indent=2, ensure_ascii=False)
+    print(f"\nSession saved to {session_json_path}")
+
+    # Analyze tracks (BPM + beats for mix engine)
+    tracks = analyze_tracks(track_entries, use_playlist_order=True)
 
     short_path = os.path.join(output_dir, "short.mp4")
 
@@ -1959,22 +2484,19 @@ def main():
         # --- YouTube Short only ---
         if not os.path.exists(audio_path):
             print(f"Error: Mix audio not found at {audio_path}")
-            print("Run the full pipeline first: python main.py <session_number>")
+            print("Run the full pipeline first (without --short).")
             sys.exit(1)
-
-        _mix, transitions = build_mix(tracks, target_duration_sec=target_duration)
-        generate_short(session_dir, session_config, transitions, audio_path,
-                       artwork_dir, short_path)
+        _mix, transitions = build_mix(tracks, target_duration_sec=None)
+        generate_short(None, session_config, transitions, audio_path, artwork_dir, short_path)
+        generate_youtube_md(session_name, args.genre, transitions, output_dir, track_entries)
     else:
         # --- Full pipeline (includes short) ---
-        mix, transitions = build_mix(tracks, target_duration_sec=target_duration)
+        mix, transitions = build_mix(tracks, target_duration_sec=None)
         export_mix(mix, audio_path)
-
         generate_video(audio_path, transitions, video_path, artwork_dir=artwork_dir,
-                       session_config=session_config, session_dir=session_dir)
-
-        generate_short(session_dir, session_config, transitions, audio_path,
-                       artwork_dir, short_path)
+                       session_config=session_config, session_dir=None)
+        generate_short(None, session_config, transitions, audio_path, artwork_dir, short_path)
+        generate_youtube_md(session_name, args.genre, transitions, output_dir, track_entries)
 
 
 if __name__ == "__main__":

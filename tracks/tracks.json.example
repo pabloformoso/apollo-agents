@@ -1,0 +1,54 @@
+{
+  "tracks": [
+    {
+      "id": "lofi-ambient--warm-lamp-glow",
+      "display_name": "Warm Lamp Glow",
+      "file": "tracks/lofi - ambient/Warm Lamp Glow.wav",
+      "genre_folder": "lofi - ambient",
+      "genre": "Ambient Lo-Fi",
+      "camelot_key": "2A",
+      "bpm": 87.4,
+      "variant_of": null
+    },
+    {
+      "id": "lofi-ambient--warm-lamp-glow-v2",
+      "display_name": "Warm Lamp Glow",
+      "file": "tracks/lofi - ambient/Warm Lamp Glow (1).wav",
+      "genre_folder": "lofi - ambient",
+      "genre": "Ambient Lo-Fi",
+      "camelot_key": "2A",
+      "bpm": 87.4,
+      "variant_of": "Warm Lamp Glow"
+    },
+    {
+      "id": "deep-house--midnight-boulevard",
+      "display_name": "Midnight Boulevard",
+      "file": "tracks/deep house/Midnight Boulevard.wav",
+      "genre_folder": "deep house",
+      "genre": "Deep House",
+      "camelot_key": "8A",
+      "bpm": 122.0,
+      "variant_of": null
+    },
+    {
+      "id": "techno--phase-shift",
+      "display_name": "Phase Shift",
+      "file": "tracks/techno/Phase Shift.wav",
+      "genre_folder": "techno",
+      "genre": "Techno",
+      "camelot_key": "5A",
+      "bpm": 138.0,
+      "variant_of": null
+    },
+    {
+      "id": "cyberpunk--neon-rain",
+      "display_name": "Neon Rain",
+      "file": "tracks/cyberpunk/Neon Rain.wav",
+      "genre_folder": "cyberpunk",
+      "genre": "Cyberpunk",
+      "camelot_key": "4A",
+      "bpm": 130.0,
+      "variant_of": null
+    }
+  ]
+}
