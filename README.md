@@ -1,5 +1,9 @@
 # ApolloAgents
 
+[![CI](https://github.com/pabloformoso/apollo-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/pabloformoso/apollo-agents/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 ![ApolloAgents Logo](apollo_agents_logo.png)
 
 > An AI-powered DJ set builder — from track catalog to rendered YouTube video, guided by a team of specialized agents.

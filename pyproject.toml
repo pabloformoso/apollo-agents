@@ -17,3 +17,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "soundfile>=0.13.1",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
