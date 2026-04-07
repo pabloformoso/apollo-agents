@@ -1,4 +1,6 @@
-# ApolloAgents 🎵
+# ApolloAgents
+
+![ApolloAgents Logo](apollo_agents_logo.png)
 
 > An AI-powered DJ set builder — from track catalog to rendered YouTube video, guided by a team of specialized agents.
 
