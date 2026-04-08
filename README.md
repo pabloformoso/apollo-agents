@@ -24,6 +24,10 @@ Every session in [this YouTube channel](https://youtu.be/4KKj88UmJ2o?si=7OegVHVd
 
 ## Architecture
 
+<img src="architecture_infographic.png" width="540" alt="ApolloAgents: The Multi-Agent DJ Architecture" />
+
+
+
 ```mermaid
 %%{init: {'theme': 'base', 'themeVariables': {
   'background': '#0d0d1a',
