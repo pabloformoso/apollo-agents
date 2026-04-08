@@ -589,7 +589,13 @@ def build_catalog():
     for genre_folder, wav_path in wav_files:
         rel_path = os.path.relpath(wav_path).replace("\\", "/")
         if rel_path in existing:
-            continue  # already cataloged, skip
+            entry = existing[rel_path]
+            if entry.get("duration_sec") is not None:
+                continue  # fully cataloged, skip
+            # Existing entry missing duration_sec — patch it without re-analysing audio
+            entry["duration_sec"] = round(_wav_duration_sec(wav_path), 1) or None
+            updated[rel_path] = entry
+            continue
 
         if genre_folder not in folder_lookups:
             folder_lookups[genre_folder] = load_existing_session_jsons(genre_folder)

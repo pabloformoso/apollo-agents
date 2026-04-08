@@ -521,6 +521,8 @@ def catalog_status(context_variables: dict) -> str:
             missing.append("genre")
         if not e.get("genre_folder"):
             missing.append("genre_folder")
+        if e.get("duration_sec") is None:
+            missing.append("duration_sec")
         return missing
 
     incomplete_entries = [
