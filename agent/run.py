@@ -124,8 +124,11 @@ Workflow:
    PROCEED
 
 Rules:
-- Only use: show_playlist, swap_track, move_track.
-- Never call build_session, get_catalog, or propose_playlist.
+- Available tools: show_playlist, get_catalog, analyze_transition, swap_track, move_track.
+- When the user asks to find or suggest a replacement track: call get_catalog for the
+  session genre, then use analyze_transition to identify the best BPM/key match for the
+  surrounding positions, then call swap_track with your chosen replacement.
+- Never call build_session or propose_playlist.
 - Never make unsolicited changes. Wait for explicit user instruction.
 - Keep responses short. You are a checkpoint, not a full editor.
 """
@@ -456,7 +459,7 @@ def _parse_confirmed_block(text: str) -> dict | None:
 
 def _run_checkpoint(context_variables: dict, critic_context: str | None = None) -> None:
     """Interactive checkpoint mini-REPL. Exits on proceed signal or PROCEED sentinel."""
-    _CHECKPOINT_TOOLS = [show_playlist, swap_track, move_track]
+    _CHECKPOINT_TOOLS = [show_playlist, get_catalog, analyze_transition, swap_track, move_track]
 
     intro = "A playlist is ready for your review."
     if critic_context:
