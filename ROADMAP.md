@@ -1,6 +1,6 @@
 # ApolloAgents — Roadmap
 
-This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.0.1 shipped April 2026. Everything below is what comes next.
+This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.1 and v1.1.1 shipped April 2026. Everything below is what comes next.
 
 Contributions welcome — new tools follow the `fn(params, context_variables: dict) -> str` convention and new agents follow the bounded-role pattern (system prompt + curated tool list + structured output). See [CLAUDE.md](CLAUDE.md) for developer setup.
 
@@ -21,7 +21,20 @@ The baseline — everything that ships today.
 
 ---
 
-## v1.0.1 — Released ✓
+## v1.1.1 — Released ✓
+
+Bug fixes found during v1.1 testing.
+
+- **BPM detection fixed** — `detect_bpm()` now passes `start_bpm` biased to the genre midpoint and tries halving/doubling before clamping; fixes all lofi tracks being detected at 110 BPM. New `--redetect-bpm` CLI flag (and `redetect_bpm` agent tool) to re-process existing catalog entries.
+- **Duration backfill** — `build_catalog()` now patches `duration_sec` for existing entries missing it, so upgrading from v1.1 doesn't require a manual `--fix-incomplete` run.
+- **Catalog → session handoff** — After catalog sync, the agent now routes back to the DJ set builder instead of exiting. The user's original session request is preserved through the freshness-check path.
+- **Genre Guard UX** — Extracts genre from the user's initial message before calling `list_genres` (e.g. "2h lofi set" → `lofi - ambient` without an extra round-trip).
+- **Checkpoint catalog access** — Checkpoint agent now has `get_catalog` and `analyze_transition` tools, so "find a replacement" requests work without asking the user for a track ID.
+- **Playlist display** — Removed 300-char truncation on tool result output; full playlist now prints to terminal.
+
+---
+
+## v1.1 — Released ✓
 
 Small changes, meaningful impact.
 
