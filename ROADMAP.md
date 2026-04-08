@@ -1,6 +1,6 @@
 # ApolloAgents — Roadmap
 
-This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; everything below is what comes next.
+This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.1 shipped April 2026. Everything below is what comes next.
 
 Contributions welcome — new tools follow the `fn(params, context_variables: dict) -> str` convention and new agents follow the bounded-role pattern (system prompt + curated tool list + structured output). See [CLAUDE.md](CLAUDE.md) for developer setup.
 
@@ -21,16 +21,15 @@ The baseline — everything that ships today.
 
 ---
 
-## v1.1 — Polish & Accuracy
+## v1.1 — Released ✓
 
 Small changes, meaningful impact.
 
-| Item | What changes | Why |
-|---|---|---|
-| **Accurate track durations** | Add `duration_sec` to `tracks.json` at catalog build time via `librosa.get_duration()`. Use real durations in `propose_playlist()` instead of hardcoded 5 min/track estimate | Playlists consistently overshoot or undershoot target duration |
-| **Pre-flight transition warnings** | `swap_track()` and `move_track()` emit a harmonic/BPM warning when a swap creates a clash (>2 Camelot steps) or extreme stretch (>1.5× BPM ratio), before confirming | Users can build broken sets without realising until Themis flags it |
-| **Catalog onboarding UX** | On startup, Janus asks "Do you have new tracks to add first?" if catalog is empty or stale — removes need to know specific trigger keywords | First-time users hit a dead end if they don't know to say "add tracks" |
-| **Full theme passthrough** | Allow `session.json` to override all visual properties; eliminate remaining hardcoded colors in `main.py` video generation | Power users cannot customise waveform/particle colors without editing code |
+- **Accurate track durations** — `duration_sec` stored in `tracks.json` at catalog build time (WAV header read, no decode). `propose_playlist()` uses real durations instead of a hardcoded 5 min/track estimate; `build_catalog()` backfills existing entries on next run.
+- **Pre-flight transition warnings** — `swap_track()` and `move_track()` emit `⚠` warnings inline when a change creates a harmonic clash (>2 Camelot steps) or extreme BPM stretch (>1.5× ratio), before confirming.
+- **Catalog onboarding UX** — On startup, if catalog is empty or has unsynced WAV files, the agent proactively asks "Sync catalog before building a set?". After catalog sync, hands off automatically to the DJ set builder.
+- **Full theme passthrough** — `_get_session_theme()` merges DEFAULT_THEME → GENRE_THEMES[genre] → session overrides, so `session.json` partial overrides work without losing genre colors. `genre` stored in `session_config` to enable this. Removed dead-code constant fallbacks in video gen functions.
+- **Genre Guard UX** — Extracts genre from the user's initial message (e.g. "2h lofi set" → `lofi - ambient`) before falling back to `list_genres`.
 
 ---
 
