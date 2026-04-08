@@ -116,8 +116,8 @@ flowchart TD
 **Requirements:** Python 3.12+, `uv`, `ffmpeg`
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/apolloagents.git
-cd apolloagents
+git clone https://github.com/YOUR_USERNAME/apollo-agents.git
+cd apollo-agents
 
 # Install dependencies
 uv sync
