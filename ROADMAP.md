@@ -1,6 +1,6 @@
 # ApolloAgents — Roadmap
 
-This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.1 and v1.1.1 shipped April 2026. Everything below is what comes next.
+This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.1, v1.1.1, and v1.1.2 shipped April 2026. Everything below is what comes next.
 
 Contributions welcome — new tools follow the `fn(params, context_variables: dict) -> str` convention and new agents follow the bounded-role pattern (system prompt + curated tool list + structured output). See [CLAUDE.md](CLAUDE.md) for developer setup.
 
@@ -18,6 +18,12 @@ The baseline — everything that ships today.
 - **Video output**: 1080p spectral waveform, beat-reactive particles, DALL-E 3 artwork, Press Start 2P retro titles; 20s YouTube Short
 - **Catalog manager**: `catalog_status`, `rebuild_catalog`, `fix_incomplete` — keeps `tracks.json` in sync
 - **CI**: 45 unit tests (Camelot, parsers, memory), GitHub Actions on Python 3.12 & 3.13
+
+---
+
+## v1.1.2 — Released ✓
+
+- **Checkpoint catalog access** — `get_catalog` now accepts `"current"` to resolve the session genre from context; Checkpoint intro passes the genre explicitly; system prompt enforces the call-get_catalog-first workflow to prevent hallucinated track IDs.
 
 ---
 
