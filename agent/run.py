@@ -32,6 +32,7 @@ from agent.tools import (
     TOOLS,
     list_genres,
     get_catalog,
+    redetect_bpm,
     propose_playlist,
     show_playlist,
     analyze_transition,
@@ -493,7 +494,7 @@ def _run_checkpoint(context_variables: dict, critic_context: str | None = None) 
 # ---------------------------------------------------------------------------
 
 _EDITOR_TOOLS = [show_playlist, analyze_transition, swap_track, move_track, build_session]
-_CATALOG_TOOLS = [catalog_status, rebuild_catalog, fix_incomplete]
+_CATALOG_TOOLS = [catalog_status, rebuild_catalog, fix_incomplete, redetect_bpm]
 
 # Keywords that signal the user wants catalog management
 _CATALOG_KEYWORDS = {

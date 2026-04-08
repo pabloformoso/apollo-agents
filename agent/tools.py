@@ -590,6 +590,24 @@ def fix_incomplete(context_variables: dict) -> str:
     return f"Fix failed (exit code {result.returncode}). Check output above."
 
 
+def redetect_bpm(genre: str, context_variables: dict) -> str:
+    """Re-detect BPM for all tracks in a genre using the current detection algorithm.
+
+    Use when BPM values look wrong (e.g. all showing 110 due to double-time detection).
+    Rewrites bpm fields in tracks.json for the specified genre.
+
+    Args:
+        genre: Genre folder name to re-process (e.g. 'lofi - ambient')
+    """
+    cmd = [sys.executable, str(_MAIN_PY), "--redetect-bpm", "--genre", genre]
+    print(f"\n[Catalog Manager] Running: {' '.join(cmd)}\n")
+    result = subprocess.run(cmd, cwd=str(_PROJECT_DIR), capture_output=False)
+
+    if result.returncode == 0:
+        return f"BPM re-detected for all '{genre}' tracks. Check output above for changes."
+    return f"Re-detection failed (exit code {result.returncode}). Check output above."
+
+
 def rebuild_catalog(context_variables: dict) -> str:
     """Scan all genre folders and add any new WAV files to tracks.json.
 
@@ -855,6 +873,7 @@ TOOLS = [
     catalog_status,
     rebuild_catalog,
     fix_incomplete,
+    redetect_bpm,
     validate_audio,
     read_memory,
     write_session_record,

@@ -454,11 +454,28 @@ def load_existing_session_jsons(genre_folder):
 
 
 def detect_bpm(filepath, genre_folder=""):
-    """Detect BPM via librosa, clamped to the genre-appropriate range."""
+    """Detect BPM via librosa, clamped to the genre-appropriate range.
+
+    Uses a start_bpm hint biased toward the genre midpoint to reduce
+    librosa's tendency to lock onto double/half-time tempos. If the result
+    is still outside range, tries halving or doubling before hard-clamping.
+    """
     y, sr = librosa.load(filepath, sr=None, mono=True)
-    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
-    bpm = float(np.squeeze(tempo))
     lo, hi = BPM_GENRE_RANGES.get(genre_folder.lower(), (60, 200))
+    start_bpm = (lo + hi) / 2  # bias toward genre midpoint
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr, start_bpm=start_bpm)
+    bpm = float(np.squeeze(tempo))
+
+    # Librosa often locks onto double or half the true tempo — correct before clamping
+    if bpm > hi:
+        halved = bpm / 2
+        if lo <= halved <= hi:
+            bpm = halved
+    elif bpm < lo:
+        doubled = bpm * 2
+        if lo <= doubled <= hi:
+            bpm = doubled
+
     if bpm < lo or bpm > hi:
         print(f"  [BPM clamp] {os.path.basename(filepath)}: {bpm:.1f} → [{lo}, {hi}]")
         bpm = float(max(lo, min(hi, bpm)))
@@ -485,6 +502,46 @@ def detect_camelot_key(filepath):
             best_score = score_minor
             best_key = _CAMELOT_MINOR[pc]
     return best_key
+
+
+def redetect_bpm_catalog(genre_filter=None):
+    """Re-detect BPM for all (or one genre's) catalog entries using the current algorithm.
+
+    Use this after updating detect_bpm() to fix previously wrong values.
+    genre_filter: if given, only re-process entries in that genre_folder.
+    """
+    if not os.path.exists(CATALOG_PATH):
+        print("Error: catalog not found. Run --build-catalog first.")
+        sys.exit(1)
+
+    with open(CATALOG_PATH) as f:
+        data = json.load(f)
+
+    tracks = data["tracks"]
+    targets = [
+        t for t in tracks
+        if not genre_filter or t.get("genre_folder", "").lower() == genre_filter.lower()
+    ]
+
+    print(f"=== Re-detecting BPM for {len(targets)} entries"
+          + (f" in '{genre_filter}'" if genre_filter else "") + " ===\n")
+    updated = 0
+
+    for entry in targets:
+        abs_file = os.path.join(_SCRIPT_DIR, entry["file"]) if not os.path.isabs(entry["file"]) else entry["file"]
+        if not os.path.exists(abs_file):
+            print(f"  [SKIP] {entry.get('display_name','?')} — file not found")
+            continue
+        old_bpm = entry.get("bpm")
+        new_bpm = detect_bpm(abs_file, entry.get("genre_folder", ""))
+        entry["bpm"] = new_bpm
+        flag = "  ← changed" if old_bpm != new_bpm else ""
+        print(f"  {entry.get('display_name','?'):<35}  {old_bpm} → {new_bpm}{flag}")
+        updated += 1
+
+    with open(CATALOG_PATH, "w") as f:
+        json.dump({"tracks": tracks}, f, indent=2, ensure_ascii=False)
+    print(f"\nUpdated {updated} entries → {CATALOG_PATH}")
 
 
 def fix_incomplete_catalog():
@@ -2646,6 +2703,8 @@ def _parse_args():
                         help="Scan all genre folders and build/update tracks/tracks.json")
     parser.add_argument("--fix-incomplete", action="store_true",
                         help="Re-analyse catalog entries with missing BPM or Camelot key")
+    parser.add_argument("--redetect-bpm", action="store_true",
+                        help="Re-detect BPM for all catalog entries (use after updating detection logic)")
     parser.add_argument("--name", default=None,
                         help="Session name (used as output folder name)")
     parser.add_argument("--genre", default=None,
@@ -2674,6 +2733,11 @@ def main():
     # --fix-incomplete: re-analyse entries with missing BPM or key and exit
     if args.fix_incomplete:
         fix_incomplete_catalog()
+        return
+
+    # --redetect-bpm: force BPM re-detection for all (or one genre's) entries and exit
+    if args.redetect_bpm:
+        redetect_bpm_catalog(genre_filter=args.genre)
         return
 
     # Validate required args for session generation
