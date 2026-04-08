@@ -1313,7 +1313,10 @@ TECHNICAL NOTES
 - Beat-reactive spectral waveform visualizer
 - AI-generated video backgrounds with transition crossfades
 - Full Camelot harmonic progression: {camelot_progression}
-- Mixed and rendered with Deep Session Generator (Python)
+
+Built with Apollo Agents — open-source multi-agent DJ mix pipeline.
+Harmonic sequencing, BPM matching, and video rendering, fully automated.
+→ https://github.com/pabloformoso/apollo-agents
 
 --
 
