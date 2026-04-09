@@ -68,6 +68,25 @@ def _camelot_step_distance(key_a: str, key_b: str) -> int:
     return 6  # unreachable on a 24-node wheel → treat as max clash
 
 
+_BPM_GENRE_RANGES = {
+    "lofi - ambient": (60, 110),
+    "techno": (120, 160),
+    "cyberpunk": (120, 160),
+    "deep house": (115, 135),
+}
+
+
+def _bpm_diff_bucket(diff: float) -> str:
+    diff = abs(diff)
+    if diff <= 5:
+        return "0-5"
+    if diff <= 15:
+        return "6-15"
+    if diff <= 30:
+        return "16-30"
+    return ">30"
+
+
 def _transition_warning(a: dict, b: dict) -> str:
     """Return a warning string if the transition between a and b is problematic, else ''."""
     warnings = []
@@ -799,6 +818,45 @@ def read_memory(genre: str, context_variables: dict) -> str:
             lines.append(f"  - \"{pattern}...\" ({count}×)")
         lines.append("")
 
+    # Transition ratings — aggregated by key_pair
+    tr_ratings: dict[str, list[int]] = {}
+    for s in recent:
+        for tr in s.get("transition_ratings", []):
+            kp = tr.get("key_pair", "")
+            r = tr.get("rating", 0)
+            if kp and 1 <= r <= 5:
+                tr_ratings.setdefault(kp, []).append(r)
+
+    proven_transitions = [(kp, sum(rs)/len(rs)) for kp, rs in tr_ratings.items() if sum(rs)/len(rs) >= 4.0 and len(rs) >= 2]
+    avoid_transitions = [(kp, sum(rs)/len(rs)) for kp, rs in tr_ratings.items() if sum(rs)/len(rs) < 3.0 and len(rs) >= 2]
+
+    if proven_transitions:
+        lines.append("Proven transition key pairs (mean rating ≥ 4):")
+        for kp, mean in sorted(proven_transitions, key=lambda x: -x[1])[:5]:
+            lines.append(f"  ✓ {kp} (avg {mean:.1f}/5, {len(tr_ratings[kp])} samples)")
+        lines.append("")
+
+    if avoid_transitions:
+        lines.append("Weak transition key pairs (mean rating < 3) — avoid if possible:")
+        for kp, mean in sorted(avoid_transitions, key=lambda x: x[1])[:5]:
+            lines.append(f"  ✗ {kp} (avg {mean:.1f}/5, {len(tr_ratings[kp])} samples)")
+        lines.append("")
+
+    # Structured problems — recurring key-pair clashes
+    clash_counts: dict[str, int] = {}
+    for s in recent:
+        for sp in s.get("structured_problems", []):
+            kp = sp.get("key_pair", "")
+            if kp:
+                clash_counts[kp] = clash_counts.get(kp, 0) + 1
+
+    recurring_clashes = [(kp, c) for kp, c in clash_counts.items() if c >= 2]
+    if recurring_clashes:
+        lines.append("Recurring harmonic clashes (key pairs flagged in 2+ sessions):")
+        for kp, count in sorted(recurring_clashes, key=lambda x: -x[1])[:5]:
+            lines.append(f"  ⚠ {kp} ({count} sessions)")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -815,6 +873,8 @@ def write_session_record(
     validator_issues_json: str,
     tracks_swapped_json: str,
     final_playlist_json: str,
+    transition_ratings_json: str,
+    structured_problems_json: str,
     context_variables: dict,
 ) -> str:
     """Append a completed session record to memory.json (capped at 50 sessions).
@@ -832,6 +892,8 @@ def write_session_record(
         validator_issues_json: JSON array string of validator issue strings
         tracks_swapped_json: JSON array string of display_names removed during editing
         final_playlist_json: JSON array string of final display_names in order
+        transition_ratings_json: JSON array of {from,to,key_pair,bpm_diff_bucket,rating} dicts
+        structured_problems_json: JSON array of {pos_from,pos_to,key_pair,bpm_diff,text} dicts
     """
     from datetime import datetime  # noqa: PLC0415
 
@@ -839,7 +901,9 @@ def write_session_record(
         with open(_MEMORY_PATH) as f:
             data = json.load(f)
     else:
-        data = {"schema_version": 1, "sessions": []}
+        data = {"schema_version": 2, "sessions": []}
+
+    data["schema_version"] = 2
 
     record = {
         "session_name": session_name,
@@ -855,6 +919,8 @@ def write_session_record(
         "validator_issues": json.loads(validator_issues_json or "[]"),
         "tracks_swapped": json.loads(tracks_swapped_json or "[]"),
         "final_playlist": json.loads(final_playlist_json or "[]"),
+        "transition_ratings": json.loads(transition_ratings_json or "[]"),
+        "structured_problems": json.loads(structured_problems_json or "[]"),
     }
 
     sessions = data.get("sessions", [])
@@ -871,12 +937,92 @@ def write_session_record(
     return f"Session '{session_name}' saved to memory ({len(sessions)} total records)."
 
 
+def get_energy_arc(context_variables: dict) -> str:
+    """Return a structured energy arc table for the current playlist with plateau/peak/release analysis.
+
+    No arguments needed — reads the current playlist from session context.
+    """
+    playlist = context_variables.get("playlist", [])
+    if not playlist:
+        return "No playlist in context yet. Call propose_playlist first."
+
+    genre = context_variables.get("genre", "")
+    lo, hi = _BPM_GENRE_RANGES.get(genre.lower(), (60, 200))
+
+    def _energy(track: dict) -> float:
+        bpm = track.get("bpm") or ((lo + hi) / 2)
+        key = track.get("camelot_key", "")
+        bpm_range = max(hi - lo, 1)
+        e = (float(bpm) - lo) / bpm_range * 10
+        if key and len(key) >= 2:
+            try:
+                num = int(key[:-1])
+                if 7 <= num <= 12:
+                    e = min(10.0, e + 1)
+            except ValueError:
+                pass
+        return round(max(0.0, min(10.0, e)), 1)
+
+    energies = [_energy(t) for t in playlist]
+    n = len(playlist)
+
+    lines = ["POS | TRACK                          | BPM   | KEY  | ENERGY"]
+    lines.append("─" * 62)
+    for i, (t, e) in enumerate(zip(playlist, energies)):
+        name = (t.get("display_name") or "?")[:30]
+        bpm = t.get("bpm", "?")
+        key = t.get("camelot_key", "?")
+        bar = "█" * int(e)
+        lines.append(f"{i+1:>3} | {name:<30} | {str(bpm):>5} | {key:<4} | {bar} {e}")
+
+    lines.append("")
+
+    issues = []
+
+    # Plateau: 3+ consecutive tracks within ±1 energy — report once per plateau
+    run_start = 0
+    for i in range(1, n + 1):
+        broke = i == n or abs(energies[i] - energies[i - 1]) > 1.0
+        if broke:
+            run_len = i - run_start
+            if run_len >= 3:
+                issues.append(
+                    f"Plateau at positions {run_start+1}–{i} "
+                    f"(energy {energies[run_start]}–{energies[i-1]})"
+                )
+            if i < n:
+                run_start = i
+
+    # Missing peak: no track energy >= 7
+    if all(e < 7.0 for e in energies):
+        issues.append("No peak: no track reaches energy ≥ 7 — set may feel flat")
+
+    # Missing release: final 20% should trend downward
+    tail_start = max(0, int(n * 0.8))
+    tail = energies[tail_start:]
+    if len(tail) >= 2 and tail[-1] >= tail[0]:
+        issues.append(
+            f"No wind-down: final {len(tail)} tracks don't drop in energy "
+            f"({tail[0]} → {tail[-1]})"
+        )
+
+    if issues:
+        lines.append("Arc issues detected:")
+        for issue in issues:
+            lines.append(f"  ⚠ {issue}")
+    else:
+        lines.append("Arc: peak and release present, no long plateaus — looks good.")
+
+    return "\n".join(lines)
+
+
 TOOLS = [
     list_genres,
     get_catalog,
     propose_playlist,
     show_playlist,
     analyze_transition,
+    get_energy_arc,
     swap_track,
     move_track,
     build_session,

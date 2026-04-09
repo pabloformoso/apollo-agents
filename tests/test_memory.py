@@ -110,7 +110,7 @@ class TestWriteSessionRecord:
                 tools.write_session_record(
                     "test-session", "techno", 60, "dark", 4, "great set",
                     "APPROVED", "[]", "PASS", "[]", "[]", '["Track A"]',
-                    {},
+                    "[]", "[]", {},
                 )
             assert mem_path.exists()
             data = json.loads(mem_path.read_text())
@@ -130,7 +130,7 @@ class TestWriteSessionRecord:
                 tools.write_session_record(
                     "new-session", "techno", 30, "mellow", 3, "",
                     "NEEDS_FIXES", '["key clash"]', "PASS", "[]", "[]", "[]",
-                    {},
+                    "[]", "[]", {},
                 )
             data = json.loads(tmp.read_text())
             assert len(data["sessions"]) == 2
@@ -152,7 +152,7 @@ class TestWriteSessionRecord:
                 tools.write_session_record(
                     "overflow-session", "techno", 60, "peak", 5, "",
                     "APPROVED", "[]", "PASS", "[]", "[]", "[]",
-                    {},
+                    "[]", "[]", {},
                 )
             data = json.loads(tmp.read_text())
             assert len(data["sessions"]) == 50
@@ -171,7 +171,7 @@ class TestWriteSessionRecord:
                     "NEEDS_FIXES", '["clash at pos 2"]',
                     "WARNING", '["spectral flatness"]',
                     '["Weak Track"]', '["Strong A", "Strong B"]',
-                    {},
+                    "[]", "[]", {},
                 )
             data = json.loads(mem_path.read_text())
             rec = data["sessions"][0]

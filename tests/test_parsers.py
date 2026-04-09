@@ -11,7 +11,7 @@ from agent.run import _parse_critic_response, _parse_validator_response, _parse_
 class TestParseCriticResponse:
     def test_approved_no_problems(self):
         text = "The playlist looks solid.\nVERDICT: APPROVED"
-        verdict, problems = _parse_critic_response(text)
+        verdict, problems, _ = _parse_critic_response(text)
         assert verdict == "APPROVED"
         assert problems == []
 
@@ -22,7 +22,7 @@ class TestParseCriticResponse:
             "- [pos 5→6] BPM jump too large\n"
             "VERDICT: NEEDS_FIXES"
         )
-        verdict, problems = _parse_critic_response(text)
+        verdict, problems, _ = _parse_critic_response(text)
         assert verdict == "NEEDS_FIXES"
         assert len(problems) == 2
         assert "key clash" in problems[0]
@@ -30,29 +30,29 @@ class TestParseCriticResponse:
 
     def test_reject_verdict(self):
         text = "PROBLEMS:\n- Entire arc is broken\nVERDICT: REJECT"
-        verdict, problems = _parse_critic_response(text)
+        verdict, problems, _ = _parse_critic_response(text)
         assert verdict == "REJECT"
         assert len(problems) == 1
 
     def test_problems_none_means_no_problems(self):
         text = "PROBLEMS: none\nVERDICT: APPROVED"
-        verdict, problems = _parse_critic_response(text)
+        verdict, problems, _ = _parse_critic_response(text)
         assert verdict == "APPROVED"
         assert problems == []
 
     def test_empty_text_defaults_to_approved(self):
-        verdict, problems = _parse_critic_response("")
+        verdict, problems, _ = _parse_critic_response("")
         assert verdict == "APPROVED"
         assert problems == []
 
     def test_case_insensitive_verdict(self):
         text = "verdict: needs_fixes"
-        verdict, _ = _parse_critic_response(text)
+        verdict, _, _ = _parse_critic_response(text)
         assert verdict == "NEEDS_FIXES"
 
     def test_case_insensitive_problems(self):
         text = "problems:\n- issue one\nVERDICT: APPROVED"
-        verdict, problems = _parse_critic_response(text)
+        verdict, problems, _ = _parse_critic_response(text)
         assert verdict == "APPROVED"
         assert len(problems) == 1
 
