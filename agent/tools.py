@@ -446,7 +446,7 @@ def suggest_bridge_track(from_pos: int, to_pos: int, context_variables: dict) ->
     playlist_ids = {t.get("id") for t in playlist}
 
     candidates = []
-    for c in catalog:
+    for c in catalog.get("tracks", []):
         if c.get("genre_folder", "").lower() != genre:
             continue
         if c.get("id") in playlist_ids:
@@ -509,7 +509,7 @@ def insert_bridge_track(after_position: int, track_id: str, context_variables: d
     except (FileNotFoundError, json.JSONDecodeError) as e:
         return f"Could not load catalog: {e}"
 
-    new_track = next((c for c in catalog if c.get("id") == track_id), None)
+    new_track = next((c for c in catalog.get("tracks", []) if c.get("id") == track_id), None)
     if new_track is None:
         return f"Track ID '{track_id}' not found in catalog."
 

@@ -30,7 +30,7 @@ _CATALOG = [
 def _make_catalog_file():
     """Write synthetic catalog to a temp file and return its Path."""
     tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    json.dump(_CATALOG, tmp)
+    json.dump({"tracks": _CATALOG}, tmp)
     tmp.flush()
     tmp.close()
     return Path(tmp.name)
