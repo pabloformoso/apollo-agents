@@ -73,15 +73,15 @@ Catching problems before the render, not after.
 
 ---
 
-## v1.4 — Live Local Playback ⭐
+## v1.4 — Live Local Playback ✓
 
 > *"Ask the agent to play music"*
 
 The agent can already build a mix — now it can play it back, and let you hear transitions before committing to a build.
 
-- **`play_mix(session_name)`** — After build, streams `mix_output.wav` locally via `afplay` (macOS), `aplay` (Linux), or `sounddevice` (cross-platform). No video render required.
-- **`preview_transition(pos_a, pos_b)`** — During the Editor REPL, extracts and plays the crossfade zone (±15s around the transition point) so you can hear it before building the full mix.
-- **`play_track(track_id, start_sec, duration_sec)`** — Audition individual tracks from the catalog during planning. Useful for tracks you haven't heard in a while.
+- **`play_mix(session_name)`** ✓ — After build, streams `mix_output.wav` locally via `afplay` (macOS), `ffplay` (ffmpeg), or `aplay` (Linux ALSA). Non-blocking background playback.
+- **`preview_transition(pos_a, pos_b, session_name)`** ✓ — During the Editor REPL, extracts and plays the ±15s crossfade zone between two adjacent tracks (requires a rendered mix).
+- **`play_track(track_id, start_sec, duration_sec)`** ✓ — Audition individual tracks from the catalog during planning. Supports time-sliced playback.
 
 All three tools added to `agent/tools.py` and exposed to the Editor agent.
 
