@@ -53,6 +53,8 @@ from agent.tools import (
     play_mix,
     preview_transition,
     play_track,
+    start_live_session,
+    import_rekordbox,
 )
 
 load_dotenv()
@@ -217,6 +219,9 @@ If a transition has BPM stretch ratio >1.5×, call suggest_bridge_track(from_pos
 to find candidates, then insert_bridge_track(after_position, track_id) to smooth the gap.
 Playback tools (play_mix, preview_transition, play_track) require a rendered mix — suggest \
 them only after build_session has completed successfully.
+- start_live_session(session_name=""): launch live DJ mode — proactive real-time mixing.
+  Offer this when the user says "play live", "go live", "live mix", or "spin it live".
+  Live mode and build_session are independent — either can be used after the set is approved.
 """
 
 _CATALOG_MANAGER_SYSTEM = """\
@@ -621,8 +626,9 @@ _EDITOR_TOOLS = [
     show_playlist, analyze_transition, swap_track, move_track,
     suggest_bridge_track, insert_bridge_track, build_session,
     play_mix, preview_transition, play_track,
+    start_live_session,
 ]
-_CATALOG_TOOLS = [catalog_status, rebuild_catalog, fix_incomplete, redetect_bpm]
+_CATALOG_TOOLS = [catalog_status, rebuild_catalog, fix_incomplete, redetect_bpm, import_rekordbox]
 
 # Keywords that signal the user wants catalog management
 _CATALOG_KEYWORDS = {

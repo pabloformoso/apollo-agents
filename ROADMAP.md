@@ -87,6 +87,36 @@ All three tools added to `agent/tools.py` and exposed to the Editor agent.
 
 ---
 
+## v1.5 — LiveDJ Agent
+
+> *"Spin it live"*
+
+A new proactive event-driven agent that performs a live set in real time,
+without rendering a video or a full mix file first.
+
+- **`LiveEngine`** (`agent/live_engine.py`) — two-deck audio engine: loads tracks
+  as numpy arrays, pre-stretches the next track in a background thread, blends
+  decks with a linear fade over `CROSSFADE_SEC`. Fires events to a
+  `threading.Queue` shared with the agent.
+- **Event system** — six event types: `track_started`, `approaching_crossfade`,
+  `crossfade_triggered`, `crossfade_finished`, `track_ended`, `session_ended`.
+- **`LiveDJ` agent** (`agent/live_dj.py`) — proactive LLM agent that reacts to
+  engine events. On `approaching_crossfade`: evaluates transition quality and
+  decides to confirm, extend, or crossfade early. On user commands: translates
+  natural language to engine actions.
+- **Hot cues + beatgrid** — optional `hot_cues` and `beatgrid` fields in
+  `tracks.json`. Engine uses OUT hot cue as crossfade point and IN hot cue as
+  incoming track start. Falls back gracefully when absent.
+- **`import_rekordbox(xml_path)`** — catalog tool to import hot cues and beatgrid
+  from a Rekordbox XML export via `pyrekordbox`. Enriches `tracks.json` in place.
+- **`start_live_session(session_name)`** — Editor tool that launches the LiveDJ
+  loop. Coexists with `build_session`; either can be used after set approval.
+- **New deps**: `sounddevice`, `pyrekordbox`.
+- **Tests**: `tests/test_live_engine.py` (state machine, hot cues, events),
+  `tests/test_live_tools.py` (all six live tools with mocked engine).
+
+---
+
 ## v2.0 — Vision
 
 Bigger swings. No timeline.

@@ -1323,6 +1323,130 @@ def play_track(track_id: str, start_sec: int, duration_sec: int,
     return f"▶ Played '{track['display_name']}' ({label})."
 
 
+# ---------------------------------------------------------------------------
+# v1.5 — Live DJ session tools
+# ---------------------------------------------------------------------------
+
+def start_live_session(session_name: str, context_variables: dict) -> str:
+    """Start a live DJ session with the current playlist (or load a saved session).
+
+    Launches the LiveDJ engine and enters the event loop — blocks until the
+    session ends or the user quits.
+
+    Args:
+        session_name: Session name to load playlist from disk, or "" to use
+                      the playlist currently in context.
+    """
+    # Deferred import to break circular dependency (run.py → tools → live_dj → run)
+    from agent.live_dj import run_live_session  # noqa: PLC0415
+
+    playlist = context_variables.get("playlist", [])
+
+    if not playlist and session_name:
+        session_file = _PROJECT_DIR / "output" / session_name / "session.json"
+        if not session_file.exists():
+            return f"No playlist in context and session '{session_name}' not found on disk."
+        with open(session_file) as f:
+            data = json.load(f)
+        # Enrich playlist entries with catalog metadata (bpm, camelot_key, id)
+        catalog: dict[str, dict] = {}
+        if _CATALOG_PATH.exists():
+            with open(_CATALOG_PATH) as f:
+                cat_data = json.load(f)
+            catalog = {t["file"]: t for t in cat_data.get("tracks", [])}
+        playlist = []
+        for entry in data.get("playlist", []):
+            merged = {**catalog.get(entry.get("file", ""), {}), **entry}
+            playlist.append(merged)
+
+    if not playlist:
+        return "No playlist available. Build a set first or provide a session_name."
+
+    run_live_session(playlist, context_variables)
+    return "Live session ended."
+
+
+def import_rekordbox(xml_path: str, context_variables: dict) -> str:
+    """Import hot cues and beatgrid from a Rekordbox XML export into tracks.json.
+
+    Matches tracks by filename. Writes hot_cues and beatgrid fields into
+    matching catalog entries and saves tracks.json.
+
+    Args:
+        xml_path: Absolute path to the rekordbox.xml export file.
+    """
+    try:
+        import pyrekordbox.xml as rb_xml  # noqa: PLC0415
+    except ImportError:
+        return "pyrekordbox is not installed. Run: uv add pyrekordbox"
+
+    xml_file = Path(xml_path)
+    if not xml_file.exists():
+        return f"File not found: {xml_path}"
+    if not _CATALOG_PATH.exists():
+        return "tracks.json not found — run --build-catalog first."
+
+    with open(_CATALOG_PATH) as f:
+        catalog_data = json.load(f)
+
+    tracks = catalog_data.get("tracks", [])
+    # Index catalog by filename (last component) for fuzzy matching
+    catalog_by_name: dict[str, dict] = {
+        Path(t["file"]).name.lower(): t for t in tracks
+    }
+
+    try:
+        rb = rb_xml.RekordboxXml(xml_path)
+        rb_tracks = list(rb.get_all_tracks())
+    except Exception as e:
+        return f"Failed to parse Rekordbox XML: {e}"
+
+    updated = 0
+    unmatched = []
+    for rb_track in rb_tracks:
+        filename = Path(rb_track.Location).name.lower()
+        cat_entry = catalog_by_name.get(filename)
+        if not cat_entry:
+            unmatched.append(filename)
+            continue
+
+        # Hot cues
+        hot_cues = []
+        for cue in getattr(rb_track, "marks", []):
+            cue_type = "in" if getattr(cue, "Type", 0) == 0 else "out"
+            hot_cues.append({
+                "label": getattr(cue, "Name", ""),
+                "position_sec": round(getattr(cue, "Start", 0) / 1000, 3),
+                "type": cue_type,
+            })
+
+        # Beatgrid
+        beatgrid = None
+        bpm_entries = getattr(rb_track, "tempo_entries", [])
+        if bpm_entries:
+            first = bpm_entries[0]
+            beatgrid = {
+                "bpm": round(float(getattr(first, "Bpm", cat_entry.get("bpm", 0))), 3),
+                "first_beat_sec": round(getattr(first, "Inizio", 0) / 1000, 3),
+            }
+
+        if hot_cues:
+            cat_entry["hot_cues"] = hot_cues
+        if beatgrid:
+            cat_entry["beatgrid"] = beatgrid
+        updated += 1
+
+    with open(_CATALOG_PATH, "w") as f:
+        json.dump(catalog_data, f, indent=2, ensure_ascii=False)
+
+    summary = f"Rekordbox import: {updated} tracks updated."
+    if unmatched:
+        summary += f" {len(unmatched)} unmatched: {', '.join(unmatched[:5])}"
+        if len(unmatched) > 5:
+            summary += f" (+{len(unmatched) - 5} more)"
+    return summary
+
+
 TOOLS = [
     list_genres,
     get_catalog,
@@ -1345,4 +1469,6 @@ TOOLS = [
     play_mix,
     preview_transition,
     play_track,
+    start_live_session,
+    import_rekordbox,
 ]
