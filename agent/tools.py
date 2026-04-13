@@ -657,7 +657,9 @@ def _format_playlist(
     for i, t in enumerate(playlist, 1):
         bpm = f"{t['bpm']:.0f}" if t.get("bpm") else "?"
         key = t.get("camelot_key") or "?"
-        lines.append(f"  {i:2d}. {t['display_name']:<30}  {bpm} BPM  [{key}]")
+        track_id = t.get("id", "")
+        id_str = f"  [{track_id}]" if track_id else ""
+        lines.append(f"  {i:2d}. {t['display_name']:<30}  {bpm} BPM  [{key}]{id_str}")
 
         if show_transitions and i < len(playlist):
             nxt = playlist[i]

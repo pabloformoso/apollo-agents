@@ -153,25 +153,25 @@ before passing it to the next stage.
 
 Workflow:
 1. Call show_playlist immediately.
-2. If you received critic feedback, present it clearly before asking for input.
-3. Ask the user if they want any changes. ONLY make changes the user
-   explicitly requests — never apply Critic recommendations automatically.
+2. If you received critic feedback, summarise it in bullet points. Do NOT act on it.
+3. Ask ONE question: "Would you like to make any changes?"
+4. Wait for explicit user instruction before calling any tool that modifies the playlist.
    After any change, call show_playlist again to confirm.
-4. When the user signals they are done (says "proceed", "ok", "looks good",
-   "continue", "done", "next", or just presses Enter), output exactly:
+5. When the user signals they are done (says "proceed", "ok", "looks good",
+   "continue", "done", "next", "lgtm", or just presses Enter), output exactly:
    PROCEED
 
 Rules:
-- Available tools: show_playlist, get_catalog, analyze_transition, swap_track, move_track.
-- To find a replacement track:
-  1. Call get_catalog("current") — this returns all tracks with their real IDs.
-  2. Pick a candidate by BPM/key that fits the surrounding positions.
-  3. Call swap_track with the real ID from step 1 (e.g. "lofi-ambient--quiet-pages").
-  Never invent or guess track IDs — they must come from get_catalog output.
-- analyze_transition takes catalog IDs (from get_catalog), NOT position numbers.
+- NEVER call swap_track or move_track unless the user explicitly asks for a change.
+- NEVER auto-apply Critic recommendations. Present them; let the user decide.
+- To find a replacement track when asked:
+  1. Call get_catalog to get real track IDs.
+  2. Pick a candidate by BPM/key that fits.
+  3. Call swap_track with the exact ID from get_catalog output.
+  Never invent or guess track IDs.
+- analyze_transition takes catalog IDs (from show_playlist or get_catalog), NOT position numbers.
 - Never call build_session or propose_playlist.
-- Never make unsolicited changes. Wait for explicit user instruction.
-- Keep responses short. You are a checkpoint, not a full editor.
+- Keep responses short. You are a checkpoint, not an editor.
 """
 
 _CRITIC_SYSTEM = """\
@@ -180,9 +180,13 @@ not validate choices.
 
 Workflow:
 1. Call show_playlist to see the full set with transition data.
+   Each track line begins with its catalog ID in brackets, e.g.:
+     [lofi-ambient--bloom-through-glass]  Bloom Through Glass  60 BPM  6B
+   Use ONLY these bracketed IDs when calling analyze_transition.
 2. Call get_energy_arc to evaluate the energy shape of the set.
    Flag any plateau, missing peak, or missing wind-down as a problem.
 3. Call analyze_transition on any pair flagged with ⚠ or that looks suspicious.
+   Pass the exact bracketed IDs from step 1 — never shorten or guess them.
 4. Deliver your verdict using this exact format — no prose before it:
 
 PROBLEMS:
@@ -208,10 +212,10 @@ Available actions:
 - move_track: reorder tracks
 - suggest_bridge_track: find bridge candidates between two BPM-mismatched positions
 - insert_bridge_track: insert a bridge track after a given position
-- build_session: save and render the final mix (only on explicit user confirmation)
-- play_mix(session_name=""): stream the full rendered mix in the background
-- preview_transition(pos_a, pos_b, session_name=""): play the ±15 s crossfade zone between two tracks
-- play_track(track_id, start_sec=0, duration_sec=0): audition a catalog track (full or slice)
+- build_session: save and render the final mix
+
+IMPORTANT: When the user says "build <name>", call build_session("<name>") IMMEDIATELY.
+Do NOT show_playlist, suggest changes, or ask for confirmation first — just build.
 
 Always call show_playlist after any swap or move.
 Be concise. Think like a DJ.
@@ -584,7 +588,9 @@ def _parse_confirmed_block(text: str) -> dict | None:
 
 def _run_checkpoint(context_variables: dict, critic_context: str | None = None) -> None:
     """Interactive checkpoint mini-REPL. Exits on proceed signal or PROCEED sentinel."""
-    _CHECKPOINT_TOOLS = [show_playlist, get_catalog, analyze_transition, swap_track, move_track]
+    # Read-only tools for the initial display turn; full tools once user requests changes
+    _READONLY_TOOLS = [show_playlist, get_catalog, analyze_transition]
+    _FULL_TOOLS = [show_playlist, get_catalog, analyze_transition, swap_track, move_track]
 
     genre = context_variables.get("genre", "")
     genre_note = f" Session genre: {genre}." if genre else ""
@@ -592,11 +598,13 @@ def _run_checkpoint(context_variables: dict, critic_context: str | None = None) 
     if critic_context:
         intro = (
             f"The Critic has reviewed the playlist:\n\n{critic_context}\n\n"
-            f"You can make adjustments or proceed to the editor.{genre_note}"
+            f"Show the playlist and summarise the Critic findings. "
+            f"Ask the user if they want any changes — do NOT make any changes yet.{genre_note}"
         )
 
     cp_messages: list[dict] = [{"role": "user", "content": intro}]
-    response = run_agent(_CHECKPOINT_SYSTEM, _CHECKPOINT_TOOLS, cp_messages, context_variables)
+    # Use read-only tools on the first turn so the LLM cannot apply fixes unprompted
+    response = run_agent(_CHECKPOINT_SYSTEM, _READONLY_TOOLS, cp_messages, context_variables)
     if response:
         print(f"\n[Checkpoint]\n{response}\n")
     if "PROCEED" in response:
@@ -612,7 +620,7 @@ def _run_checkpoint(context_variables: dict, critic_context: str | None = None) 
             break
 
         cp_messages.append({"role": "user", "content": user_input})
-        response = run_agent(_CHECKPOINT_SYSTEM, _CHECKPOINT_TOOLS, cp_messages, context_variables)
+        response = run_agent(_CHECKPOINT_SYSTEM, _FULL_TOOLS, cp_messages, context_variables)
         if response:
             print(f"\n[Checkpoint]\n{response}\n")
         if "PROCEED" in response:

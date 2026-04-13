@@ -98,7 +98,8 @@ flowchart TD
 | Catalog Manager | **Hermes** | Keeper of records — syncs WAV files to catalog, detects BPM & key |
 | Planner | **Muse** | Inspires the set — energy arc, harmonic ordering, track selection |
 | Critic | **Momus** | God of fault-finding — cold independent review, structured verdict |
-| Editor | *(REPL)* | Interactive editor — swap, move, insert bridge tracks, trigger build |
+| Editor | *(REPL)* | Interactive editor — swap, move, insert bridge tracks, trigger build or go live |
+| LiveDJ | **Apollo LiveDJ** | Real-time DJ engine — autonomous crossfade decisions, reacts to engine events and listener commands |
 | Validator | **Themis** | Goddess of order — audio quality analysis after every build |
 | Orchestrator | **Apollo** | Conductor — sequences all agents, manages state, collects memory |
 
@@ -131,6 +132,7 @@ flowchart TD
 - **Per-transition ratings** — rate each session 1–5 after build; Critic memory flags recurring problem transitions
 - **Session memory** — agents learn from past sessions: which tracks get swapped, what energy arcs rate highly
 - **Catalog management** — scan new WAVs, detect missing BPM/key fields, keep tracks.json in sync
+- **Live Mode** — Apollo DJs in real time: autonomous crossfade decisions, responds to `next`, `stay`, `more energetic`, `wind down` mid-set
 - **Multi-provider** — Claude (Anthropic), GPT-4o (OpenAI), or any local model via Ollama; auto-detected from `.env`
 - **1080p video output** — spectral waveform visualizer, beat-reactive particles, DALL-E 3 artwork, retro pixel titles
 - **YouTube Short** — auto-generated 20s teaser alongside the full mix
@@ -295,6 +297,170 @@ output/midnight-techno/
   transitions.json    # crossfade timestamps
   youtube.md          # title, description, tracklist, tags
 ```
+
+---
+
+## Live Mode
+
+Live Mode skips the pre-rendered pipeline entirely. Apollo plays tracks in real time and makes autonomous crossfade decisions as the music unfolds.
+
+### How to start
+
+Say any of these at the Editor prompt (or as your opening request):
+
+```
+go live
+play live
+spin it live late-night-study
+```
+
+### What happens
+
+```
+── Apollo LiveDJ ──
+Commands: next | stay [N] | skip | quit | or anything natural language
+
+[LiveDJ] On deck. Let's go.
+
+  TRACK_STARTED: 'Quiet Notes bis' (76 BPM, 10B)
+  ...
+  APPROACHING_CF in 18s: 'Quiet Notes bis' → 'Soft Focus Loop' (76→76 BPM, 10B→11A)
+
+[LiveDJ] Clean 1-step key move, same BPM — letting it ride.
+
+  CROSSFADE_TRIGGERED: 'Quiet Notes bis' → 'Soft Focus Loop'
+
+You: more energetic
+[LiveDJ] Swapped track 4 → 'No more socials' (82 BPM, 11B).
+
+You: next
+[LiveDJ] Crossfading now.
+```
+
+### Apollo's decision rules
+
+| Transition quality | Action |
+|--------------------|--------|
+| Camelot ≤1 step, BPM diff ≤8 | Let it ride — no intervention |
+| Camelot 2 steps **or** BPM diff 8–20 | `extend_track(20)` — buys time |
+| Camelot >2 steps **or** BPM diff >20 | `crossfade_now()` or `queue_swap()` a better track |
+
+### Live commands
+
+| What you type | What Apollo does |
+|---------------|-----------------|
+| `next` / `skip` | Crossfades immediately |
+| `stay` / `longer` | Extends current track 30s |
+| `stay 60` | Extends by a specific number of seconds |
+| `more energetic` | Swaps next track for a higher-BPM option |
+| `wind down` / `chill` | Swaps next track for lower BPM / softer key |
+| `quit` / `q` | Ends the session |
+
+### Cycle diagram
+
+```mermaid
+sequenceDiagram
+    participant U  as 👤 User
+    participant DJ as Apollo LiveDJ<br/>(event loop · 100ms tick)
+    participant LM as LLM
+    participant EQ as Event Queue
+    participant EN as LiveEngine<br/>(sounddevice callback)
+    participant PS as Pre-stretch Thread<br/>(pyrubberband)
+
+    Note over EN: play() — loads track 1, starts OutputStream
+    EN->>EQ: TRACK_STARTED
+    EN->>PS: start_prestretch(track 1 → track 2)
+    PS-->>EN: _next_audio ready (BPM-stretched)
+
+    loop Every 100 ms
+        DJ->>EQ: drain events
+        DJ->>U: drain stdin (1 line max)
+    end
+
+    Note over EN,EQ: 30s before crossfade point…
+    EN->>EQ: APPROACHING_CF (track 1 → track 2, Δbpm, Δkey, secs)
+    DJ->>LM: batch turn (events + state)
+
+    alt Good transition (≤1 Camelot step, ≤8 BPM diff)
+        LM-->>DJ: (silent — no tool call)
+    else Mediocre (2 steps OR 8–20 BPM diff)
+        LM->>EN: extend_track(20)
+        EN-->>LM: "Crossfade delayed 20s."
+    else Bad (>2 steps OR >20 BPM diff)
+        LM->>EN: crossfade_now()
+        EN-->>LM: "Crossfade triggered."
+    end
+
+    U->>DJ: "more energetic"
+    DJ->>LM: batch turn (user input + state)
+    LM->>EN: queue_swap(position=3, track_id="…")
+    EN-->>LM: "Queued 'No more socials' at position 3."
+    LM-->>DJ: "Swapped track 3 → No more socials."
+    DJ->>U: [LiveDJ] Swapped track 3 → No more socials.
+
+    Note over EN: crossfade point reached — watchdog fires
+    EN->>EQ: CROSSFADE_TRIGGERED
+    Note over EN: 12s linear blend in audio callback
+    EN->>EQ: CROSSFADE_FINISHED
+    EN->>EQ: TRACK_ENDED (track 1)
+    EN->>EQ: TRACK_STARTED (track 2)
+    EN->>PS: start_prestretch(track 2 → track 3)
+```
+
+### How the threads fit together
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Main thread — LiveDJ event loop                            │
+│  ┌──────────┐  100ms tick                                   │
+│  │drain EQ  │──────────────────────────────────────────┐   │
+│  │drain stdin│                                          │   │
+│  └──────────┘                                           ▼   │
+│                                              format turn     │
+│                                              call LLM (≤5t) │
+│                                              exec tools      │
+└─────────────────────────────────────────────────────────────┘
+          ▲ events                        │ tool calls
+          │                               ▼
+┌─────────────────┐             ┌──────────────────────┐
+│  LiveEngine     │             │  LiveEngine public   │
+│  Watchdog thread│             │  API (thread-safe)   │
+│  50ms tick:     │             │  crossfade_now()     │
+│  · APPROACHING  │             │  extend_track()      │
+│  · TRIGGERED    │             │  skip_track()        │
+│  · FINISHED     │             │  queue_swap()        │
+│  · ENDED        │             │  set_crossfade_point │
+└─────────────────┘             └──────────────────────┘
+          │
+          │ _cf_just_finished flag
+          ▼
+┌──────────────────────────────────────────────┐
+│  sounddevice OutputStream callback           │
+│  (low-latency audio thread, 2048-sample blk) │
+│  state=playing   → copy samples from _audio  │
+│  state=crossfading → linear blend:           │
+│    out_chunk * (1−t) + in_chunk * t          │
+│  blend complete → swap buffers, set flag     │
+└──────────────────────────────────────────────┘
+          ▲
+          │ _next_audio (pre-stretched WAV)
+┌───────────────────────────────┐
+│  Pre-stretch daemon thread    │
+│  · loads next track WAV       │
+│  · pyrubberband time-stretch  │
+│    to match current BPM       │
+│  · respects _STRETCH_MAX 1.5× │
+│  · signals _prestretch_ready  │
+└───────────────────────────────┘
+```
+
+**Key design decisions:**
+
+- **Pre-stretch runs ahead of time** — by the time the crossfade fires, the next track's audio is already in memory at the right BPM. Crossfades are instant with no stutter.
+- **Watchdog at 50ms, event loop at 100ms** — the engine detects state changes twice as fast as the LLM loop polls, so events are never missed.
+- **LLM budget capped at 5 turns per batch** — prevents the agent from spending unbounded tokens on a single event while music is playing.
+- **`_extend_samples` shifts the crossfade point** — `extend_track(N)` adds N×44100 samples to the threshold, cleanly delaying the auto-crossfade without touching the audio buffer.
+- **Hot cue `OUT` marks set the crossfade point** — if a track has an `out` hot cue, the engine crossfades from that exact position instead of `duration − 17s`.
 
 ---
 
