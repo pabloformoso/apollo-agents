@@ -13,6 +13,62 @@ ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. 
 
 ---
 
+## ✨ Live Mode
+
+> Apollo DJs in real time — no pre-render, no waiting. Just music, events, and autonomous decisions.
+
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'background': '#0d0d1a',
+  'primaryColor': '#1a1a2e',
+  'primaryTextColor': '#e0e0ff',
+  'primaryBorderColor': '#4a4a8a',
+  'lineColor': '#6060aa',
+  'secondaryColor': '#12122a',
+  'edgeLabelBackground': '#1a1a2e',
+  'clusterBkg': '#12122a',
+  'clusterBorder': '#3a3a6a',
+  'nodeTextColor': '#e0e0ff',
+  'fontFamily': 'monospace'
+}}}%%
+
+flowchart LR
+    TRACK["🎵 Track playing\nlive audio"]:::pipeline
+
+    CF{"⏱ Approaching\ncrossfade?"}:::checkpoint
+
+    GOOD["✅ Let it ride"]:::agent
+    MED["⏸ extend_track(20)"]:::agent
+    BAD["⚡ crossfade_now()"]:::agent
+
+    USER(["👤 next · stay\nmore energetic\nwind down"]):::user
+
+    NEXT["🎵 Next track\n(pre-stretched)"]:::pipeline
+
+    TRACK -->|"30s warning"| CF
+    CF -->|"≤1 Camelot step\n≤8 BPM diff"| GOOD
+    CF -->|"2 steps\nOR 8–20 BPM"| MED
+    CF -->|">2 steps\nOR >20 BPM"| BAD
+    GOOD --> NEXT
+    MED  --> NEXT
+    BAD  --> NEXT
+    USER -->|"mid-set command"| CF
+
+    classDef agent      fill:#1a1a3a,stroke:#5858b0,color:#c8c8ff
+    classDef pipeline   fill:#0a1f1a,stroke:#20a060,color:#60ffb0
+    classDef checkpoint fill:#2a1a0a,stroke:#c07820,color:#ffc060
+    classDef user       fill:#0a0a1a,stroke:#4040a0,color:#8080d0
+```
+
+```bash
+uv run python agent/run.py
+# → go live
+```
+
+→ [Full Live Mode docs, thread architecture & cycle diagram](#live-mode-1)
+
+---
+
 ## Example Output
 
 Every session in [this YouTube channel](https://www.youtube.com/watch?v=PdTd54Vl8Go) was built with ApolloAgents — from the earliest proof-of-concept cuts in v0.0 to today's fully orchestrated pipeline in v1.0. Same tracks, same taste, progressively better mixing as the agents learned.
