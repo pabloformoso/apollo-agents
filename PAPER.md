@@ -83,35 +83,51 @@ Prior work has explored LLM agents for creative generation in domains including 
 
 ApolloAgents structures the mix creation process as an 8-phase sequential pipeline. Each phase is handled by a dedicated agent with a fixed system prompt, a curated subset of tools, and a structured output format. Shared mutable state is carried in a `context_variables` dictionary injected by the orchestrator.
 
-```
-User Prompt
-    │
-    ▼
-Phase 1 · JANUS (Genre Guard)       — validates genre, duration, mood
-    │  CONFIRMED block
-    ▼
-Phase 2 · HERMES (Catalog Manager)  — syncs WAV catalog on demand
-    │
-    ▼
-Phase 3 · MUSE (Planner)            — proposes playlist w/ energy arc
-    │  playlist in context_variables
-    ▼
-Phase 4 · Checkpoint 1              — user reviews, adjusts
-    │
-    ▼
-Phase 5 · MOMUS (Critic)            — PROBLEMS / VERDICT output
-    │  parsed verdict + problem list
-    ▼
-Phase 6 · Checkpoint 2              — user applies selected fixes
-    │
-    ▼
-Phase 7 · Editor REPL               — free-form editing until build
-    │  build_session triggered
-    ▼
-Phase 8 · THEMIS (Validator)        — audio quality analysis
-    │
-    ▼
-Rating collection → MEMORY write
+```mermaid
+%%{init: {'theme': 'base', 'themeVariables': {
+  'background': '#0d0d1a',
+  'primaryColor': '#1a1a2e',
+  'primaryTextColor': '#e0e0ff',
+  'primaryBorderColor': '#4a4a8a',
+  'lineColor': '#6060aa',
+  'secondaryColor': '#12122a',
+  'tertiaryColor': '#0d0d1a',
+  'edgeLabelBackground': '#1a1a2e',
+  'clusterBkg': '#12122a',
+  'clusterBorder': '#3a3a6a',
+  'nodeTextColor': '#e0e0ff',
+  'fontFamily': 'monospace'
+}}}%%
+
+flowchart TD
+    USER(["👤 User Prompt"]):::user
+
+    P1["Phase 1 · 🚪 JANUS\nGenre Guard\n─────────────\nvalidates genre · duration · mood"]:::agent
+    P2["Phase 2 · ⚡ HERMES\nCatalog Manager\n─────────────\nsyncs WAV catalog on demand"]:::agent
+    P3["Phase 3 · 🎵 MUSE\nPlanner\n─────────────\nproposes playlist w/ energy arc"]:::agent
+    CP1{{"Phase 4 · 🛑 Checkpoint 1\nuser reviews · adjusts"}}:::checkpoint
+    P5["Phase 5 · 🎭 MOMUS\nCritic\n─────────────\nPROBLEMS / VERDICT output"]:::agent
+    CP2{{"Phase 6 · 🛑 Checkpoint 2\nuser applies selected fixes"}}:::checkpoint
+    P7["Phase 7 · ✏️ Editor REPL\n─────────────\nfree-form editing until build"]:::agent
+    P8["Phase 8 · ⚖️ THEMIS\nValidator\n─────────────\naudio quality analysis"]:::agent
+    MEM[("🧠 Memory\nrating collection\n→ MEMORY write")]:::memory
+
+    USER --> P1
+    P1 -->|"CONFIRMED block"| P2
+    P2 --> P3
+    P3 -->|"playlist in context_variables"| CP1
+    CP1 -->|"proceed"| P5
+    P5 -->|"parsed verdict + problem list"| CP2
+    CP2 -->|"ok"| P7
+    P7 -->|"build_session triggered"| P8
+    P8 --> MEM
+    MEM -.->|"past sessions"| P3
+    MEM -.->|"problem patterns"| P5
+
+    classDef agent      fill:#1a1a3a,stroke:#5858b0,color:#c8c8ff
+    classDef checkpoint fill:#2a1a0a,stroke:#c07820,color:#ffc060
+    classDef memory     fill:#1a0a2a,stroke:#8040c0,color:#c080ff
+    classDef user       fill:#0a0a1a,stroke:#4040a0,color:#8080d0
 ```
 
 ### 3.2 Agent Roles and Constraints
