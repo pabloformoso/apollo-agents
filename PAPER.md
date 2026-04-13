@@ -7,7 +7,7 @@ Independent Research · April 2026
 
 ## Abstract
 
-This paper presents ApolloAgents, an AI-powered system that transforms a collection of audio tracks into a fully rendered DJ mix video through a coordinated pipeline of specialised language model agents. The system addresses the inherent complexity of DJ set curation — harmonic compatibility, energy arc design, rhythmic continuity, and audio quality — by decomposing the problem across six agents with distinct, bounded roles: a Genre Guard, a Catalog Manager, a Planner, a Critic, a Validator, and a human-in-the-loop Orchestrator. Each agent communicates through structured text protocols and a shared context object, avoiding the overhead of distributed message buses while preserving the modularity benefits of multi-agent design. A persistent session memory allows agents to learn from past sessions, progressively improving track avoidance, energy arc selection, and transition quality over time. The full pipeline — from prompt to lossless WAV mix to 1080p YouTube video with AI-generated artwork — runs without human intervention beyond two interactive checkpoints.
+This paper presents ApolloAgents, an AI-powered system that transforms a collection of audio tracks into a fully rendered DJ mix video through a coordinated pipeline of specialised language model agents. The system addresses the inherent complexity of DJ set curation — harmonic compatibility, energy arc design, rhythmic continuity, and audio quality — by decomposing the problem across six agents with distinct, bounded roles: a Genre Guard, a Catalog Manager, a Planner, a Critic, a Validator, and a human-in-the-loop Orchestrator. Each agent communicates through structured text protocols and a shared context object, avoiding the overhead of distributed message buses while preserving the modularity benefits of multi-agent design. A persistent session memory allows agents to learn from past sessions, progressively improving track avoidance, energy arc selection, and transition quality over time. Version 1.3 extends the pipeline with BPM stretch safety bounds, bridge track insertion tooling, and crossfade EQ matching to reduce frequency masking at transitions. Version 1.5 introduces LiveMode — a real-time DJ engine backed by a proactive LiveDJ agent that monitors the active mix and makes autonomous transition decisions, extending the system from a batch pipeline to a real-time interactive performance tool. The full pipeline — from prompt to lossless WAV mix to 1080p YouTube video with AI-generated artwork — runs without human intervention beyond two interactive checkpoints.
 
 ---
 
@@ -26,6 +26,8 @@ The contributions of this work are:
 3. A lossless audio pipeline addressing the crossfade clipping problem endemic to naive pydub-based mixing
 4. A persistent session memory that allows agents to improve recommendations based on accumulated user feedback
 5. A full video production pipeline integrating spectral waveform visualisation, beat-reactive particles, and AI-generated artwork
+6. BPM stretch safety bounds and bridge track insertion tooling (v1.3) that prevent time-stretching artefacts and give the Editor agent a structured path to resolve extreme tempo gaps
+7. A real-time proactive DJ agent (LiveDJ, v1.5) that monitors a live mix in progress and makes autonomous transition decisions within a bounded LLM turn budget
 
 ---
 
@@ -118,11 +120,12 @@ Rating collection → MEMORY write
 |---|---|---|---|
 | Genre Guard | Janus | `list_genres` | CONFIRMED block |
 | Catalog Manager | Hermes | `catalog_status`, `rebuild_catalog`, `fix_incomplete` | Free text |
-| Planner | Muse | `get_catalog`, `propose_playlist` | Free text + playlist |
+| Planner | Muse | `get_catalog`, `propose_playlist`, `get_energy_arc` | Free text + playlist |
 | Checkpoint | — | `show_playlist`, `swap_track`, `move_track` | PROCEED sentinel |
 | Critic | Momus | `show_playlist`, `analyze_transition` | PROBLEMS/VERDICT |
-| Editor | — | All except `validate_audio`, `read_memory` | Free text |
+| Editor | — | `show_playlist`, `swap_track`, `move_track`, `suggest_bridge_track`, `insert_bridge_track`, `build_session`, `play_mix`, `preview_transition`, `play_track`, `start_live_session` | Free text |
 | Validator | Themis | `validate_audio` | Status: PASS/WARNING/FAIL |
+| LiveDJ | — | `get_live_state`, `crossfade_now`, `extend_track`, `skip_track`, `queue_swap`, `set_crossfade_point` | Real-time terse responses |
 | Orchestrator | Apollo | All | Manages state |
 
 Tool access is enforced at system prompt level, not at the API schema level — each agent is only shown the tools it is permitted to use. This prevents tool misuse without requiring a separate permission layer.
@@ -201,10 +204,20 @@ The cluster + harmonic walk approach is intentionally stochastic: seeding `rando
 The mix is assembled with pydub and pyrubberband:
 
 1. Each track is loaded as a pydub `AudioSegment` and attenuated by −3 dB
-2. If the BPM difference between consecutive tracks exceeds the threshold, the incoming track is time-stretched to meet in the middle over `TEMPO_RAMP_SEC` seconds using pyrubberband
-3. Crossfades of `CROSSFADE_SEC = 12` seconds are applied between tracks
-4. A per-crossfade peak check warns if the overlap zone exceeds −0.5 dBFS
-5. The complete mix is exported as 32-bit WAV (lossless); normalisation is applied if headroom is available
+2. If the BPM difference between consecutive tracks exceeds the threshold, the incoming track is time-stretched to meet in the middle over `TEMPO_RAMP_SEC` seconds using pyrubberband. The time-stretch ratio is capped at `_STRETCH_MAX = 1.5` (and floored at `_STRETCH_MIN = 1/1.5`) to prevent the audible artefacts that pyrubberband produces at more extreme ratios. Transitions requiring a ratio beyond this bound are flagged as mandatory PROBLEMS entries by MOMUS, triggering bridge track insertion by the Editor.
+3. Before the crossfade is applied, `_apply_crossfade_eq(segment, role, key_distance)` processes both the outgoing and incoming segments with shelving EQ: the outgoing track receives a high-shelf cut of −3 dB at 8 kHz when `key_distance > 2`, and the incoming track receives a low-shelf cut of −3 dB at 250 Hz to reduce low-frequency mud in the overlap zone. This reduces frequency masking without affecting audio outside the crossfade window.
+4. Crossfades of `CROSSFADE_SEC = 12` seconds are applied between tracks
+5. A per-crossfade peak check warns if the overlap zone exceeds −0.5 dBFS
+6. The complete mix is exported as 32-bit WAV (lossless); normalisation is applied if headroom is available
+
+### 4.3.1 Bridge Track Insertion
+
+When the Critic flags a transition as requiring a stretch ratio beyond the 1.5× safety bound, the Editor agent can invoke two purpose-built tools to resolve it interactively:
+
+- **`suggest_bridge_track(from_pos, to_pos)`** — scans the catalog for tracks whose BPM falls between the two playlist positions. Candidates are scored by `min(ratio_a, 1/ratio_a) × min(ratio_b, 1/ratio_b)`, where each ratio is `target_bpm / candidate_bpm`. The top 3 candidates are returned ranked by score.
+- **`insert_bridge_track(after_position, track_id)`** — inserts the chosen track into the working playlist immediately after the specified position, splitting the problematic transition into two individually safe ones.
+
+This pattern — Critic flags, Editor resolves — keeps the fix interactive and under user control while giving the agent a principled search over the catalog rather than a freeform guess.
 
 ### 4.4 Audio Quality Validation
 
@@ -293,13 +306,18 @@ This identifies tracks the user chose to remove during editing — a signal stro
 
 ### 6.1 Provider Agnosticism
 
-ApolloAgents supports both Anthropic Claude and OpenAI GPT models through a single `run_agent()` function that branches on the detected provider:
+ApolloAgents supports Anthropic Claude, OpenAI GPT models, and locally-hosted Ollama models through a single `run_agent()` function that branches on the detected provider. Provider detection follows a priority order: Anthropic is preferred when its API key is present, OpenAI is next, and Ollama is selected when neither cloud key is available but an Ollama instance is reachable:
 
 ```python
-_PROVIDER = "anthropic" if bool(os.getenv("ANTHROPIC_API_KEY")) else "openai"
+if _HAS_ANTHROPIC:
+    _PROVIDER = "anthropic"
+elif _HAS_OPENAI:
+    _PROVIDER = "openai"
+elif os.getenv("OLLAMA_BASE_URL") or _ollama_running():
+    _PROVIDER = "ollama"
 ```
 
-Tool schemas are built separately for each provider format (`_build_anthropic_schemas`, `_build_openai_schemas`) from the same Python function signatures, ensuring consistent behaviour regardless of which LLM is used.
+Ollama uses the OpenAI-compatible SDK with `base_url="http://localhost:11434/v1"` and `api_key="ollama"`, defaulting to the `gemma4:4b` model. This allows fully offline operation without any API keys, useful for development and privacy-sensitive deployments. Tool schemas are built separately for each provider format (`_build_anthropic_schemas`, `_build_openai_schemas`) from the same Python function signatures, ensuring consistent behaviour regardless of which LLM is used.
 
 ### 6.2 Single-File Core Pipeline
 
@@ -311,27 +329,107 @@ The test suite covers all pure logic components: Camelot compatibility functions
 
 ---
 
-## 7. Design Decisions and Trade-offs
+## 7. Live Mode
 
-### 7.1 No Orchestration Framework
+### 7.1 Architecture
+
+LiveMode is a real-time DJ engine that runs a continuous mix through the system's audio output while a proactive agent monitors the playback state and makes autonomous transition decisions. The core component is `LiveEngine` (`agent/live_engine.py`), a two-deck engine built on `sounddevice.OutputStream`.
+
+The engine runs four concurrent threads:
+
+| Thread | Interval | Responsibility |
+|---|---|---|
+| sounddevice callback | Per block (2048 samples) | Low-latency audio output; linear crossfade blend |
+| Watchdog | 50 ms | Monitors sample position; fires transition events |
+| Pre-stretch daemon | Continuous | Time-stretches the next track in the background via pyrubberband |
+| Main event loop | 100 ms | Dispatches events to the LiveDJ agent |
+
+The watchdog fires at twice the frequency of the event loop, ensuring that time-critical transitions (crossfade triggers, track endings) are detected before the next agent poll cycle.
+
+**Event model.** The engine emits six events consumed by the agent:
+
+- `TRACK_STARTED` — new track has begun playing
+- `APPROACHING_CF` — fired 30 seconds before the calculated crossfade point
+- `CROSSFADE_TRIGGERED` — crossfade blend has begun
+- `CROSSFADE_FINISHED` — blend complete; outgoing deck released
+- `TRACK_ENDED` — current track has played through without crossfade
+- `SESSION_ENDED` — playlist exhausted
+
+**Crossfade.** The 12-second blend is computed in float32 stereo numpy arrays as a linear fade: `out*(1-t) + in*t` where `t` runs from 0 to 1. This matches the offline pipeline's crossfade model, ensuring consistent perceived loudness behaviour.
+
+**Pre-stretching.** The next track is time-stretched by pyrubberband in the background while the current track plays. A `_prestretch_ready` threading Event gates the crossfade trigger, so by the time the watchdog fires `CROSSFADE_TRIGGERED` the stretched audio is always available in memory. This eliminates the stutter that would occur if stretching were performed on demand at transition time. The same 1.5× ratio cap applied in the offline pipeline is enforced here.
+
+### 7.2 Apollo LiveDJ Agent
+
+The LiveDJ agent (`agent/live_dj.py`) is a purpose-built agent with a terse, action-oriented system prompt (`_LIVE_DJ_SYSTEM`) optimised for low-latency decisions during live playback. It receives events from the engine's event loop and responds with tool calls.
+
+**Decision rules on `APPROACHING_CF`.** The agent applies a three-tier decision rule based on the Camelot distance and BPM difference between the current and next track:
+
+| Condition | Action |
+|---|---|
+| Camelot ≤1 step AND BPM diff ≤8 | Silent — let the automatic crossfade proceed |
+| Camelot 2 steps OR BPM diff 8–20 | `extend_track(20)` — buy time, reassess |
+| Camelot >2 steps OR BPM diff >20 | `crossfade_now()` or `queue_swap()` |
+
+**LLM budget.** The agent is limited to 5 turns per event batch. This prevents unbounded token spend during continuous live playback, where events arrive every few seconds over a multi-hour session. If the budget is exhausted without a terminal tool call, the engine falls back to the automatic transition.
+
+**User commands.** The event loop accepts keyboard commands that are translated into tool calls without LLM mediation for latency:
+
+| Command | Tool |
+|---|---|
+| `next` / `skip` | `crossfade_now()` |
+| `stay` / `longer` | `extend_track(30)` |
+| `more energetic` | `queue_swap()` with higher BPM candidate |
+| `wind down` / `chill` | `queue_swap()` with lower BPM candidate |
+
+### 7.3 Live Tools
+
+| Tool | Description |
+|---|---|
+| `get_live_state()` | Returns current track, position_sec, BPM, Camelot key, seconds_to_crossfade, playlist_remaining |
+| `crossfade_now()` | Advances the playback position to `cf_point_samples` so the watchdog fires the crossfade immediately |
+| `extend_track(seconds)` | Adds N×44100 samples to `_extend_samples`, shifting the crossfade threshold without touching audio buffers |
+| `skip_track()` | Hard-cuts to the next track with no blend |
+| `queue_swap(position, track_id)` | Replaces a future playlist slot with the specified track |
+| `set_crossfade_point(position_sec)` | Manual override of when the crossfade blend begins |
+
+### 7.4 Hot Cues
+
+Tracks can carry `hot_cues: [{type: "out", position_sec: N}, {type: "in", position_sec: N}]` entries in the catalog. An `OUT` cue overrides the default crossfade point (normally `duration − 17s`), allowing a precise musical exit point to be encoded at catalog build time. An `IN` cue sets the sample offset where the incoming track starts playing during the blend, enabling clean phrase-aligned entries. Hot cues are designed to be importable from Rekordbox XML in a future extension (see Section 10).
+
+### 7.5 Key Design Decisions
+
+**Pre-stretch runs ahead.** Crossfades are instant from the user's perspective because pyrubberband completes its work during the preceding track's playback. The `_prestretch_ready` event gate ensures the crossfade never fires before the buffer is ready.
+
+**Watchdog at 50 ms / event loop at 100 ms.** The engine fires events twice as fast as the LLM polls. This means that even if an agent turn takes the full 100 ms budget, the watchdog has already confirmed the audio state is consistent. Decoupling the audio-critical path from LLM latency is essential for a real-time system.
+
+**5-turn LLM budget.** Without a hard turn cap, an agent that encounters an ambiguous situation could issue a chain of reasoning turns during playback. The 5-turn limit forces the agent to commit to an action or fall back to the default within a bounded window.
+
+**`_extend_samples` for crossfade shifting.** Rather than modifying audio buffers or recomputing mix positions, `extend_track()` simply increments a counter that the watchdog reads before comparing against the crossfade threshold. This is lock-free (the counter is an integer) and has no effect on audio output.
+
+---
+
+## 8. Design Decisions and Trade-offs
+
+### 8.1 No Orchestration Framework
 
 Several multi-agent frameworks exist (LangGraph, AutoGen, CrewAI, AutoAgent) that provide graph-based routing, memory stores, and tool registries. ApolloAgents implements equivalent patterns directly against the provider SDKs. The trade-off is more boilerplate in `run.py` in exchange for no hidden abstractions, no additional dependencies, and full control over the conversation loop — important for a creative application where the exact sequencing of agent responses and checkpoint interactions matters.
 
-### 7.2 Structured Text vs JSON
+### 8.2 Structured Text vs JSON
 
 Requiring the LLM to produce JSON for inter-agent communication introduces fragility: models occasionally produce malformed JSON, trailing commas, or extra explanation text that breaks parsers. Structured text blocks with sentinel keywords (CONFIRMED, VERDICT, Status:) are more robust — partial matches still allow extraction, and fallback defaults (APPROVED, PASS) prevent cascading failures when the model deviates from format.
 
-### 7.3 Checkpoints as First-Class Design
+### 8.3 Checkpoints as First-Class Design
 
 Most automated pipelines treat human review as an afterthought — a final approval gate. ApolloAgents places two interactive checkpoints inside the pipeline, before and after the Critic. This reflects a key insight: the Critic's value is in surfacing problems, not in enforcing fixes. The user may disagree with a Critic recommendation, prefer a different fix, or accept a known issue. Automating the application of Critic feedback would override this judgment. The checkpoints make the pipeline collaborative rather than autonomous.
 
-### 7.4 Lossless Intermediate Format
+### 8.4 Lossless Intermediate Format
 
 All intermediate audio is kept as 32-bit WAV. The only lossy encoding step is the final AAC pass at 320kbps during video mux. This ensures that BPM time-stretching artefacts (which accumulate with re-encoding) stay at the minimum possible level, and that the Validator's spectral analysis operates on uncompressed data.
 
 ---
 
-## 8. Results and Observations
+## 9. Results and Observations
 
 Over the development period spanning versions 0.0 through 1.0, the following qualitative improvements were observed:
 
@@ -345,21 +443,19 @@ Over the development period spanning versions 0.0 through 1.0, the following qua
 
 ---
 
-## 9. Future Work
+## 10. Future Work
 
-**Per-transition ratings**: The current memory model captures session-level ratings. A finer-grained signal — rating individual transitions immediately after the mix plays — would allow the system to learn which specific key pairs and BPM jumps the user tolerates, rather than inferring it from swap tracking.
-
-**BPM stretch safety bounds**: pyrubberband at ratios beyond approximately 1.5× produces audible artefacts. A pre-mix check that flags tracks requiring extreme stretching and suggests alternatives (via MOMUS or the Editor) would prevent a class of audio quality issues that the current Validator detects but cannot prevent.
-
-**Dynamic energy arc planning**: MUSE currently provides energy arc rationale in prose but does not model the arc quantitatively. Representing the set as a sequence of (energy_level, key, bpm) tuples and using the LLM to reason over this structure explicitly would allow more principled warmup/peak/release planning.
+**Hot cue library import from Rekordbox XML**: Tracks can already carry `hot_cues` entries defining precise IN and OUT points for crossfades. Importing these automatically from a Rekordbox XML export would allow a DJ's existing cue point library — built over years of professional practice — to guide LiveMode transitions without manual catalog annotation.
 
 **Genre cross-pollination**: Multi-genre sessions (e.g., a transition from deep house to techno) are not currently supported — the Genre Guard enforces a single genre per session. Relaxing this constraint, while maintaining harmonic and BPM continuity across the boundary, is a natural extension.
 
+**Beat-synchronised crossfade**: The current crossfade triggers at a fixed sample offset derived from track duration. Aligning the crossfade start to the nearest beat boundary — detected via `librosa.beat.beat_track()` on the live buffer — would produce transitions that feel more musically intentional, particularly in genres with strong four-on-the-floor rhythms.
+
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
-ApolloAgents demonstrates that a structured multi-agent pipeline can successfully address the creative and technical complexity of DJ set production. By assigning bounded roles to specialised agents, enforcing structured text protocols for inter-agent communication, and maintaining a persistent session memory, the system produces musically coherent, technically clean mixes with minimal human intervention. The two interactive checkpoints preserve user agency at the moments where subjective musical judgment matters most, while the automated agents handle the combinatorial and analytical work that would otherwise require deep domain expertise.
+ApolloAgents demonstrates that a structured multi-agent pipeline can successfully address the creative and technical complexity of DJ set production. By assigning bounded roles to specialised agents, enforcing structured text protocols for inter-agent communication, and maintaining a persistent session memory, the system produces musically coherent, technically clean mixes with minimal human intervention. The two interactive checkpoints preserve user agency at the moments where subjective musical judgment matters most, while the automated agents handle the combinatorial and analytical work that would otherwise require deep domain expertise. The addition of LiveMode in v1.5 extends the system beyond batch pipeline into real-time interactive performance, demonstrating that the same agent architecture that plans a mix offline can also monitor and adjust it live — within a bounded computational budget and without compromising audio continuity.
 
 The full system — agent pipeline, audio DSP, video renderer, and test suite — is available as open source under the MIT License.
 
@@ -373,6 +469,7 @@ The full system — agent pipeline, audio DSP, video renderer, and test suite �
 4. Anthropic. (2024). *Claude API Documentation*. https://docs.anthropic.com
 5. OpenAI. (2024). *GPT-4o Technical Report*. https://openai.com/research/gpt-4o
 6. HKUDS. (2024). *AutoAgent: Automatic Agent Creation and Coordination Framework*. https://github.com/HKUDS/AutoAgent
+7. Geier, M. (2012). *sounddevice: Play and Record Sound with Python*. https://python-sounddevice.readthedocs.io
 
 ---
 
