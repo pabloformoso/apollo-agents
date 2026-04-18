@@ -117,18 +117,68 @@ without rendering a video or a full mix file first.
 
 ---
 
-## v2.0 — Vision
+## v2.0 — Web UI: "Open the Cockpit"
 
-Bigger swings. No timeline.
+Replace the blocking terminal REPL with a browser-based interface. This is the headline release — the API and WebSocket layer built here underpins every subsequent v2.x milestone.
 
-| Feature | Description |
-|---|---|
-| **Multi-genre sessions** | Janus accepts a genre sequence (e.g., deep house → techno). Validates harmonic/BPM bridges at genre boundaries. |
-| **Web UI** | Browser-based frontend replacing the terminal REPL. Drag-and-drop ordering, waveform preview, inline Critic feedback. |
-| **Spotify / Rekordbox import** | Map external library exports to `tracks.json` format — BPM and key already exist in both. |
-| **Cloud rendering** | Offload the video render to a worker (Modal, RunPod) for faster turnaround on long sessions. |
-| **Plugin architecture** | Define a `BaseAgent` protocol so community agents (e.g., a "Crowd Energy" agent, a "Stem Separator" agent) can plug into the pipeline. |
-| **Stem separation** | Use Demucs to separate vocals/drums/bass before mixing; enable per-stem crossfade for cleaner transitions. |
+- **FastAPI backend** wrapping each of the 7 pipeline phases as discrete endpoints (`POST /session/start`, `POST /session/confirm-genre`, etc.); `context_variables` serialized to a server-side session store
+- **WebSocket channel** for agent streaming — replaces every `print()` in `run.py`; existing `_parse_critic_response()` and `_parse_validator_response()` structured outputs map directly to typed event envelopes
+- **React/Next.js frontend**: playlist drag-and-drop editor, Critic feedback sidebar (`PROBLEMS`/`VERDICT`), build progress stream
+- **Waveform preview widget** wired to the existing `preview_transition()` and `play_track()` tools exposed over the API
+
+---
+
+## v2.1 — Live Visual Effects: "The Light Show"
+
+Beat-reactive browser visuals driven in real time by the LiveDJ engine event stream. The LiveEngine already fires 6 event types (`track_started`, `approaching_crossfade`, `crossfade_triggered`, `crossfade_finished`, `track_ended`, `session_ended`) — this milestone pipes them into a WebGL renderer.
+
+- **Event bridge**: LiveEngine queue events forwarded over the v2.0 WebSocket as typed JSON (`{"event": "crossfade_triggered", "bpm": 128, "camelot_key": "9A", "energy": 7.4}`)
+- **Browser renderer**: WebGL canvas (Three.js or GLSL) with genre-themed shader presets; each event type triggers a visual transition (beat-drop flash, Camelot colour palette shift, particle burst)
+- **Effect customization panel**: per-genre preset selector; override shader parameters (particle density, colour, motion speed) live during a session
+- **Custom video mode**: fullscreen canvas output capturable by OBS/streaming software alongside the audio
+
+---
+
+## v2.2 — Multi-Genre Sessions: "Janus Speaks in Sequences"
+
+Janus accepts an ordered genre sequence (e.g., deep house → techno). The pipeline validates harmonic/BPM bridges at every genre boundary.
+
+- `context_variables["genre"]` promoted from `str` → `list[str]` across `run.py` and all consumers in `tools.py`
+- `propose_playlist()` refactored to merge per-genre track pools proportionally by duration
+- `suggest_bridge_track()` genre constraint relaxed to span the two genres flanking a boundary position
+- `build_session()` passes `--genre` as a comma-joined list; `_merge_theme()` and `get_artwork_dir()` use a primary-genre rule for visuals
+
+---
+
+## v2.3 — Library Import: "Bring Your Own Crates"
+
+Full track ingestion from Rekordbox XML and Spotify, reducing manual catalog work to zero.
+
+- **Rekordbox full import**: extend the existing `import_rekordbox()` tool (currently hot cues + beatgrid only) to full track ingestion — `id`, `display_name`, `file`, `camelot_key`, `bpm`, `hot_cues`, `beatgrid`
+- **Spotify import**: new `import_spotify(playlist_url)` tool mapping `audio_features` (tempo, key, mode) to Camelot notation; stub entries in `tracks.json` with `source: "spotify"` and a local file path placeholder
+- **Web UI panels**: XML file upload for Rekordbox, OAuth2 PKCE for Spotify, import progress via WebSocket
+- Conflict resolution on `display_name` collisions surfaced in the UI before writing
+
+---
+
+## v2.4 — Cloud Rendering: "Render Offsite"
+
+Offload the video render subprocess to Modal or RunPod; the UI stays responsive during long sessions.
+
+- `RenderBackend` protocol with `LocalRenderBackend` (current behaviour) and `RemoteRenderBackend` (Modal/RunPod) implementations; extraction point is the `build_session()` subprocess call
+- Async job handle returned immediately; render progress pushed to the frontend via the v2.0 WebSocket channel
+- Output artifacts downloaded to local `output/` or served as signed cloud URLs, configurable via `.env`
+
+---
+
+## v2.5 — Plugin Architecture: "Open the Pipeline"
+
+Define a `BaseAgent` protocol so community agents can slot into the pipeline between any two existing phases without forking the codebase.
+
+- `agent/base.py`: `BaseAgent` Protocol with `system_prompt`, `tools`, `phase_name`, and `run(messages, context_variables)` — formalizes the bounded-role pattern in CLAUDE.md
+- Plugin discovery: scan `plugins/` at startup; register as optional phases after a named built-in phase (e.g., `after: "critic"`)
+- Tools must satisfy the existing `fn(params, context_variables: dict) -> str` convention — no new contract needed
+- Reference plugin: `CrowdEnergyAgent` example in `plugins/examples/` demonstrating the full lifecycle
 
 ---
 
