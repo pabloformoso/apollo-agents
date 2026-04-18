@@ -3,7 +3,7 @@ import { useEffect, useRef, useCallback } from "react";
 import { getToken } from "./auth";
 import type { ServerEvent } from "./types";
 
-const WS_BASE = "ws://localhost:8000";
+const WS_BASE = "ws://localhost:8800";
 
 export function useSessionWS(
   sessionId: string | null,
