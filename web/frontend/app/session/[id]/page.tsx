@@ -234,7 +234,9 @@ export default function SessionPage() {
       case "phase_complete":
         flushText();
         setStreaming(false);
-        setSession(prev => prev ? { ...prev, phase: event.phase as Phase, ...(event.data as object) } : prev);
+        // Backend sends the full session dict as data — replace wholesale so
+        // the authoritative `phase` (the next phase) is what the UI reacts to.
+        setSession(event.data as SessionState);
         break;
       case "state":
         setSession(event.data);

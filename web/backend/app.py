@@ -214,18 +214,14 @@ async def session_ws(
                 s.critic_problems = problems
                 s.structured_problems = structured
                 s.phase = "checkpoint2"
-                await emit({"type": "phase_complete", "phase": "critique", "data": {
-                    "verdict": verdict,
-                    "problems": problems,
-                    "structured_problems": structured,
-                }})
+                await emit({"type": "phase_complete", "phase": "critique", "data": s.to_dict()})
 
             # ── Checkpoint 2 — user proceeds to Editor ───────────────────
             elif msg_type == "checkpoint2_approve" and s.phase == "checkpoint2":
                 s.phase = "editing"
                 s.messages.setdefault("editor", [])
                 await emit({"type": "phase_start", "phase": "editing"})
-                await emit({"type": "phase_complete", "phase": "checkpoint2", "data": {}})
+                await emit({"type": "phase_complete", "phase": "checkpoint2", "data": s.to_dict()})
 
             # ── Editor command ────────────────────────────────────────────
             elif msg_type == "editor_command" and s.phase == "editing":
@@ -241,11 +237,7 @@ async def session_ws(
                     s.validator_status = v_status
                     s.validator_issues = v_issues
                     s.phase = "rating"
-                    await emit({"type": "phase_complete", "phase": "validating", "data": {
-                        "status": v_status,
-                        "issues": v_issues,
-                        "session_name": last_build,
-                    }})
+                    await emit({"type": "phase_complete", "phase": "validating", "data": s.to_dict()})
                 else:
                     await emit({"type": "phase_complete", "phase": "editor_turn", "data": s.to_dict()})
 
