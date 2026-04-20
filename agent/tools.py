@@ -13,6 +13,7 @@ import json
 import math
 import os
 import random
+import re
 import shutil
 import subprocess
 import sys
@@ -590,6 +591,40 @@ def insert_bridge_track(after_position: int, track_id: str, context_variables: d
     )
 
 
+# Maps notable stdout lines from `main.py --from-session` to short progress
+# events. Order matters — first match wins. Each entry: (regex, stage, template).
+# Template placeholders {1}, {2}, ... refer to capture groups.
+_BUILD_PROGRESS_PATTERNS: list[tuple[re.Pattern[str], str, str]] = [
+    (re.compile(r"^=== Loading Agent Session:"), "loading_session", "Loading session config"),
+    (re.compile(r"^\[(\d+)/(\d+)\] (.+?) \("), "mixing", "Mixing track {1}/{2}: {3}"),
+    (re.compile(r"^Reached target"), "mix_done", "Target duration reached"),
+    (re.compile(r"^Transition map:"), "mix_done", "Mix rendered — laying transition map"),
+    (re.compile(r"^Exporting audio to .* \(([A-Z0-9]+),"), "export_audio", "Exporting audio ({1})"),
+    (re.compile(r"^Generating artwork\.\.\."), "artwork", "Generating artwork"),
+    (re.compile(r"^\s*Generating artwork for '(.+?)'"), "artwork_track", "Artwork: {1}"),
+    (re.compile(r"^Generating video loops"), "video_loops", "Generating video loops"),
+    (re.compile(r"^Loading artwork images"), "artwork_load", "Loading artwork images"),
+    (re.compile(r"^Loading audio for waveform"), "waveform", "Analyzing waveform"),
+    (re.compile(r"^Rendering video to .* \((\d+x\d+), (\d+)fps\)"), "render_video", "Rendering video ({1} @ {2}fps)"),
+    (re.compile(r"^=== Audio Validation"), "validate", "Validating audio"),
+]
+
+
+def _parse_build_progress_line(line: str) -> dict | None:
+    """Map a stdout line from the build subprocess to a progress event.
+
+    Returns {"stage": str, "message": str} or None to skip the line.
+    """
+    for pattern, stage, template in _BUILD_PROGRESS_PATTERNS:
+        m = pattern.search(line)
+        if m:
+            msg = template
+            for i, g in enumerate(m.groups(), 1):
+                msg = msg.replace(f"{{{i}}}", g)
+            return {"stage": stage, "message": msg}
+    return None
+
+
 def build_session(session_name: str, context_variables: dict) -> str:
     """Save the current playlist as a draft and trigger the full mix + video pipeline.
 
@@ -644,13 +679,40 @@ def build_session(session_name: str, context_variables: dict) -> str:
     ]
 
     print(f"\n[Agent] Launching pipeline: {' '.join(cmd)}\n")
-    result = subprocess.run(cmd, cwd=str(_PROJECT_DIR))
 
-    if result.returncode == 0:
+    # When a progress callback is present (web path), tail the subprocess
+    # stdout so the UI can show per-stage updates instead of a long silence.
+    # CLI callers leave _progress unset, so the original `subprocess.run`
+    # behaviour is preserved.
+    progress = context_variables.get("_progress")
+    if progress is not None:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(_PROJECT_DIR),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            line = raw.rstrip()
+            print(line)
+            event = _parse_build_progress_line(line)
+            if event:
+                try:
+                    progress(event)
+                except Exception:
+                    pass  # never let UI plumbing break the build
+        returncode = proc.wait()
+    else:
+        returncode = subprocess.run(cmd, cwd=str(_PROJECT_DIR)).returncode
+
+    if returncode == 0:
         context_variables["last_build"] = session_name
         return f"Build complete! Output → output/{session_name}/"
     else:
-        return f"Pipeline exited with code {result.returncode}. Check the output above for errors."
+        return f"Pipeline exited with code {returncode}. Check the output above for errors."
 
 
 # ---------------------------------------------------------------------------

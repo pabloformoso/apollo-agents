@@ -55,6 +55,7 @@ export interface User {
 export type ServerEvent =
   | { type: "text_delta"; content: string }
   | { type: "tool_call"; name: string; input: Record<string, unknown> }
+  | { type: "tool_progress"; name: string; stage: string; message: string }
   | { type: "tool_result"; name: string; result: string }
   | { type: "phase_start"; phase: Phase }
   | { type: "phase_complete"; phase: Phase; data: unknown }

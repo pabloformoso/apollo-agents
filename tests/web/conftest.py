@@ -34,8 +34,9 @@ def client(tmp_db):
     from web.backend.app import app
     from web.backend.session_store import store
 
-    store._sessions.clear()
-    store._by_user.clear()
+    # Reset cache (and its "loaded from DB" flag) so the store re-reads from
+    # the per-test tmp DB instead of whatever prior tests wrote.
+    store._reset()
     return TestClient(app)
 
 

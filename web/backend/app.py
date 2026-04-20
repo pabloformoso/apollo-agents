@@ -143,6 +143,7 @@ async def rate_session(
         context_variables=ctx,
     )
     s.phase = "complete"
+    store.save(s)
     return {"ok": True, "result": result}
 
 
@@ -193,6 +194,10 @@ async def session_ws(
                 raise
             except Exception as exc:  # noqa: BLE001 — surface any phase failure as a UI banner
                 await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            finally:
+                # Persist after every message so a backend restart resumes at
+                # the last committed phase/playlist/chat-history.
+                store.save(s)
 
     except WebSocketDisconnect:
         pass

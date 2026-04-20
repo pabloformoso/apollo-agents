@@ -194,6 +194,8 @@ export default function SessionPage() {
   const [logEntries, setLogEntries] = useState<LogEntry[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [wsReady, setWsReady] = useState(false);
+  const [buildStartedAt, setBuildStartedAt] = useState<number | null>(null);
+  const [buildName, setBuildName] = useState<string | null>(null);
   const pendingTextRef = useRef("");
 
   // Flush accumulated text delta as a single log entry
@@ -218,12 +220,31 @@ export default function SessionPage() {
       case "tool_call":
         flushText();
         setStreaming(false);
-        setLogEntries(prev => [...prev, {
-          type: "tool_call",
-          content: `${event.name}(${JSON.stringify(event.input)})`,
-        }]);
+        if (event.name === "build_session") {
+          const name = typeof event.input.session_name === "string"
+            ? event.input.session_name
+            : null;
+          setBuildStartedAt(Date.now());
+          setBuildName(name);
+          setLogEntries(prev => [...prev, {
+            type: "tool_call",
+            content: name ? `Building session "${name}"` : "Building session",
+          }]);
+        } else {
+          setLogEntries(prev => [...prev, {
+            type: "tool_call",
+            content: `${event.name}(${JSON.stringify(event.input)})`,
+          }]);
+        }
+        break;
+      case "tool_progress":
+        setLogEntries(prev => [...prev, { type: "progress", content: event.message }]);
         break;
       case "tool_result":
+        if (event.name === "build_session") {
+          setBuildStartedAt(null);
+          setBuildName(null);
+        }
         setLogEntries(prev => [...prev, { type: "tool_result", content: event.result }]);
         break;
       case "phase_start":
@@ -250,11 +271,19 @@ export default function SessionPage() {
     }
   }, [flushText, appendLog]);
 
-  const { send } = useSessionWS(sessionId, handleEvent);
+  // Only open the WebSocket after we've confirmed the session exists over
+  // HTTP. Otherwise a stale session ID (e.g. backend restarted and its
+  // in-memory store was wiped) races the fetch 404 with a WS handshake the
+  // server rejects, and Chrome logs a "WebSocket connection failed" error
+  // that can't be silenced from JS.
+  const [sessionLoaded, setSessionLoaded] = useState(false);
+  const { send } = useSessionWS(sessionLoaded ? sessionId : null, handleEvent);
 
   useEffect(() => {
     if (!getUser()) { router.push("/login"); return; }
-    getSession(sessionId).then(setSession).catch(() => router.push("/dashboard"));
+    getSession(sessionId)
+      .then(s => { setSession(s); setSessionLoaded(true); })
+      .catch(() => router.push("/dashboard"));
   }, [sessionId, router]);
 
   const sendMsg = useCallback((type: string, content?: string) => {
@@ -300,7 +329,12 @@ export default function SessionPage() {
         {/* Left: Agent stream */}
         <div className="flex flex-col flex-1 min-w-0 border-r border-border">
           <div className="flex-1 overflow-hidden p-3">
-            <AgentStream entries={logEntries} isStreaming={streaming} />
+            <AgentStream
+              entries={logEntries}
+              isStreaming={streaming}
+              buildStartedAt={buildStartedAt}
+              buildName={buildName}
+            />
           </div>
 
           {/* Phase input area */}

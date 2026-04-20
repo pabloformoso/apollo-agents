@@ -31,6 +31,13 @@ export function useSessionWS(
 
     const ws = new WebSocket(`${WS_BASE}/ws/sessions/${sessionId}?token=${token}`);
     wsRef.current = ws;
+    let opened = false;
+    let cancelled = false;
+
+    ws.onopen = () => {
+      opened = true;
+      if (cancelled) ws.close();
+    };
 
     ws.onmessage = (e) => {
       try {
@@ -42,12 +49,24 @@ export function useSessionWS(
     };
 
     ws.onerror = () => {
-      onEventRef.current({ type: "error", message: "WebSocket error" });
+      // Suppress handshake-time errors (StrictMode double-mount, backend
+      // reload wiping the in-memory session store). Only surface errors
+      // after a successful open.
+      if (opened && !cancelled) {
+        onEventRef.current({ type: "error", message: "WebSocket error" });
+      }
     };
 
     return () => {
-      ws.close();
+      cancelled = true;
       wsRef.current = null;
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      } else if (ws.readyState === WebSocket.CONNECTING) {
+        // Defer close until the handshake completes; closing mid-handshake
+        // triggers the "closed before connection is established" warning.
+        ws.addEventListener("open", () => ws.close(), { once: true });
+      }
     };
   }, [sessionId]);
 

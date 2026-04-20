@@ -87,6 +87,33 @@ _VALIDATOR_TOOLS = [validate_audio]
 
 
 # ---------------------------------------------------------------------------
+# Progress hook — forwards subprocess stage updates from long-running tools
+# (currently only build_session) back to the WebSocket as tool_progress events.
+# The tool runs in a worker thread via asyncio.to_thread, so the callback must
+# bounce events back onto the event loop thread before awaiting emit().
+# ---------------------------------------------------------------------------
+
+_PROGRESS_TOOLS = {"build_session"}
+
+
+def _install_progress_hook(ctx: dict, tool_name: str, emit: Callable) -> None:
+    if tool_name not in _PROGRESS_TOOLS:
+        return
+    loop = asyncio.get_running_loop()
+
+    def _on_progress(event: dict) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(
+                emit({"type": "tool_progress", "name": tool_name, **event}),
+                loop,
+            )
+        except Exception:
+            pass  # never let UI plumbing break the tool
+
+    ctx["_progress"] = _on_progress
+
+
+# ---------------------------------------------------------------------------
 # Async streaming agent runner
 # ---------------------------------------------------------------------------
 
@@ -142,9 +169,13 @@ async def _run_anthropic_streaming(
         for block in final_msg.content:
             if block.type == "tool_use":
                 await emit({"type": "tool_call", "name": block.name, "input": block.input})
-                result = await asyncio.to_thread(
-                    _run_tool, block.name, block.input, ctx, tool_index
-                )
+                _install_progress_hook(ctx, block.name, emit)
+                try:
+                    result = await asyncio.to_thread(
+                        _run_tool, block.name, block.input, ctx, tool_index
+                    )
+                finally:
+                    ctx.pop("_progress", None)
                 await emit({"type": "tool_result", "name": block.name, "result": str(result)})
                 tool_results.append({
                     "type": "tool_result",
@@ -220,7 +251,11 @@ async def _run_openai_streaming(
                 except Exception:
                     inputs = {}
                 await emit({"type": "tool_call", "name": name, "input": inputs})
-                result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                _install_progress_hook(ctx, name, emit)
+                try:
+                    result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                finally:
+                    ctx.pop("_progress", None)
                 await emit({"type": "tool_result", "name": name, "result": str(result)})
                 results.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
             sys_messages.extend(results)

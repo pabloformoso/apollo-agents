@@ -25,6 +25,15 @@ def init_db() -> None:
                 created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id         TEXT    PRIMARY KEY,
+                user_id    INTEGER NOT NULL,
+                created_at TEXT    NOT NULL,
+                data       TEXT    NOT NULL
+            )
+        """)
+        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
         c.commit()
 
 
@@ -51,3 +60,35 @@ def get_user_by_id(user_id: int) -> dict | None:
     with _conn() as c:
         row = c.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Session persistence — chat/pipeline state survives backend restarts so the
+# frontend's session ID doesn't become stale when uvicorn reloads.
+# ---------------------------------------------------------------------------
+
+def list_all_sessions() -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT id, user_id, created_at, data FROM sessions"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def upsert_session(session_id: str, user_id: int, created_at: str, data: str) -> None:
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO sessions (id, user_id, created_at, data)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data
+            """,
+            (session_id, user_id, created_at, data),
+        )
+        c.commit()
+
+
+def delete_session_row(session_id: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        c.commit()
