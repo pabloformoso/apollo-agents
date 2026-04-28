@@ -3,6 +3,7 @@ import io
 import json
 import os
 import random
+import subprocess
 import sys
 import wave
 
@@ -11,7 +12,6 @@ import numpy as np
 import pyrubberband as pyrb
 from dotenv import load_dotenv
 from moviepy import (
-    AudioFileClip,
     CompositeVideoClip,
     TextClip,
     VideoClip,
@@ -1703,22 +1703,24 @@ def generate_short(session_dir, session_config, transitions, audio_path,
         return frame_buf
 
     # 7. Render video
-    audio_clip = AudioFileClip(short_audio_path)
-    duration = audio_clip.duration
+    duration = _wav_duration_sec(short_audio_path)
     bg_clip = VideoClip(make_frame, duration=duration).with_fps(VIDEO_FPS)
-    video = bg_clip.with_audio(audio_clip)
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    silent_video_path = output_path.replace(".mp4", ".silent.mp4")
     print(f"\nRendering short to {output_path} ({tgt_w}x{tgt_h}, {VIDEO_FPS}fps)...")
-    video.write_videofile(
-        output_path,
+    bg_clip.write_videofile(
+        silent_video_path,
         fps=VIDEO_FPS,
         codec="libx264",
-        audio_codec="aac",
-        audio_bitrate="320k",
+        audio=False,
         preset="medium",
         logger="bar",
     )
+    print("Muxing audio with ffmpeg...")
+    _mux_audio_into_video(silent_video_path, short_audio_path, output_path)
+    if os.path.exists(silent_video_path):
+        os.remove(silent_video_path)
 
     # Clean up temp audio
     if os.path.exists(short_audio_path):
@@ -1729,6 +1731,28 @@ def generate_short(session_dir, session_config, transitions, audio_path,
 
 
 # === Video generation ===
+
+def _mux_audio_into_video(silent_video_path, audio_path, output_path,
+                          audio_codec="aac", audio_bitrate="320k", sample_rate=48000):
+    # Direct ffmpeg pass: copy the silent video stream verbatim and encode the WAV
+    # to AAC in one shot. Bypasses moviepy's chained ffmpeg pipes, which corrupted
+    # audio at chunk boundaries on Windows.
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", silent_video_path,
+        "-i", audio_path,
+        "-c:v", "copy",
+        "-c:a", audio_codec, "-b:a", audio_bitrate, "-ar", str(sample_rate),
+        "-movflags", "+faststart",
+        "-loglevel", "error",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"ffmpeg mux failed (exit {result.returncode}):\n{result.stderr}"
+        )
+
 
 def _precompute_audio_data(audio_path):
     """Load audio, compute amplitude envelope, spectral band energies, and beat times.
@@ -2675,8 +2699,7 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
     # Resolve theme (merges session overrides with defaults)
     theme = _get_session_theme(session_config)
 
-    audio = AudioFileClip(audio_path)
-    total_duration = audio.duration
+    total_duration = _wav_duration_sec(audio_path)
     width = VIDEO_SIZE[0]
 
     # Pre-compute audio data (envelope, spectral bands, beats)
@@ -2815,18 +2838,21 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
     titles = _precompute_title_images(transitions, total_duration, width, theme=theme)
 
     bg = VideoClip(make_frame, duration=total_duration)
-    video = bg.with_audio(audio)
 
+    silent_video_path = output_path.replace(".mp4", ".silent.mp4")
     print(f"\nRendering video to {output_path} ({VIDEO_SIZE[0]}x{VIDEO_SIZE[1]}, {VIDEO_FPS}fps)...")
-    video.write_videofile(
-        output_path,
+    bg.write_videofile(
+        silent_video_path,
         fps=VIDEO_FPS,
         codec="libx264",
-        audio_codec="aac",
-        audio_bitrate="320k",
+        audio=False,
         preset="medium",
         logger="bar",
     )
+    print("Muxing audio with ffmpeg...")
+    _mux_audio_into_video(silent_video_path, audio_path, output_path)
+    if os.path.exists(silent_video_path):
+        os.remove(silent_video_path)
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Video done! {size_mb:.1f} MB")
 
