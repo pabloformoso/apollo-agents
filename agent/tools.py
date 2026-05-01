@@ -684,6 +684,13 @@ def build_session(session_name: str, context_variables: dict) -> str:
     # stdout so the UI can show per-stage updates instead of a long silence.
     # CLI callers leave _progress unset, so the original `subprocess.run`
     # behaviour is preserved.
+    # On Windows, isolate the child in its own process group so a SIGINT
+    # delivered to the backend (e.g. uvicorn `--reload` shutting down on a
+    # source change) does not propagate and kill an in-flight build mid-mix.
+    popen_kwargs: dict = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     progress = context_variables.get("_progress")
     if progress is not None:
         proc = subprocess.Popen(
@@ -693,6 +700,7 @@ def build_session(session_name: str, context_variables: dict) -> str:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            **popen_kwargs,
         )
         assert proc.stdout is not None
         for raw in proc.stdout:
@@ -706,13 +714,19 @@ def build_session(session_name: str, context_variables: dict) -> str:
                     pass  # never let UI plumbing break the build
         returncode = proc.wait()
     else:
-        returncode = subprocess.run(cmd, cwd=str(_PROJECT_DIR)).returncode
+        returncode = subprocess.run(cmd, cwd=str(_PROJECT_DIR), **popen_kwargs).returncode
 
     if returncode == 0:
         context_variables["last_build"] = session_name
         return f"Build complete! Output → output/{session_name}/"
-    else:
-        return f"Pipeline exited with code {returncode}. Check the output above for errors."
+    # 3221225786 (0xC000013A) on Windows = STATUS_CONTROL_C_EXIT — child got
+    # SIGINT, almost always because uvicorn reloaded mid-build.
+    if returncode == 3221225786:
+        return (
+            "Pipeline was interrupted (likely the backend reloaded mid-build). "
+            "Try the build again — no source files have changed since."
+        )
+    return f"Pipeline exited with code {returncode}. Check the output above for errors."
 
 
 # ---------------------------------------------------------------------------
