@@ -264,8 +264,10 @@ async def _handle_ws_message(s, msg_type: str | None, content: str, emit) -> Non
             s.phase = "checkpoint1"
             await emit({"type": "phase_complete", "phase": "planning", "data": s.to_dict()})
         else:
-            await emit({"type": "error", "message": "Could not confirm genre — please try again."})
-            s.phase = "init"
+            # LLM is still gathering info (e.g. asked the user to confirm).
+            # Stay in the genre phase and wait for the next user message —
+            # the conversational text was already streamed via text_delta.
+            await emit({"type": "phase_complete", "phase": "genre_turn", "data": s.to_dict()})
 
     # ── Checkpoint 1 — user approves playlist → run Critic ──────
     elif msg_type == "checkpoint_approve" and s.phase == "checkpoint1":
