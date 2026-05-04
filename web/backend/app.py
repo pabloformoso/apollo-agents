@@ -60,6 +60,30 @@ app.add_middleware(
 )
 
 
+# Genre Guard cap: max user turns before we treat the conversation as
+# stuck and emit the "Could not confirm genre" error. See issue #23.
+MAX_GENRE_TURNS = 8
+
+
+def _should_emit_genre_error(history: list[dict]) -> bool:
+    """Return True when the genre-guard turn ended without a confirmation
+    AND the agent gave up (empty/whitespace assistant response, OR the
+    user has hit MAX_GENRE_TURNS without confirming).
+
+    Returns False on the normal "still asking, awaiting user reply" turn,
+    so the handler should leave ``s.phase`` at ``"genre"`` instead of
+    surfacing a misleading red error banner. See issue #23.
+    """
+    last_assistant = next(
+        (m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"),
+        "",
+    )
+    if not (last_assistant or "").strip():
+        return True
+    user_turns = sum(1 for m in history if m.get("role") == "user")
+    return user_turns >= MAX_GENRE_TURNS
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
@@ -515,8 +539,16 @@ async def _handle_ws_message(s, msg_type: str | None, content: str, emit) -> Non
             s.phase = "checkpoint1"
             await emit({"type": "phase_complete", "phase": "planning", "data": s.to_dict()})
         else:
-            await emit({"type": "error", "message": "Could not confirm genre — please try again."})
-            s.phase = "init"
+            # Distinguish "agent is still asking" from "agent gave up". On
+            # in-progress turns the LLM is politely asking "Is this correct?"
+            # and the user just needs to reply — emitting an error banner
+            # next to that question is purely cosmetic noise. See issue #23.
+            if _should_emit_genre_error(history):
+                await emit({"type": "error", "message": "Could not confirm genre — please start a new session."})
+                s.phase = "init"
+            # Otherwise, the agent is still asking a question — keep
+            # s.phase = "genre" so the user's next message routes through
+            # this handler again. No error event.
 
     # ── Checkpoint 1 — user approves playlist → run Critic ──────
     elif msg_type == "checkpoint_approve" and s.phase == "checkpoint1":
