@@ -68,6 +68,12 @@ export default function DashboardPage() {
             Catalog →
           </button>
           <button
+            onClick={() => router.push("/playlists")}
+            className="text-muted text-xs hover:text-neon transition-colors"
+          >
+            Playlists →
+          </button>
+          <button
             onClick={handleCreate}
             className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim transition-colors"
           >

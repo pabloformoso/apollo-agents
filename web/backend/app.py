@@ -21,6 +21,10 @@ from .models import (
     EditorCommandRequest,
     GenreIntentRequest,
     LoginRequest,
+    PlaylistAddTracks,
+    PlaylistCreate,
+    PlaylistRename,
+    PlaylistReorder,
     RatingRequest,
     RegisterRequest,
     TokenResponse,
@@ -175,6 +179,140 @@ async def stream_track(track_id: str, token: str = Query(...)):
     # Starlette's FileResponse handles Range/206 Partial Content natively,
     # which is what makes seek + iOS playback work without extra plumbing.
     return FileResponse(str(path), media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
+# Playlists (v2.2.1) — named, ordered collections of catalog tracks. The
+# tracks themselves stay in `tracks/tracks.json`; only the playlist shell and
+# the ordered track_ids live in SQLite. GET hydrates each id back into a full
+# Track via the catalog, so the frontend never re-resolves metadata itself.
+# ---------------------------------------------------------------------------
+
+
+def _own_playlist(playlist_id: int, user: dict) -> dict:
+    p = db.get_playlist(playlist_id)
+    if not p or p["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return p
+
+
+@app.post("/api/playlists", status_code=201)
+async def create_playlist(
+    req: PlaylistCreate,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.create_playlist(current_user["id"], req.name)
+
+
+@app.get("/api/playlists")
+async def list_playlists(current_user: dict = Depends(auth.get_current_user)):
+    return db.list_playlists_by_user(current_user["id"])
+
+
+@app.get("/api/playlists/{playlist_id}")
+async def get_playlist_detail(
+    playlist_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    p = _own_playlist(playlist_id, current_user)
+
+    try:
+        catalog_tracks, _ = await asyncio.to_thread(pipeline.load_catalog, None)
+    except pipeline.CatalogUnavailable:
+        catalog_tracks = []
+    by_id = {t.get("id"): t for t in catalog_tracks if t.get("id")}
+
+    hydrated: list[dict] = []
+    for tid in p["track_ids"]:
+        t = by_id.get(tid)
+        if t is None:
+            # Catalog may have been rebuilt and dropped this id — surface it
+            # rather than failing so the user can clean up the playlist.
+            hydrated.append({"id": tid, "display_name": tid, "missing": True})
+        else:
+            hydrated.append(t)
+
+    return {
+        "id": p["id"],
+        "user_id": p["user_id"],
+        "name": p["name"],
+        "created_at": p["created_at"],
+        "updated_at": p["updated_at"],
+        "tracks": hydrated,
+    }
+
+
+@app.patch("/api/playlists/{playlist_id}")
+async def rename_playlist_endpoint(
+    playlist_id: int,
+    req: PlaylistRename,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    db.rename_playlist(playlist_id, req.name)
+    refreshed = db.get_playlist(playlist_id)
+    assert refreshed is not None
+    return {
+        "id": refreshed["id"],
+        "user_id": refreshed["user_id"],
+        "name": refreshed["name"],
+        "created_at": refreshed["created_at"],
+        "updated_at": refreshed["updated_at"],
+        "track_count": len(refreshed["track_ids"]),
+    }
+
+
+@app.delete("/api/playlists/{playlist_id}", status_code=204)
+async def delete_playlist_endpoint(
+    playlist_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    db.delete_playlist(playlist_id)
+
+
+@app.post("/api/playlists/{playlist_id}/tracks")
+async def add_tracks_endpoint(
+    playlist_id: int,
+    req: PlaylistAddTracks,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    new_count = db.add_tracks_to_playlist(playlist_id, req.track_ids)
+    return {"playlist_id": playlist_id, "track_count": new_count}
+
+
+@app.delete("/api/playlists/{playlist_id}/tracks/{track_id}", status_code=204)
+async def remove_track_endpoint(
+    playlist_id: int,
+    track_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    if not db.remove_track_from_playlist(playlist_id, track_id):
+        raise HTTPException(status_code=404, detail="Track not in playlist")
+
+
+@app.put("/api/playlists/{playlist_id}/order")
+async def reorder_endpoint(
+    playlist_id: int,
+    req: PlaylistReorder,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    ok = db.reorder_playlist_tracks(playlist_id, req.track_ids)
+    if not ok:
+        raise HTTPException(
+            status_code=422,
+            detail="track_ids must match the playlist's current track_ids exactly",
+        )
+    refreshed = db.get_playlist(playlist_id)
+    assert refreshed is not None
+    return {
+        "id": refreshed["id"],
+        "track_ids": refreshed["track_ids"],
+        "updated_at": refreshed["updated_at"],
+    }
 
 
 # ---------------------------------------------------------------------------

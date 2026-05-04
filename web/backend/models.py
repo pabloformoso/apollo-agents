@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import Optional
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class RegisterRequest(BaseModel):
@@ -38,3 +38,23 @@ class RatingRequest(BaseModel):
     rating: int  # 1–5
     notes: Optional[str] = None
     transition_ratings: Optional[list[dict]] = None
+
+
+# ---------------------------------------------------------------------------
+# Playlists (v2.2.1)
+# ---------------------------------------------------------------------------
+
+class PlaylistCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class PlaylistRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class PlaylistAddTracks(BaseModel):
+    track_ids: list[str] = Field(..., min_length=1)
+
+
+class PlaylistReorder(BaseModel):
+    track_ids: list[str] = Field(..., min_length=0)
