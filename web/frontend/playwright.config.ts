@@ -9,10 +9,19 @@ const E2E_DB = path.join(PROJECT_ROOT, ".tmp/apollo-e2e.db");
 // (`mkdir -p`) blew up under cmd.exe on Windows by creating a literal "-p"
 // directory.
 fs.mkdirSync(path.dirname(E2E_DB), { recursive: true });
-try {
-  fs.unlinkSync(E2E_DB);
-} catch {
-  // ignore — fresh run, file may not exist yet
+
+// One-shot DB purge — only the outermost CLI process should unlink the
+// E2E SQLite db. Worker subprocesses inherit env vars, so by setting
+// APOLLO_E2E_DB_PURGED=1 after the first unlink, every later config
+// re-import (worker, webServer child) skips the unlink and the database
+// uvicorn just initialized stays intact.
+if (!process.env.APOLLO_E2E_DB_PURGED) {
+  try {
+    fs.unlinkSync(E2E_DB);
+  } catch {
+    // ignore — fresh run, file may not exist yet
+  }
+  process.env.APOLLO_E2E_DB_PURGED = "1";
 }
 
 export default defineConfig({
