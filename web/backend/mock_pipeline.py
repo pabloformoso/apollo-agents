@@ -113,6 +113,9 @@ def _build_mock_catalog(pipeline_module) -> list[dict]:
         str(audio_path.relative_to(Path(pipeline_module._PROJECT_DIR)))
         .replace("\\", "/")
     )
+    # E2E specs need at least three distinct tracks to exercise reorder /
+    # multi-track playlists. They share the same file on disk — only the id
+    # and display_name diverge so the UI can tell them apart.
     _MOCK_TRACKS_CACHE = [
         {
             "id": "mock-lofi-silence",
@@ -122,6 +125,28 @@ def _build_mock_catalog(pipeline_module) -> list[dict]:
             "genre": "lofi",
             "camelot_key": "8A",
             "bpm": 90.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+        {
+            "id": "mock-lofi-silence-2",
+            "display_name": "Mock Silence Two",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "9A",
+            "bpm": 92.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+        {
+            "id": "mock-lofi-silence-3",
+            "display_name": "Mock Silence Three",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "10A",
+            "bpm": 94.0,
             "duration_sec": 1.0,
             "variant_of": None,
         },

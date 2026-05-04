@@ -5,6 +5,7 @@ import { getCatalog } from "@/lib/api";
 import { getUser, clearAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import type { Track } from "@/lib/types";
+import AddToPlaylistMenu from "@/components/AddToPlaylistMenu";
 
 function formatDuration(sec: number | null | undefined) {
   if (!sec) return "—";
@@ -82,6 +83,12 @@ export default function CatalogPage() {
             className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
           >
             ← Dashboard
+          </button>
+          <button
+            onClick={() => router.push("/playlists")}
+            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
+          >
+            Playlists
           </button>
           <button
             onClick={() => {
@@ -176,6 +183,7 @@ function TrackCard({
 }) {
   const cover = track.suno?.cover_url;
   const { play } = usePlayer();
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div
       onClick={onClick}
@@ -187,9 +195,9 @@ function TrackCard({
           onClick();
         }
       }}
-      className="group bg-surface border border-border rounded overflow-hidden text-left hover:border-neon transition-colors cursor-pointer focus:outline-none focus:border-neon"
+      className="group bg-surface border border-border rounded text-left hover:border-neon transition-colors cursor-pointer focus:outline-none focus:border-neon relative"
     >
-      <div className="aspect-square bg-[#0a0a0f] relative overflow-hidden">
+      <div className="aspect-square bg-[#0a0a0f] relative overflow-hidden rounded-t">
         {cover ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -204,10 +212,23 @@ function TrackCard({
           </div>
         )}
         {track.camelot_key && (
-          <span className="absolute top-1 right-1 bg-[#0a0a0f]/80 text-neon text-[10px] px-1.5 py-0.5 rounded font-mono">
+          <span className="absolute top-1 left-1 bg-[#0a0a0f]/80 text-neon text-[10px] px-1.5 py-0.5 rounded font-mono">
             {track.camelot_key}
           </span>
         )}
+        {/* Add-to-playlist "+" — hover-visible, top-right so it doesn't
+            collide with the bottom-right play overlay. */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setMenuOpen((v) => !v);
+          }}
+          aria-label={`Add ${track.display_name} to a playlist`}
+          data-testid="track-card-add"
+          className="absolute top-1 right-1 w-7 h-7 rounded-full bg-[#0a0a0f]/80 text-neon text-sm flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-neon hover:text-[#0a0a0f] transition-all"
+        >
+          +
+        </button>
         {/* Play overlay — hover-visible. Stop propagation so clicking play
             doesn't also open the detail drawer. */}
         <button
@@ -222,6 +243,12 @@ function TrackCard({
           ▶
         </button>
       </div>
+      {menuOpen && (
+        <AddToPlaylistMenu
+          trackId={track.id}
+          onClose={() => setMenuOpen(false)}
+        />
+      )}
       <div className="p-2">
         <p className="text-xs text-[#e2e2ff] truncate font-bold">
           {track.display_name}
@@ -251,6 +278,7 @@ function TrackDetail({
 }) {
   const suno = track.suno ?? {};
   const { play } = usePlayer();
+  const [addOpen, setAddOpen] = useState(false);
   return (
     <div
       className="fixed inset-0 z-50 bg-black/70 flex items-stretch justify-end animate-fade-in"
@@ -288,13 +316,28 @@ function TrackDetail({
           />
         )}
 
-        <button
-          onClick={() => play(track, list)}
-          data-testid="track-detail-play"
-          className="w-full mb-4 bg-neon text-[#0a0a0f] text-xs font-pixel tracking-widest py-2 rounded hover:bg-neon-dim transition-colors"
-        >
-          ▶ PLAY
-        </button>
+        <div className="flex gap-2 mb-4 relative">
+          <button
+            onClick={() => play(track, list)}
+            data-testid="track-detail-play"
+            className="flex-1 bg-neon text-[#0a0a0f] text-xs font-pixel tracking-widest py-2 rounded hover:bg-neon-dim transition-colors"
+          >
+            ▶ PLAY
+          </button>
+          <button
+            onClick={() => setAddOpen((v) => !v)}
+            data-testid="track-detail-add"
+            className="px-4 bg-surface border border-border text-[#e2e2ff] text-xs font-pixel tracking-widest py-2 rounded hover:border-neon hover:text-neon transition-colors"
+          >
+            + PLAYLIST
+          </button>
+          {addOpen && (
+            <AddToPlaylistMenu
+              trackId={track.id}
+              onClose={() => setAddOpen(false)}
+            />
+          )}
+        </div>
 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs mb-4">
           <Field label="Genre" value={track.genre_folder ?? track.genre} />
