@@ -114,3 +114,16 @@ export const reorderTracks = (id: number, trackIds: string[]) =>
     `/playlists/${id}/order`,
     { method: "PUT", body: JSON.stringify({ track_ids: trackIds }) },
   );
+
+// Per-user track ratings (1–5). DELETE is idempotent so the UI can fire it
+// on every "click filled star" without first checking server state.
+export const setRating = (trackId: string, rating: number) =>
+  req<{ track_id: string; rating: number }>(
+    `/tracks/${encodeURIComponent(trackId)}/rating`,
+    { method: "PUT", body: JSON.stringify({ rating }) },
+  );
+
+export const clearRating = (trackId: string) =>
+  req<void>(`/tracks/${encodeURIComponent(trackId)}/rating`, {
+    method: "DELETE",
+  });

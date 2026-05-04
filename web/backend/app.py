@@ -12,7 +12,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
@@ -26,6 +26,7 @@ from .models import (
     PlaylistRename,
     PlaylistReorder,
     RatingRequest,
+    RatingUpdate,
     RegisterRequest,
     TokenResponse,
 )
@@ -99,13 +100,18 @@ async def me(current_user: dict = Depends(auth.get_current_user)):
 @app.get("/api/catalog")
 async def get_catalog(
     genre: str | None = Query(None, description="Filter by genre_folder (case-insensitive)"),
-    _user: dict = Depends(auth.get_current_user),
+    current_user: dict = Depends(auth.get_current_user),
 ):
     try:
         tracks, genres = await asyncio.to_thread(pipeline.load_catalog, genre)
     except pipeline.CatalogUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"tracks": tracks, "genres": genres}
+
+    # Hydrate each track with the calling user's own rating (or null). This is
+    # always scoped to current_user.id — ratings from other users never leak.
+    ratings = await asyncio.to_thread(db.get_user_ratings, current_user["id"])
+    enriched = [{**t, "user_rating": ratings.get(t.get("id")) } for t in tracks]
+    return {"tracks": enriched, "genres": genres}
 
 
 # ---------------------------------------------------------------------------
@@ -313,6 +319,38 @@ async def reorder_endpoint(
         "track_ids": refreshed["track_ids"],
         "updated_at": refreshed["updated_at"],
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-user track ratings (1–5). The catalog endpoint above hydrates the
+# `user_rating` field for the calling user; these two routes let the user
+# create / update / clear their own rating.
+# ---------------------------------------------------------------------------
+
+@app.put("/api/tracks/{track_id}/rating")
+async def set_track_rating(
+    track_id: str,
+    body: RatingUpdate,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    await asyncio.to_thread(
+        db.upsert_track_rating, current_user["id"], track_id, body.rating
+    )
+    return {"track_id": track_id, "rating": body.rating}
+
+
+@app.delete("/api/tracks/{track_id}/rating", status_code=204)
+async def clear_track_rating(
+    track_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    # Idempotent: deleting a non-existent rating succeeds with 204 anyway —
+    # the UI fires DELETE on every "click on filled star" without first
+    # checking the row exists.
+    await asyncio.to_thread(
+        db.delete_track_rating, current_user["id"], track_id
+    )
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------

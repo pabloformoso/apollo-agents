@@ -58,3 +58,12 @@ class PlaylistAddTracks(BaseModel):
 
 class PlaylistReorder(BaseModel):
     track_ids: list[str] = Field(..., min_length=0)
+
+
+# ---------------------------------------------------------------------------
+# Ratings (v2.2.2)
+# ---------------------------------------------------------------------------
+
+class RatingUpdate(BaseModel):
+    """Body for PUT /api/tracks/{track_id}/rating — single 1–5 score."""
+    rating: int = Field(ge=1, le=5)

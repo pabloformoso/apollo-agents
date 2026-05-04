@@ -55,6 +55,17 @@ def init_db() -> None:
                 FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
             )
         """)
+        # Track ratings (v2.2.2) — per-user 1–5 score, drives favorites filter.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS track_ratings (
+                user_id    INTEGER NOT NULL,
+                track_id   TEXT    NOT NULL,
+                rating     INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
+                updated_at TEXT    NOT NULL,
+                PRIMARY KEY (user_id, track_id),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
         c.commit()
 
 
@@ -290,3 +301,43 @@ def reorder_playlist_tracks(playlist_id: int, track_ids: list[str]) -> bool:
         _touch_playlist(c, playlist_id)
         c.commit()
         return True
+
+
+# ---------------------------------------------------------------------------
+# Per-user track ratings (1–5). Used by the catalog favorites filter.
+# ---------------------------------------------------------------------------
+
+def upsert_track_rating(user_id: int, track_id: str, rating: int) -> None:
+    """Insert or update the rating row for (user_id, track_id)."""
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO track_ratings (user_id, track_id, rating, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(user_id, track_id) DO UPDATE SET
+                rating     = excluded.rating,
+                updated_at = excluded.updated_at
+            """,
+            (user_id, track_id, rating),
+        )
+        c.commit()
+
+
+def delete_track_rating(user_id: int, track_id: str) -> None:
+    """Idempotent — removing a rating that doesn't exist is not an error."""
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM track_ratings WHERE user_id = ? AND track_id = ?",
+            (user_id, track_id),
+        )
+        c.commit()
+
+
+def get_user_ratings(user_id: int) -> dict[str, int]:
+    """Return {track_id: rating} for every rating the user has set."""
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT track_id, rating FROM track_ratings WHERE user_id = ?",
+            (user_id,),
+        ).fetchall()
+        return {r["track_id"]: r["rating"] for r in rows}
