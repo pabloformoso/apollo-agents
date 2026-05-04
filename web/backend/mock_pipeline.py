@@ -6,6 +6,9 @@ AGENT_PROVIDER=mock — no Anthropic/OpenAI calls, no librosa, no DALL-E.
 """
 from __future__ import annotations
 
+import os
+import wave
+from pathlib import Path
 from typing import Callable
 
 
@@ -72,6 +75,60 @@ def fake_check_catalog(genre: str | None = None) -> None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Catalog/streaming fakes for v2.2 — emit a tiny synthetic catalog on demand
+# so E2E runs (`AGENT_PROVIDER=mock`) can hit `/api/tracks/{id}/stream`
+# against a real file on disk without dragging in the production tracks/ dir.
+# ---------------------------------------------------------------------------
+
+_MOCK_TRACKS_CACHE: list[dict] | None = None
+
+
+def _ensure_mock_audio_file(pipeline_module) -> Path:
+    """Materialise a 1 s silence WAV under <project_root>/tracks/lofi/ so the
+    streaming endpoint can serve it. Idempotent."""
+    project_root = Path(pipeline_module._PROJECT_DIR)
+    target_dir = project_root / "tracks" / "lofi"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "mock-silence.wav"
+    if target.exists() and target.stat().st_size > 0:
+        return target
+    # Tiny, real, decodable WAV — 1 second of silence at 8 kHz mono.
+    sample_rate = 8000
+    n_frames = sample_rate
+    with wave.open(str(target), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(b"\x00\x00" * n_frames)
+    return target
+
+
+def _build_mock_catalog(pipeline_module) -> list[dict]:
+    global _MOCK_TRACKS_CACHE
+    if _MOCK_TRACKS_CACHE is not None:
+        return _MOCK_TRACKS_CACHE
+    audio_path = _ensure_mock_audio_file(pipeline_module)
+    rel = (
+        str(audio_path.relative_to(Path(pipeline_module._PROJECT_DIR)))
+        .replace("\\", "/")
+    )
+    _MOCK_TRACKS_CACHE = [
+        {
+            "id": "mock-lofi-silence",
+            "display_name": "Mock Silence",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "8A",
+            "bpm": 90.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+    ]
+    return _MOCK_TRACKS_CACHE
+
+
 def install(pipeline_module) -> None:
     """Swap every phase_* on the live pipeline module with the fakes above."""
     pipeline_module.phase_genre_guard = fake_genre
@@ -82,3 +139,11 @@ def install(pipeline_module) -> None:
     pipeline_module.load_memory = fake_memory
     pipeline_module.write_session_record = fake_write
     pipeline_module.check_catalog = fake_check_catalog
+
+    def _fake_load_catalog(genre: str | None = None):
+        tracks = _build_mock_catalog(pipeline_module)
+        if genre:
+            tracks = [t for t in tracks if t["genre_folder"].lower() == genre.lower()]
+        return tracks, ["lofi"]
+
+    pipeline_module.load_catalog = _fake_load_catalog

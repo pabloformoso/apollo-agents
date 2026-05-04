@@ -69,3 +69,10 @@ export const getCatalog = (genre?: string) => {
   const qs = genre ? `?genre=${encodeURIComponent(genre)}` : "";
   return req<Catalog>(`/catalog${qs}`);
 };
+
+// Audio streaming — `<audio>` can't set Authorization headers, so the JWT
+// goes in the query string (same trick as the WebSocket auth).
+export const streamUrl = (trackId: string): string => {
+  const token = getToken() ?? "";
+  return `${BASE}/tracks/${encodeURIComponent(trackId)}/stream?token=${encodeURIComponent(token)}`;
+};

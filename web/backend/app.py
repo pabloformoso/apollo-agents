@@ -10,9 +10,11 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from . import db, auth, pipeline
 from .models import (
@@ -100,6 +102,79 @@ async def get_catalog(
     except pipeline.CatalogUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"tracks": tracks, "genres": genres}
+
+
+# ---------------------------------------------------------------------------
+# Audio streaming — single endpoint that browser <audio> can hit directly.
+# JWT travels in the query string (browsers can't set Authorization on
+# <audio>), mirroring the WebSocket pattern above.
+# ---------------------------------------------------------------------------
+
+_STREAM_MEDIA_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
+
+
+def _stream_authorize(token: str) -> dict:
+    """Decode the JWT from the query string and load the user, or raise 401."""
+    payload = auth.decode_token(token)
+    if not payload or "sub" not in payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    user = db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return dict(user)
+
+
+def _resolve_track_path(track_id: str) -> Path:
+    """Look up `track_id` in the catalog and return a safe absolute path.
+
+    Raises 404 for unknown ids or any path that escapes `tracks/`, and 415
+    for extensions outside `.wav` / `.mp3`.
+    """
+    try:
+        tracks, _ = pipeline.load_catalog(None)
+    except pipeline.CatalogUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    track = next((t for t in tracks if t.get("id") == track_id), None)
+    if not track or not track.get("file"):
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    project_root = Path(pipeline._PROJECT_DIR).resolve()
+    tracks_root = (project_root / "tracks").resolve()
+
+    raw_path = (project_root / track["file"]).resolve()
+
+    # Path-traversal defence: the resolved file must live under tracks/.
+    try:
+        raw_path.relative_to(tracks_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Track not found") from exc
+
+    if not raw_path.exists() or not raw_path.is_file():
+        raise HTTPException(status_code=404, detail="Track file missing")
+
+    suffix = raw_path.suffix.lower()
+    if suffix not in _STREAM_MEDIA_TYPES:
+        raise HTTPException(status_code=415, detail=f"Unsupported audio format: {suffix}")
+
+    return raw_path
+
+
+@app.get("/api/tracks/{track_id}/stream")
+async def stream_track(track_id: str, token: str = Query(...)):
+    _stream_authorize(token)
+    path = await asyncio.to_thread(_resolve_track_path, track_id)
+    media_type = _STREAM_MEDIA_TYPES[path.suffix.lower()]
+    # Starlette's FileResponse handles Range/206 Partial Content natively,
+    # which is what makes seek + iOS playback work without extra plumbing.
+    return FileResponse(str(path), media_type=media_type)
 
 
 # ---------------------------------------------------------------------------
