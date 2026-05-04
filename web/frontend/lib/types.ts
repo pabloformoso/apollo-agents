@@ -34,6 +34,7 @@ export interface Track {
   file?: string;
   variant_of?: string | null;
   suno?: Suno;
+  user_rating?: number | null;
 }
 
 export interface Catalog {

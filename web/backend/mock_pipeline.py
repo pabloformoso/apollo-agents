@@ -113,9 +113,11 @@ def _build_mock_catalog(pipeline_module) -> list[dict]:
         str(audio_path.relative_to(Path(pipeline_module._PROJECT_DIR)))
         .replace("\\", "/")
     )
-    # E2E specs need at least three distinct tracks to exercise reorder /
-    # multi-track playlists. They share the same file on disk — only the id
-    # and display_name diverge so the UI can tell them apart.
+    # Multiple entries (all sharing the same on-disk silence file) so E2E
+    # specs that need >1 catalog item — favorites filter, reorder, multi-track
+    # playlists, etc. — have something to work with. The first track ("Mock
+    # Silence") is referenced by name in the v2.2.0 player spec; the rest are
+    # extras introduced for v2.2.1 (playlists) and v2.2.2 (ratings).
     _MOCK_TRACKS_CACHE = [
         {
             "id": "mock-lofi-silence",
@@ -147,6 +149,39 @@ def _build_mock_catalog(pipeline_module) -> list[dict]:
             "genre": "lofi",
             "camelot_key": "10A",
             "bpm": 94.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+        {
+            "id": "mock-lofi-alpha",
+            "display_name": "Mock Alpha",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "9A",
+            "bpm": 95.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+        {
+            "id": "mock-lofi-bravo",
+            "display_name": "Mock Bravo",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "10A",
+            "bpm": 100.0,
+            "duration_sec": 1.0,
+            "variant_of": None,
+        },
+        {
+            "id": "mock-lofi-charlie",
+            "display_name": "Mock Charlie",
+            "file": rel,
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "11A",
+            "bpm": 105.0,
             "duration_sec": 1.0,
             "variant_of": None,
         },

@@ -1,9 +1,10 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getCatalog } from "@/lib/api";
+import { clearRating, getCatalog, setRating } from "@/lib/api";
 import { getUser, clearAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
+import StarRating from "@/components/StarRating";
 import type { Track } from "@/lib/types";
 import AddToPlaylistMenu from "@/components/AddToPlaylistMenu";
 
@@ -21,6 +22,7 @@ export default function CatalogPage() {
   const [genres, setGenres] = useState<string[]>([]);
   const [genre, setGenre] = useState<string>("");
   const [search, setSearch] = useState("");
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [selected, setSelected] = useState<Track | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,21 +49,75 @@ export default function CatalogPage() {
       .finally(() => setLoading(false));
   }, [user, genre, genres.length]);
 
+  // Optimistic rating updates — patch the in-memory list immediately so the
+  // card re-renders without waiting for the network round trip. The selected
+  // detail panel reads from the same state via `tracks`/derived lookup.
+  const updateLocalRating = useCallback(
+    (trackId: string, next: number | null) => {
+      setTracks((prev) =>
+        prev.map((t) => (t.id === trackId ? { ...t, user_rating: next } : t)),
+      );
+      setSelected((cur) =>
+        cur && cur.id === trackId ? { ...cur, user_rating: next } : cur,
+      );
+    },
+    [],
+  );
+
+  const handleRate = useCallback(
+    async (trackId: string, rating: number) => {
+      updateLocalRating(trackId, rating);
+      try {
+        await setRating(trackId, rating);
+      } catch (e) {
+        // Roll back on error — refetch the catalog to stay in sync.
+        getCatalog(genre || undefined)
+          .then((c) => setTracks(c.tracks))
+          .catch(() => {});
+        setError((e as Error).message ?? "Failed to save rating");
+      }
+    },
+    [genre, updateLocalRating],
+  );
+
+  const handleClearRating = useCallback(
+    async (trackId: string) => {
+      updateLocalRating(trackId, null);
+      try {
+        await clearRating(trackId);
+      } catch (e) {
+        getCatalog(genre || undefined)
+          .then((c) => setTracks(c.tracks))
+          .catch(() => {});
+        setError((e as Error).message ?? "Failed to clear rating");
+      }
+    },
+    [genre, updateLocalRating],
+  );
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return tracks;
-    return tracks.filter((t) => {
-      const hay = [
-        t.display_name,
-        t.suno?.title,
-        t.suno?.tags,
-        t.camelot_key ?? "",
-      ]
-        .join(" ")
-        .toLowerCase();
-      return hay.includes(q);
-    });
-  }, [tracks, search]);
+    let out = tracks;
+    if (favoritesOnly) {
+      out = out.filter(
+        (t) => t.user_rating !== null && (t.user_rating ?? 0) >= 4,
+      );
+    }
+    if (q) {
+      out = out.filter((t) => {
+        const hay = [
+          t.display_name,
+          t.suno?.title,
+          t.suno?.tags,
+          t.camelot_key ?? "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return hay.includes(q);
+      });
+    }
+    return out;
+  }, [tracks, search, favoritesOnly]);
 
   if (!user) return null;
 
@@ -127,6 +183,18 @@ export default function CatalogPage() {
             {g}
           </button>
         ))}
+        <button
+          onClick={() => setFavoritesOnly((v) => !v)}
+          aria-pressed={favoritesOnly}
+          data-testid="favorites-filter"
+          className={`text-xs px-3 py-1 rounded border transition-colors ${
+            favoritesOnly
+              ? "border-neon text-neon bg-neon/10"
+              : "border-border text-muted hover:border-neon hover:text-neon"
+          }`}
+        >
+          ★ Favoritos
+        </button>
         <input
           type="text"
           value={search}
@@ -155,6 +223,8 @@ export default function CatalogPage() {
               track={t}
               list={filtered}
               onClick={() => setSelected(t)}
+              onRate={handleRate}
+              onClearRating={handleClearRating}
             />
           ))}
         </div>
@@ -166,6 +236,8 @@ export default function CatalogPage() {
           track={selected}
           list={filtered}
           onClose={() => setSelected(null)}
+          onRate={handleRate}
+          onClearRating={handleClearRating}
         />
       )}
     </div>
@@ -176,10 +248,14 @@ function TrackCard({
   track,
   list,
   onClick,
+  onRate,
+  onClearRating,
 }: {
   track: Track;
   list: Track[];
   onClick: () => void;
+  onRate: (trackId: string, rating: number) => void;
+  onClearRating: (trackId: string) => void;
 }) {
   const cover = track.suno?.cover_url;
   const { play } = usePlayer();
@@ -262,6 +338,19 @@ function TrackCard({
           {track.bpm ? `${track.bpm} BPM` : "—"} ·{" "}
           {formatDuration(track.duration_sec)}
         </p>
+        <div
+          className="mt-1"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <StarRating
+            value={track.user_rating ?? null}
+            onChange={(n) => onRate(track.id, n)}
+            onClear={() => onClearRating(track.id)}
+            size="sm"
+            label={track.display_name}
+          />
+        </div>
       </div>
     </div>
   );
@@ -271,10 +360,14 @@ function TrackDetail({
   track,
   list,
   onClose,
+  onRate,
+  onClearRating,
 }: {
   track: Track;
   list: Track[];
   onClose: () => void;
+  onRate: (trackId: string, rating: number) => void;
+  onClearRating: (trackId: string) => void;
 }) {
   const suno = track.suno ?? {};
   const { play } = usePlayer();
@@ -337,6 +430,19 @@ function TrackDetail({
               onClose={() => setAddOpen(false)}
             />
           )}
+        </div>
+
+        <div className="flex items-center gap-3 mb-4 border border-border rounded p-3">
+          <span className="text-[10px] text-muted uppercase tracking-wider">
+            Your rating
+          </span>
+          <StarRating
+            value={track.user_rating ?? null}
+            onChange={(n) => onRate(track.id, n)}
+            onClear={() => onClearRating(track.id)}
+            size="md"
+            label={track.display_name}
+          />
         </div>
 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs mb-4">
