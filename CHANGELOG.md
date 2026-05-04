@@ -5,6 +5,66 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-05-04
+
+UX & catalog workflow release. Adds in-browser audio streaming, named
+playlists, per-user track ratings, and standardizes the local dev ports
+to the 4000 range so they stop colliding with common Node tooling.
+
+### Added
+- **In-browser audio streaming** — `GET /api/tracks/{id}/stream?token=<jwt>`
+  with Range/206 support. Persistent `<MiniPlayer>` mounted at the root
+  layout, queue + next/prev, hover-visible play overlay on every catalog
+  tile, prominent play button in the detail drawer (#10).
+- **MP3 support end-to-end** — `--build-catalog` scans `*.wav` and `*.mp3`,
+  streaming endpoint dispatches the right `Content-Type`, agent tools and
+  pipeline read MP3 transparently. Output renders stay WAV (lossless rule)
+  (#10).
+- **Named playlists with CRUD + drag-drop reorder** — `playlists` and
+  `playlist_tracks` SQLite tables, 8 REST endpoints under `/api/playlists`,
+  `/playlists` list + detail pages (dnd-kit reorder, missing-track stubs),
+  `+` button on every catalog tile and `+ PLAYLIST` in the detail drawer,
+  "Play all" reuses the v2.2.0 player (#15).
+- **Per-user track ratings (1–5★) + Favorites filter** — `track_ratings`
+  table, `PUT/DELETE /api/tracks/{id}/rating`, `/api/catalog` enriched
+  with `user_rating`, reusable `<StarRating>` widget on `TrackCard` and
+  `TrackDetail`, `★ Favoritos` filter chip in the toolbar (#14).
+
+### Changed
+- **Default dev ports** — frontend 3000 → **4010**, backend 8000 →
+  **4020**. E2E test ports unchanged (3001/8801) — intentionally distinct
+  from dev defaults (#21).
+
+### Fixed
+- **Playwright config double-unlink on Windows** — sentinel env-var
+  (`APOLLO_E2E_DB_PURGED`) prevents worker-subprocess re-import from
+  purging the SQLite db while uvicorn holds it open (#19, #20).
+- **UTF-8 reads in agent tools** — `agent/tools.py`, `agent/run.py`,
+  `agent/live_engine.py`, `main.py` now open JSON with
+  `encoding="utf-8"`. On Windows, default cp1252 was choking on UTF-8
+  byte sequences (`0x9d` at position 259716 of `tracks.json`) (#22).
+- **Genre Guard banner UX** — no longer emits "Could not confirm genre"
+  on every in-progress confirmation turn. Distinguishes "still asking"
+  (non-empty agent response, under 8 turns) from "gave up" (empty
+  response or turn cap) (#23, #24).
+
+### Tests
+- 258 pytest passing (was 213 in v2.1.0): added 9 stream + 4 catalog-mp3
+  + 13 playlists + 11 ratings + 8 genre-guard regressions.
+- 27 Vitest passing (was 8): added 7 player + 5 playlists + 7 star-rating.
+- 16 Playwright passing (was 11): added 2 player + 3 playlists + 2
+  ratings, all reproducible on Windows after #20.
+
+### Out of scope (deferred to v2.3+)
+- Agent integration with playlists/ratings (the agent currently does not
+  read user ratings or named playlists when planning — that's the v2.3
+  thesis).
+- Pre-existing follow-ups in issues #11 (`npm run lint` broken on Next
+  16), #12 (`tsbuildinfo` not gitignored), #13 (mock pipeline leaks
+  `mock-silence.wav`), #16 (race in `add_tracks_to_playlist`), #17
+  (catalog cache for hydration O(N) per GET), #18 (`handleDragEnd` has
+  no direct test coverage).
+
 ## [2.1.0] — 2026-05-04
 
 First minor release after the v2.0 Web UI launch. Focus: cleaner audio mixes
