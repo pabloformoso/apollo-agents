@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getCatalog } from "@/lib/api";
 import { getUser, clearAuth } from "@/lib/auth";
+import { usePlayer } from "@/lib/player";
 import type { Track } from "@/lib/types";
 
 function formatDuration(sec: number | null | undefined) {
@@ -142,25 +143,51 @@ export default function CatalogPage() {
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
           {filtered.map((t) => (
-            <TrackCard key={t.id} track={t} onClick={() => setSelected(t)} />
+            <TrackCard
+              key={t.id}
+              track={t}
+              list={filtered}
+              onClick={() => setSelected(t)}
+            />
           ))}
         </div>
       )}
 
       {/* Detail drawer */}
       {selected && (
-        <TrackDetail track={selected} onClose={() => setSelected(null)} />
+        <TrackDetail
+          track={selected}
+          list={filtered}
+          onClose={() => setSelected(null)}
+        />
       )}
     </div>
   );
 }
 
-function TrackCard({ track, onClick }: { track: Track; onClick: () => void }) {
+function TrackCard({
+  track,
+  list,
+  onClick,
+}: {
+  track: Track;
+  list: Track[];
+  onClick: () => void;
+}) {
   const cover = track.suno?.cover_url;
+  const { play } = usePlayer();
   return (
-    <button
+    <div
       onClick={onClick}
-      className="group bg-surface border border-border rounded overflow-hidden text-left hover:border-neon transition-colors"
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onClick();
+        }
+      }}
+      className="group bg-surface border border-border rounded overflow-hidden text-left hover:border-neon transition-colors cursor-pointer focus:outline-none focus:border-neon"
     >
       <div className="aspect-square bg-[#0a0a0f] relative overflow-hidden">
         {cover ? (
@@ -181,6 +208,19 @@ function TrackCard({ track, onClick }: { track: Track; onClick: () => void }) {
             {track.camelot_key}
           </span>
         )}
+        {/* Play overlay — hover-visible. Stop propagation so clicking play
+            doesn't also open the detail drawer. */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            play(track, list);
+          }}
+          aria-label={`Play ${track.display_name}`}
+          data-testid="track-card-play"
+          className="absolute bottom-1 right-1 w-8 h-8 rounded-full bg-neon text-[#0a0a0f] text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 hover:scale-110 transition-all shadow"
+        >
+          ▶
+        </button>
       </div>
       <div className="p-2">
         <p className="text-xs text-[#e2e2ff] truncate font-bold">
@@ -196,18 +236,21 @@ function TrackCard({ track, onClick }: { track: Track; onClick: () => void }) {
           {formatDuration(track.duration_sec)}
         </p>
       </div>
-    </button>
+    </div>
   );
 }
 
 function TrackDetail({
   track,
+  list,
   onClose,
 }: {
   track: Track;
+  list: Track[];
   onClose: () => void;
 }) {
   const suno = track.suno ?? {};
+  const { play } = usePlayer();
   return (
     <div
       className="fixed inset-0 z-50 bg-black/70 flex items-stretch justify-end animate-fade-in"
@@ -244,6 +287,14 @@ function TrackDetail({
             className="w-full rounded border border-border mb-4"
           />
         )}
+
+        <button
+          onClick={() => play(track, list)}
+          data-testid="track-detail-play"
+          className="w-full mb-4 bg-neon text-[#0a0a0f] text-xs font-pixel tracking-widest py-2 rounded hover:bg-neon-dim transition-colors"
+        >
+          ▶ PLAY
+        </button>
 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs mb-4">
           <Field label="Genre" value={track.genre_folder ?? track.genre} />

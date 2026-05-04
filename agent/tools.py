@@ -749,10 +749,10 @@ def _format_playlist(
 
 
 def catalog_status(context_variables: dict) -> str:
-    """Compare WAV files on disk vs tracks.json and report what is missing or orphaned.
+    """Compare audio files on disk vs tracks.json and report what is missing or orphaned.
 
     Shows per-genre: how many files on disk, how many in catalog, which are new (not yet cataloged),
-    and which catalog entries have missing files (orphaned).
+    and which catalog entries have missing files (orphaned). Accepts both WAV and MP3 inputs.
     """
     import os as _os
 
@@ -768,22 +768,23 @@ def catalog_status(context_variables: dict) -> str:
         for entry in data.get("tracks", []):
             cataloged[entry["file"]] = entry
 
-    # Scan folders
+    # Scan folders — accept the same extensions the catalog scanner does.
+    _AUDIO_EXTS = (".wav", ".mp3")
     disk_files: dict[str, list[str]] = {}  # genre_folder → [rel_path, ...]
     for folder in sorted(_os.listdir(tracks_dir)):
         folder_path = tracks_dir / folder
         if not folder_path.is_dir():
             continue
-        wavs = sorted(
+        audio = sorted(
             str((folder_path / f).relative_to(_PROJECT_DIR)).replace("\\", "/")
             for f in _os.listdir(folder_path)
-            if f.lower().endswith(".wav")
+            if f.lower().endswith(_AUDIO_EXTS)
         )
-        if wavs:
-            disk_files[folder] = wavs
+        if audio:
+            disk_files[folder] = audio
 
     if not disk_files:
-        return "No WAV files found in any tracks/ subfolder."
+        return "No audio files (WAV/MP3) found in any tracks/ subfolder."
 
     # Find incomplete entries — any required field missing
     def _missing_fields(e: dict) -> list[str]:
