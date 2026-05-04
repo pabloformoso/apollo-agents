@@ -603,7 +603,7 @@ def load_existing_session_jsons(genre_folder):
         if not fname.lower().endswith(".json"):
             continue
         try:
-            with open(os.path.join(folder_path, fname)) as f:
+            with open(os.path.join(folder_path, fname), encoding="utf-8") as f:
                 data = json.load(f)
             for item in data.get("playlist", []):
                 name = item.get("display_name")
@@ -2833,7 +2833,7 @@ def _load_video_backgrounds(video_bg_list, session_dir, darken=VIDEO_BG_DARKEN,
             meta_path = cache_path + ".json"
 
             if os.path.exists(cache_path) and os.path.exists(meta_path):
-                with open(meta_path) as f:
+                with open(meta_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 frames = np.load(cache_path, mmap_mode='r')
                 dur = meta["duration"]
@@ -3407,9 +3407,9 @@ def main():
             print("Run the full pipeline first to save transitions.")
             sys.exit(1)
         session_json_path = os.path.join(output_dir, "session.json")
-        with open(session_json_path) as f:
+        with open(session_json_path, encoding="utf-8") as f:
             session_config = json.load(f)
-        with open(transitions_path) as f:
+        with open(transitions_path, encoding="utf-8") as f:
             transitions = json.load(f)
         genre = args.genre or session_config.get("genre", "")
         artwork_dir = get_artwork_dir(genre)
@@ -3421,7 +3421,7 @@ def main():
 
     # --from-session: load a pre-built playlist from the agent instead of selecting tracks
     if args.from_session:
-        with open(args.from_session) as f:
+        with open(args.from_session, encoding="utf-8") as f:
             session_config = json.load(f)
         track_entries = []
         for t in session_config["playlist"]:
