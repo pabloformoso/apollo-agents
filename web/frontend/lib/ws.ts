@@ -11,7 +11,7 @@ function deriveWsBase(): string {
   // Next doesn't proxy WebSockets, so the browser connects directly to the
   // backend. Default to the canonical dev port (matches the /api rewrite in
   // next.config.ts). For prod or non-default ports set NEXT_PUBLIC_WS_BASE.
-  return "ws://localhost:8000";
+  return "ws://localhost:4020";
 }
 
 const WS_BASE = deriveWsBase();

@@ -2,7 +2,7 @@
 ApolloAgents Web Backend — FastAPI application (v2.0)
 
 Startup:
-    cd web && uvicorn backend.app:app --reload --port 8000
+    uvicorn backend.app:app --reload --port 4020 --app-dir web
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="ApolloAgents API", version="2.0.0", lifespan=lifespan)
 
-_DEFAULT_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+_DEFAULT_ORIGINS = "http://localhost:4010,http://127.0.0.1:4010"
 _ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv("APOLLO_CORS_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
 ]
