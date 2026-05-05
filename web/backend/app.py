@@ -150,6 +150,16 @@ _STREAM_MEDIA_TYPES = {
 }
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """True if `path` is the same as or a descendant of `root`. Both paths
+    must already be absolute and resolved."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
 def _stream_authorize(token: str) -> dict:
     """Decode the JWT from the query string and load the user, or raise 401."""
     payload = auth.decode_token(token)
@@ -168,8 +178,9 @@ def _stream_authorize(token: str) -> dict:
 def _resolve_track_path(track_id: str) -> Path:
     """Look up `track_id` in the catalog and return a safe absolute path.
 
-    Raises 404 for unknown ids or any path that escapes `tracks/`, and 415
-    for extensions outside `.wav` / `.mp3`.
+    Raises 404 for unknown ids or any path that escapes the allowed roots
+    (`tracks/` for real catalog entries, `.tmp/` for the mock-pipeline
+    fixture used in E2E), and 415 for extensions outside `.wav` / `.mp3`.
     """
     try:
         tracks, _ = pipeline.load_catalog(None)
@@ -181,15 +192,19 @@ def _resolve_track_path(track_id: str) -> Path:
         raise HTTPException(status_code=404, detail="Track not found")
 
     project_root = Path(pipeline._PROJECT_DIR).resolve()
-    tracks_root = (project_root / "tracks").resolve()
+    # Path-traversal defence: the resolved file must live under one of the
+    # allowed roots. `tracks/` covers real catalog entries; `.tmp/` is the
+    # mock-pipeline fixture root used during E2E (see #13 — keeps the mock
+    # silence file out of tracks/ so --build-catalog never picks it up).
+    allowed_roots = [
+        (project_root / "tracks").resolve(),
+        (project_root / ".tmp").resolve(),
+    ]
 
     raw_path = (project_root / track["file"]).resolve()
 
-    # Path-traversal defence: the resolved file must live under tracks/.
-    try:
-        raw_path.relative_to(tracks_root)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail="Track not found") from exc
+    if not any(_is_within(raw_path, root) for root in allowed_roots):
+        raise HTTPException(status_code=404, detail="Track not found")
 
     if not raw_path.exists() or not raw_path.is_file():
         raise HTTPException(status_code=404, detail="Track file missing")

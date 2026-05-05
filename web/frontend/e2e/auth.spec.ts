@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { randomUUID } from "crypto";
 
 /**
@@ -6,7 +6,7 @@ import { randomUUID } from "crypto";
  * because these specifically exercise the login / register / logout forms.
  */
 test.describe("A — auth lifecycle", () => {
-  async function registerViaUi(page: any, username: string, password: string) {
+  async function registerViaUi(page: Page, username: string, password: string) {
     await page.goto("/register");
     // The register form's <label> nodes aren't associated via htmlFor, so we
     // target inputs by type (username=text, email=email, password=password).

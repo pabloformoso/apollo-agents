@@ -85,10 +85,16 @@ _MOCK_TRACKS_CACHE: list[dict] | None = None
 
 
 def _ensure_mock_audio_file(pipeline_module) -> Path:
-    """Materialise a 1 s silence WAV under <project_root>/tracks/lofi/ so the
-    streaming endpoint can serve it. Idempotent."""
+    """Materialise a 1 s silence WAV under <project_root>/.tmp/ so the
+    streaming endpoint can serve it without polluting tracks/ (issue #13).
+
+    `.tmp/` is gitignored at the repo root and is NOT scanned by
+    `--build-catalog`, so dropping the file here keeps developer checkouts
+    clean even if `AGENT_PROVIDER=mock` is invoked locally. The streaming
+    endpoint's path-traversal guard treats `.tmp/` as an additional allowed
+    root specifically for this fixture. Idempotent."""
     project_root = Path(pipeline_module._PROJECT_DIR)
-    target_dir = project_root / "tracks" / "lofi"
+    target_dir = project_root / ".tmp"
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / "mock-silence.wav"
     if target.exists() and target.stat().st_size > 0:
