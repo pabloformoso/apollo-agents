@@ -2,7 +2,7 @@
 ApolloAgents Web Backend — FastAPI application (v2.0)
 
 Startup:
-    cd web && uvicorn backend.app:app --reload --port 8000
+    uvicorn backend.app:app --reload --port 4020 --app-dir web
 """
 from __future__ import annotations
 
@@ -10,16 +10,23 @@ import asyncio
 import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
 from . import db, auth, pipeline
 from .models import (
     EditorCommandRequest,
     GenreIntentRequest,
     LoginRequest,
+    PlaylistAddTracks,
+    PlaylistCreate,
+    PlaylistRename,
+    PlaylistReorder,
     RatingRequest,
+    RatingUpdate,
     RegisterRequest,
     TokenResponse,
 )
@@ -39,7 +46,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="ApolloAgents API", version="2.0.0", lifespan=lifespan)
 
-_DEFAULT_ORIGINS = "http://localhost:3000,http://127.0.0.1:3000"
+_DEFAULT_ORIGINS = "http://localhost:4010,http://127.0.0.1:4010"
 _ALLOWED_ORIGINS = [
     o.strip() for o in os.getenv("APOLLO_CORS_ORIGINS", _DEFAULT_ORIGINS).split(",") if o.strip()
 ]
@@ -51,6 +58,30 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Genre Guard cap: max user turns before we treat the conversation as
+# stuck and emit the "Could not confirm genre" error. See issue #23.
+MAX_GENRE_TURNS = 8
+
+
+def _should_emit_genre_error(history: list[dict]) -> bool:
+    """Return True when the genre-guard turn ended without a confirmation
+    AND the agent gave up (empty/whitespace assistant response, OR the
+    user has hit MAX_GENRE_TURNS without confirming).
+
+    Returns False on the normal "still asking, awaiting user reply" turn,
+    so the handler should leave ``s.phase`` at ``"genre"`` instead of
+    surfacing a misleading red error banner. See issue #23.
+    """
+    last_assistant = next(
+        (m.get("content", "") for m in reversed(history) if m.get("role") == "assistant"),
+        "",
+    )
+    if not (last_assistant or "").strip():
+        return True
+    user_turns = sum(1 for m in history if m.get("role") == "user")
+    return user_turns >= MAX_GENRE_TURNS
 
 
 # ---------------------------------------------------------------------------
@@ -93,13 +124,257 @@ async def me(current_user: dict = Depends(auth.get_current_user)):
 @app.get("/api/catalog")
 async def get_catalog(
     genre: str | None = Query(None, description="Filter by genre_folder (case-insensitive)"),
-    _user: dict = Depends(auth.get_current_user),
+    current_user: dict = Depends(auth.get_current_user),
 ):
     try:
         tracks, genres = await asyncio.to_thread(pipeline.load_catalog, genre)
     except pipeline.CatalogUnavailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return {"tracks": tracks, "genres": genres}
+
+    # Hydrate each track with the calling user's own rating (or null). This is
+    # always scoped to current_user.id — ratings from other users never leak.
+    ratings = await asyncio.to_thread(db.get_user_ratings, current_user["id"])
+    enriched = [{**t, "user_rating": ratings.get(t.get("id")) } for t in tracks]
+    return {"tracks": enriched, "genres": genres}
+
+
+# ---------------------------------------------------------------------------
+# Audio streaming — single endpoint that browser <audio> can hit directly.
+# JWT travels in the query string (browsers can't set Authorization on
+# <audio>), mirroring the WebSocket pattern above.
+# ---------------------------------------------------------------------------
+
+_STREAM_MEDIA_TYPES = {
+    ".wav": "audio/wav",
+    ".mp3": "audio/mpeg",
+}
+
+
+def _stream_authorize(token: str) -> dict:
+    """Decode the JWT from the query string and load the user, or raise 401."""
+    payload = auth.decode_token(token)
+    if not payload or "sub" not in payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    try:
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=401, detail="Invalid token") from exc
+    user = db.get_user_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return dict(user)
+
+
+def _resolve_track_path(track_id: str) -> Path:
+    """Look up `track_id` in the catalog and return a safe absolute path.
+
+    Raises 404 for unknown ids or any path that escapes `tracks/`, and 415
+    for extensions outside `.wav` / `.mp3`.
+    """
+    try:
+        tracks, _ = pipeline.load_catalog(None)
+    except pipeline.CatalogUnavailable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    track = next((t for t in tracks if t.get("id") == track_id), None)
+    if not track or not track.get("file"):
+        raise HTTPException(status_code=404, detail="Track not found")
+
+    project_root = Path(pipeline._PROJECT_DIR).resolve()
+    tracks_root = (project_root / "tracks").resolve()
+
+    raw_path = (project_root / track["file"]).resolve()
+
+    # Path-traversal defence: the resolved file must live under tracks/.
+    try:
+        raw_path.relative_to(tracks_root)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Track not found") from exc
+
+    if not raw_path.exists() or not raw_path.is_file():
+        raise HTTPException(status_code=404, detail="Track file missing")
+
+    suffix = raw_path.suffix.lower()
+    if suffix not in _STREAM_MEDIA_TYPES:
+        raise HTTPException(status_code=415, detail=f"Unsupported audio format: {suffix}")
+
+    return raw_path
+
+
+@app.get("/api/tracks/{track_id}/stream")
+async def stream_track(track_id: str, token: str = Query(...)):
+    _stream_authorize(token)
+    path = await asyncio.to_thread(_resolve_track_path, track_id)
+    media_type = _STREAM_MEDIA_TYPES[path.suffix.lower()]
+    # Starlette's FileResponse handles Range/206 Partial Content natively,
+    # which is what makes seek + iOS playback work without extra plumbing.
+    return FileResponse(str(path), media_type=media_type)
+
+
+# ---------------------------------------------------------------------------
+# Playlists (v2.2.1) — named, ordered collections of catalog tracks. The
+# tracks themselves stay in `tracks/tracks.json`; only the playlist shell and
+# the ordered track_ids live in SQLite. GET hydrates each id back into a full
+# Track via the catalog, so the frontend never re-resolves metadata itself.
+# ---------------------------------------------------------------------------
+
+
+def _own_playlist(playlist_id: int, user: dict) -> dict:
+    p = db.get_playlist(playlist_id)
+    if not p or p["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return p
+
+
+@app.post("/api/playlists", status_code=201)
+async def create_playlist(
+    req: PlaylistCreate,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    return db.create_playlist(current_user["id"], req.name)
+
+
+@app.get("/api/playlists")
+async def list_playlists(current_user: dict = Depends(auth.get_current_user)):
+    return db.list_playlists_by_user(current_user["id"])
+
+
+@app.get("/api/playlists/{playlist_id}")
+async def get_playlist_detail(
+    playlist_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    p = _own_playlist(playlist_id, current_user)
+
+    try:
+        catalog_tracks, _ = await asyncio.to_thread(pipeline.load_catalog, None)
+    except pipeline.CatalogUnavailable:
+        catalog_tracks = []
+    by_id = {t.get("id"): t for t in catalog_tracks if t.get("id")}
+
+    hydrated: list[dict] = []
+    for tid in p["track_ids"]:
+        t = by_id.get(tid)
+        if t is None:
+            # Catalog may have been rebuilt and dropped this id — surface it
+            # rather than failing so the user can clean up the playlist.
+            hydrated.append({"id": tid, "display_name": tid, "missing": True})
+        else:
+            hydrated.append(t)
+
+    return {
+        "id": p["id"],
+        "user_id": p["user_id"],
+        "name": p["name"],
+        "created_at": p["created_at"],
+        "updated_at": p["updated_at"],
+        "tracks": hydrated,
+    }
+
+
+@app.patch("/api/playlists/{playlist_id}")
+async def rename_playlist_endpoint(
+    playlist_id: int,
+    req: PlaylistRename,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    db.rename_playlist(playlist_id, req.name)
+    refreshed = db.get_playlist(playlist_id)
+    assert refreshed is not None
+    return {
+        "id": refreshed["id"],
+        "user_id": refreshed["user_id"],
+        "name": refreshed["name"],
+        "created_at": refreshed["created_at"],
+        "updated_at": refreshed["updated_at"],
+        "track_count": len(refreshed["track_ids"]),
+    }
+
+
+@app.delete("/api/playlists/{playlist_id}", status_code=204)
+async def delete_playlist_endpoint(
+    playlist_id: int,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    db.delete_playlist(playlist_id)
+
+
+@app.post("/api/playlists/{playlist_id}/tracks")
+async def add_tracks_endpoint(
+    playlist_id: int,
+    req: PlaylistAddTracks,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    new_count = db.add_tracks_to_playlist(playlist_id, req.track_ids)
+    return {"playlist_id": playlist_id, "track_count": new_count}
+
+
+@app.delete("/api/playlists/{playlist_id}/tracks/{track_id}", status_code=204)
+async def remove_track_endpoint(
+    playlist_id: int,
+    track_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    if not db.remove_track_from_playlist(playlist_id, track_id):
+        raise HTTPException(status_code=404, detail="Track not in playlist")
+
+
+@app.put("/api/playlists/{playlist_id}/order")
+async def reorder_endpoint(
+    playlist_id: int,
+    req: PlaylistReorder,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    _own_playlist(playlist_id, current_user)
+    ok = db.reorder_playlist_tracks(playlist_id, req.track_ids)
+    if not ok:
+        raise HTTPException(
+            status_code=422,
+            detail="track_ids must match the playlist's current track_ids exactly",
+        )
+    refreshed = db.get_playlist(playlist_id)
+    assert refreshed is not None
+    return {
+        "id": refreshed["id"],
+        "track_ids": refreshed["track_ids"],
+        "updated_at": refreshed["updated_at"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-user track ratings (1–5). The catalog endpoint above hydrates the
+# `user_rating` field for the calling user; these two routes let the user
+# create / update / clear their own rating.
+# ---------------------------------------------------------------------------
+
+@app.put("/api/tracks/{track_id}/rating")
+async def set_track_rating(
+    track_id: str,
+    body: RatingUpdate,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    await asyncio.to_thread(
+        db.upsert_track_rating, current_user["id"], track_id, body.rating
+    )
+    return {"track_id": track_id, "rating": body.rating}
+
+
+@app.delete("/api/tracks/{track_id}/rating", status_code=204)
+async def clear_track_rating(
+    track_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    # Idempotent: deleting a non-existent rating succeeds with 204 anyway —
+    # the UI fires DELETE on every "click on filled star" without first
+    # checking the row exists.
+    await asyncio.to_thread(
+        db.delete_track_rating, current_user["id"], track_id
+    )
+    return Response(status_code=204)
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +539,16 @@ async def _handle_ws_message(s, msg_type: str | None, content: str, emit) -> Non
             s.phase = "checkpoint1"
             await emit({"type": "phase_complete", "phase": "planning", "data": s.to_dict()})
         else:
-            await emit({"type": "error", "message": "Could not confirm genre — please try again."})
-            s.phase = "init"
+            # Distinguish "agent is still asking" from "agent gave up". On
+            # in-progress turns the LLM is politely asking "Is this correct?"
+            # and the user just needs to reply — emitting an error banner
+            # next to that question is purely cosmetic noise. See issue #23.
+            if _should_emit_genre_error(history):
+                await emit({"type": "error", "message": "Could not confirm genre — please start a new session."})
+                s.phase = "init"
+            # Otherwise, the agent is still asking a question — keep
+            # s.phase = "genre" so the user's next message routes through
+            # this handler again. No error event.
 
     # ── Checkpoint 1 — user approves playlist → run Critic ──────
     elif msg_type == "checkpoint_approve" and s.phase == "checkpoint1":

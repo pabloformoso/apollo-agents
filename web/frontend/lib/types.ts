@@ -34,6 +34,7 @@ export interface Track {
   file?: string;
   variant_of?: string | null;
   suno?: Suno;
+  user_rating?: number | null;
 }
 
 export interface Catalog {
@@ -82,3 +83,33 @@ export type ServerEvent =
   | { type: "phase_complete"; phase: Phase; data: unknown }
   | { type: "state"; data: SessionState }
   | { type: "error"; message: string };
+
+// Playlists (v2.2.1)
+export interface Playlist {
+  id: number;
+  user_id: number;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  track_count: number;
+}
+
+/**
+ * A playlist track row may be a full hydrated `Track` from the catalog or a
+ * stub `{ id, display_name, missing: true }` if the catalog no longer
+ * resolves the id (eg. it was renamed during a `--build-catalog` rebuild).
+ */
+export interface PlaylistTrack extends Partial<Track> {
+  id: string;
+  display_name: string;
+  missing?: boolean;
+}
+
+export interface PlaylistDetail {
+  id: number;
+  user_id: number;
+  name: string;
+  created_at: string;
+  updated_at: string;
+  tracks: PlaylistTrack[];
+}

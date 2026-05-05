@@ -536,17 +536,47 @@ def _make_track_id(genre_folder, display_name, is_variant=False):
     return f"{_slugify(genre_folder)}--{_slugify(display_name)}{suffix}"
 
 
+# Audio extensions accepted by the catalog scanner. WAV stays the lossless
+# default for outputs; MP3 is allowed only as an *input* format in the catalog.
+CATALOG_AUDIO_EXTS = (".wav", ".mp3")
+
+
 def _wav_duration_sec(filepath):
-    """Read WAV duration from file header without decoding audio."""
+    """Read audio duration from file header.
+
+    Despite the legacy name, this works for any catalog-supported extension
+    (`.wav`, `.mp3`, …): the WAV header fast-path is tried first, and any
+    other extension falls back to a librosa read. Kept under this name so
+    test patches that target `main._wav_duration_sec` keep working.
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext == ".wav":
+        try:
+            with wave.open(filepath, "r") as wf:
+                return wf.getnframes() / float(wf.getframerate())
+        except Exception:
+            pass
     try:
-        with wave.open(filepath, "r") as wf:
-            return wf.getnframes() / float(wf.getframerate())
+        # librosa.get_duration works without loading the full file when the
+        # underlying decoder (audioread/soundfile) supports it, and falls back
+        # to a full decode otherwise — fine for catalog-build (one-off cost).
+        import librosa  # noqa: PLC0415
+        return float(librosa.get_duration(path=filepath))
     except Exception:
         return 0.0
 
 
+# New canonical name — both names refer to the same function so existing
+# code and tests can use either.
+_audio_duration_sec = _wav_duration_sec
+
+
 def scan_genre_folders():
-    """Scan tracks/ genre subfolders and return list of (genre_folder, wav_path) tuples."""
+    """Scan tracks/ genre subfolders and return list of (genre_folder, audio_path) tuples.
+
+    Accepts both WAV and MP3 inputs. The returned path keeps its real
+    extension so downstream code can branch on `os.path.splitext(...)`.
+    """
     results = []
     if not os.path.isdir(TRACKS_BASE_DIR):
         return results
@@ -555,7 +585,7 @@ def scan_genre_folders():
         if not os.path.isdir(folder_path):
             continue
         for fname in sorted(os.listdir(folder_path)):
-            if fname.lower().endswith(".wav"):
+            if fname.lower().endswith(CATALOG_AUDIO_EXTS):
                 results.append((folder, os.path.join(folder_path, fname)))
     return results
 
@@ -573,7 +603,7 @@ def load_existing_session_jsons(genre_folder):
         if not fname.lower().endswith(".json"):
             continue
         try:
-            with open(os.path.join(folder_path, fname)) as f:
+            with open(os.path.join(folder_path, fname), encoding="utf-8") as f:
                 data = json.load(f)
             for item in data.get("playlist", []):
                 name = item.get("display_name")
@@ -858,12 +888,15 @@ _UUID_RE = re.compile(
 )
 
 
-def parse_suno_sidecar(wav_path: str) -> dict | None:
-    """Parse a Suno `<wav>.txt` sidecar into structured fields.
+def parse_suno_sidecar(audio_path: str) -> dict | None:
+    """Parse a Suno `<audio>.txt` sidecar into structured fields.
+
+    Works for any input extension (`.wav`, `.mp3`, ...) — the sidecar is
+    always located alongside the audio with `.txt` appended.
 
     Returns None if no sidecar exists. Returns a dict (possibly partial) otherwise.
     """
-    sidecar_path = wav_path + ".txt"
+    sidecar_path = audio_path + ".txt"
     if not os.path.exists(sidecar_path):
         return None
     try:
@@ -916,14 +949,15 @@ def _looks_like_legacy_filename(name: str | None) -> bool:
     return bool(_UUID_RE.search(name))
 
 
-def _attach_suno_metadata(entry: dict, wav_path: str) -> bool:
+def _attach_suno_metadata(entry: dict, audio_path: str) -> bool:
     """Ensure entry has a `suno` block and a clean `display_name` if a sidecar exists.
 
-    Returns True if entry was mutated.
+    Works for any input extension (`.wav`, `.mp3`, ...). Returns True if
+    entry was mutated.
     """
     mutated = False
     if "suno" not in entry:
-        sidecar = parse_suno_sidecar(wav_path)
+        sidecar = parse_suno_sidecar(audio_path)
         if sidecar:
             entry["suno"] = sidecar
             mutated = True
@@ -1101,26 +1135,26 @@ def build_catalog():
             existing[entry["file"]] = entry
         print(f"Loaded {len(existing)} existing entries from {CATALOG_PATH}")
 
-    wav_files = scan_genre_folders()
-    print(f"Found {len(wav_files)} WAV files across all genre folders\n")
+    audio_files = scan_genre_folders()
+    print(f"Found {len(audio_files)} audio files (WAV/MP3) across all genre folders\n")
 
     updated = dict(existing)
     new_count = 0
     folder_lookups = {}
 
-    for genre_folder, wav_path in wav_files:
-        rel_path = os.path.relpath(wav_path).replace("\\", "/")
+    for genre_folder, audio_path in audio_files:
+        rel_path = os.path.relpath(audio_path).replace("\\", "/")
         if rel_path in existing:
             entry = existing[rel_path]
             needs_patch = False
             if entry.get("duration_sec") is None:
-                entry["duration_sec"] = round(_wav_duration_sec(wav_path), 1) or None
+                entry["duration_sec"] = round(_wav_duration_sec(audio_path), 1) or None
                 needs_patch = True
             if entry.get("beatgrid") is None and entry.get("bpm"):
-                print(f"  [beatgrid] {os.path.basename(wav_path)}")
-                entry["beatgrid"] = detect_beatgrid(wav_path, entry.get("bpm"))
+                print(f"  [beatgrid] {os.path.basename(audio_path)}")
+                entry["beatgrid"] = detect_beatgrid(audio_path, entry.get("bpm"))
                 needs_patch = True
-            if _attach_suno_metadata(entry, wav_path):
+            if _attach_suno_metadata(entry, audio_path):
                 needs_patch = True
             if needs_patch:
                 updated[rel_path] = entry
@@ -1130,7 +1164,7 @@ def build_catalog():
             folder_lookups[genre_folder] = load_existing_session_jsons(genre_folder)
         lookup = folder_lookups[genre_folder]
 
-        fname = os.path.basename(wav_path)
+        fname = os.path.basename(audio_path)
         name_no_ext = os.path.splitext(fname)[0]
         if name_no_ext.endswith(" (1)"):
             base_name = name_no_ext[:-4].strip()
@@ -1145,18 +1179,18 @@ def build_catalog():
 
         print(f"  [{genre_folder}] {fname}")
 
-        bpm = detect_bpm(wav_path, genre_folder)
+        bpm = detect_bpm(audio_path, genre_folder)
         print(f"    BPM: {bpm}")
-        beatgrid = detect_beatgrid(wav_path, bpm)
+        beatgrid = detect_beatgrid(audio_path, bpm)
         print(f"    Beatgrid: first beat at {beatgrid['first_beat_sec']}s")
 
         if not camelot_key:
-            camelot_key = detect_camelot_key(wav_path)
+            camelot_key = detect_camelot_key(audio_path)
             print(f"    Camelot key (detected): {camelot_key}")
         else:
             print(f"    Camelot key (from session.json): {camelot_key}")
 
-        duration_sec = _wav_duration_sec(wav_path)
+        duration_sec = _wav_duration_sec(audio_path)
         new_entry = {
             "id": _make_track_id(genre_folder, base_name, is_variant),
             "display_name": base_name,
@@ -1169,7 +1203,7 @@ def build_catalog():
             "variant_of": base_name if is_variant else None,
             "beatgrid": beatgrid,
         }
-        _attach_suno_metadata(new_entry, wav_path)
+        _attach_suno_metadata(new_entry, audio_path)
         updated[rel_path] = new_entry
         new_count += 1
 
@@ -2799,7 +2833,7 @@ def _load_video_backgrounds(video_bg_list, session_dir, darken=VIDEO_BG_DARKEN,
             meta_path = cache_path + ".json"
 
             if os.path.exists(cache_path) and os.path.exists(meta_path):
-                with open(meta_path) as f:
+                with open(meta_path, encoding="utf-8") as f:
                     meta = json.load(f)
                 frames = np.load(cache_path, mmap_mode='r')
                 dur = meta["duration"]
@@ -3373,9 +3407,9 @@ def main():
             print("Run the full pipeline first to save transitions.")
             sys.exit(1)
         session_json_path = os.path.join(output_dir, "session.json")
-        with open(session_json_path) as f:
+        with open(session_json_path, encoding="utf-8") as f:
             session_config = json.load(f)
-        with open(transitions_path) as f:
+        with open(transitions_path, encoding="utf-8") as f:
             transitions = json.load(f)
         genre = args.genre or session_config.get("genre", "")
         artwork_dir = get_artwork_dir(genre)
@@ -3387,7 +3421,7 @@ def main():
 
     # --from-session: load a pre-built playlist from the agent instead of selecting tracks
     if args.from_session:
-        with open(args.from_session) as f:
+        with open(args.from_session, encoding="utf-8") as f:
             session_config = json.load(f)
         track_entries = []
         for t in session_config["playlist"]:

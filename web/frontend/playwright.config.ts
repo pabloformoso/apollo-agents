@@ -1,8 +1,28 @@
 import { defineConfig, devices } from "@playwright/test";
+import fs from "fs";
 import path from "path";
 
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const E2E_DB = path.join(PROJECT_ROOT, ".tmp/apollo-e2e.db");
+
+// Prepare the .tmp dir in JS (cross-platform). The previous shell command
+// (`mkdir -p`) blew up under cmd.exe on Windows by creating a literal "-p"
+// directory.
+fs.mkdirSync(path.dirname(E2E_DB), { recursive: true });
+
+// One-shot DB purge — only the outermost CLI process should unlink the
+// E2E SQLite db. Worker subprocesses inherit env vars, so by setting
+// APOLLO_E2E_DB_PURGED=1 after the first unlink, every later config
+// re-import (worker, webServer child) skips the unlink and the database
+// uvicorn just initialized stays intact.
+if (!process.env.APOLLO_E2E_DB_PURGED) {
+  try {
+    fs.unlinkSync(E2E_DB);
+  } catch {
+    // ignore — fresh run, file may not exist yet
+  }
+  process.env.APOLLO_E2E_DB_PURGED = "1";
+}
 
 export default defineConfig({
   testDir: "./e2e",
@@ -24,7 +44,7 @@ export default defineConfig({
 
   webServer: [
     {
-      command: `rm -f "${E2E_DB}" && mkdir -p "${path.dirname(E2E_DB)}" && uv run uvicorn backend.app:app --port 8801 --app-dir web`,
+      command: `uv run uvicorn backend.app:app --port 8801 --app-dir web`,
       cwd: PROJECT_ROOT,
       url: "http://localhost:8801/docs",
       reuseExistingServer: !process.env.CI,
