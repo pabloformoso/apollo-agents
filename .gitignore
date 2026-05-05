@@ -47,6 +47,9 @@ web/frontend/.next/
 web/frontend/.next-e2e/
 web/frontend/next-env.d.ts
 
+# TypeScript incremental build cache
+*.tsbuildinfo
+
 # Playwright E2E
 web/frontend/test-results/
 web/frontend/playwright-report/

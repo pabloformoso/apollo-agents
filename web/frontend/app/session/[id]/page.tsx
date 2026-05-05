@@ -44,7 +44,7 @@ function GenreInput({ onSubmit, disabled }: { onSubmit: (v: string) => void; dis
   return (
     <div className="space-y-2">
       <p className="text-xs text-muted">Describe your session — genre, duration, mood.</p>
-      <p className="text-xs text-muted/60">Example: "Build a 60-minute deep house set, late night vibes"</p>
+      <p className="text-xs text-muted/60">Example: &quot;Build a 60-minute deep house set, late night vibes&quot;</p>
       <div className="flex gap-2">
         <input
           value={value}
