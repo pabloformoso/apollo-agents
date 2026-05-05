@@ -109,8 +109,17 @@ def stream_env(tmp_path, monkeypatch):
     def fake_check_catalog(genre=None):
         return None
 
+    fake_by_id = {wav_track["id"]: wav_track, mp3_track["id"]: mp3_track}
+
+    def fake_get_track_by_id(track_id):
+        return fake_by_id.get(track_id)
+
     monkeypatch.setattr(pipeline, "load_catalog", fake_load_catalog)
     monkeypatch.setattr(pipeline, "check_catalog", fake_check_catalog)
+    monkeypatch.setattr(pipeline, "get_track_by_id", fake_get_track_by_id)
+    # Reset the in-memory cache between tests so fixtures starting from a
+    # different tmp tree don't see a stale (mtime, size) entry.
+    monkeypatch.setattr(pipeline, "_CATALOG_CACHE", None, raising=False)
 
     return {
         "tmp_root": tmp_path,

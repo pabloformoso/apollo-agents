@@ -140,19 +140,53 @@ def check_catalog(genre: str | None = None) -> None:
             )
 
 
-def load_catalog(genre: str | None = None) -> tuple[list[dict], list[str]]:
-    """Read tracks.json and return (filtered_tracks, all_available_genre_folders).
+# ---------------------------------------------------------------------------
+# Catalog cache
+#
+# Hydrating GET /api/playlists/{id} requires turning a list of track ids into
+# the matching Track dicts. Without caching, every request re-reads
+# tracks/tracks.json (~534 KB) and re-builds the by-id index. The cache key
+# is (mtime, size) of the file: if `python main.py --build-catalog` rewrites
+# the catalog while the backend is up, the next call notices the changed
+# stat tuple and rebuilds. Note: builders that mutate the file in place
+# without changing its size and within the same mtime tick (rare on real
+# filesystems, ~1s resolution on FAT/HFS) would not be detected; on Windows
+# NTFS and ext4 the mtime nanosecond precision plus the size component make
+# that practically impossible.
+# ---------------------------------------------------------------------------
 
-    Filters by genre_folder when `genre` is provided (case-insensitive). Raises
-    CatalogUnavailable on missing/unreadable/empty catalog or unknown genre.
+_CATALOG_CACHE: dict | None = None
+
+
+def _read_catalog_from_disk() -> dict:
+    """(Re)read tracks.json and build the cache payload.
+
+    Returns a dict with the cache key plus precomputed lookup structures so
+    every call after the first is O(1) for `get_track_by_id` and O(filter)
+    for genre filtering.
     """
-    check_catalog(genre)
     import json
 
     catalog_path = _PROJECT_DIR / "tracks" / "tracks.json"
+    try:
+        stat = catalog_path.stat()
+    except FileNotFoundError as exc:
+        raise CatalogUnavailable(
+            "No track catalog found. Add WAV files under tracks/<genre>/ and run "
+            "`python main.py --build-catalog` to generate tracks.json."
+        ) from exc
+
     with catalog_path.open(encoding="utf-8") as fh:
         data = json.load(fh)
     entries = data.get("tracks") if isinstance(data, dict) else data
+    if not entries:
+        entries = []
+
+    by_id: dict[str, dict] = {}
+    for t in entries:
+        tid = t.get("id")
+        if tid:
+            by_id[tid] = t
 
     genres = sorted({
         (t.get("genre_folder") or t.get("genre") or "").strip()
@@ -160,14 +194,94 @@ def load_catalog(genre: str | None = None) -> tuple[list[dict], list[str]]:
         if (t.get("genre_folder") or t.get("genre"))
     })
 
+    return {
+        "key": (stat.st_mtime, stat.st_size),
+        "all": entries,
+        "by_id": by_id,
+        "genres": genres,
+    }
+
+
+def _ensure_cache() -> dict:
+    """Return the cached catalog payload, rebuilding on (mtime, size) change.
+
+    Raises CatalogUnavailable when tracks.json is missing — kept consistent
+    with check_catalog so callers can keep their existing error handling.
+    """
+    global _CATALOG_CACHE
+
+    catalog_path = _PROJECT_DIR / "tracks" / "tracks.json"
+    try:
+        stat = catalog_path.stat()
+    except FileNotFoundError as exc:
+        _CATALOG_CACHE = None
+        raise CatalogUnavailable(
+            "No track catalog found. Add WAV files under tracks/<genre>/ and run "
+            "`python main.py --build-catalog` to generate tracks.json."
+        ) from exc
+
+    cache_key = (stat.st_mtime, stat.st_size)
+    if _CATALOG_CACHE is None or _CATALOG_CACHE.get("key") != cache_key:
+        _CATALOG_CACHE = _read_catalog_from_disk()
+    return _CATALOG_CACHE
+
+
+def load_catalog(genre: str | None = None) -> tuple[list[dict], list[str]]:
+    """Read tracks.json and return (filtered_tracks, all_available_genre_folders).
+
+    Filters by genre_folder when `genre` is provided (case-insensitive). Raises
+    CatalogUnavailable on missing/unreadable/empty catalog or unknown genre.
+
+    Backed by an in-memory cache keyed on (mtime, size) of tracks.json so
+    repeated calls (e.g. one per playlist GET) don't re-read and re-parse
+    the file. Re-uses `_ensure_cache` for the file read so we don't pay the
+    parse cost twice on every call (previously `check_catalog` re-read the
+    file even when the cache was warm).
+    """
+    cache = _ensure_cache()
+    entries: list[dict] = cache["all"]
+    genres: list[str] = cache["genres"]
+
+    if not entries:
+        raise CatalogUnavailable(
+            "Track catalog is empty. Add WAV files under tracks/<genre>/ and run "
+            "`python main.py --build-catalog`."
+        )
+
     if genre:
         target = genre.strip().lower()
-        entries = [
+        filtered = [
             t for t in entries
             if (t.get("genre_folder") or t.get("genre") or "").strip().lower() == target
         ]
+        if not filtered:
+            available = sorted({
+                (t.get("genre_folder") or t.get("genre") or "").strip()
+                for t in entries
+                if (t.get("genre_folder") or t.get("genre"))
+            })
+            raise CatalogUnavailable(
+                f"No tracks found for genre '{genre}'. Available genres: "
+                f"{', '.join(available) if available else '(none)'}."
+            )
+        entries = filtered
 
     return entries, genres
+
+
+def get_track_by_id(track_id: str) -> dict | None:
+    """Return the catalog entry for `track_id`, or None if it isn't present.
+
+    O(1) via the cached by-id index. Used by /api/playlists/{id} to hydrate
+    track ids into full Track dicts without rebuilding the index per call.
+    Returns None (rather than raising) when the catalog is unavailable so
+    the playlist endpoint can fall back to its `missing=True` placeholder.
+    """
+    try:
+        cache = _ensure_cache()
+    except CatalogUnavailable:
+        return None
+    return cache["by_id"].get(track_id)
 
 
 # ---------------------------------------------------------------------------
