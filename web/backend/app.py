@@ -261,15 +261,17 @@ async def get_playlist_detail(
 ):
     p = _own_playlist(playlist_id, current_user)
 
+    # Warm the catalog cache once (no-op on repeated GETs) so the per-track
+    # get_track_by_id lookups below are O(1) against the pre-built index
+    # instead of re-reading tracks.json + rebuilding a by_id dict per call.
     try:
-        catalog_tracks, _ = await asyncio.to_thread(pipeline.load_catalog, None)
+        await asyncio.to_thread(pipeline.load_catalog, None)
     except pipeline.CatalogUnavailable:
-        catalog_tracks = []
-    by_id = {t.get("id"): t for t in catalog_tracks if t.get("id")}
+        pass
 
     hydrated: list[dict] = []
     for tid in p["track_ids"]:
-        t = by_id.get(tid)
+        t = pipeline.get_track_by_id(tid)
         if t is None:
             # Catalog may have been rebuilt and dropped this id — surface it
             # rather than failing so the user can clean up the playlist.

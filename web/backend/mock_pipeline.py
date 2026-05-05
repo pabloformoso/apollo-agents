@@ -213,3 +213,11 @@ def install(pipeline_module) -> None:
         return tracks, ["lofi"]
 
     pipeline_module.load_catalog = _fake_load_catalog
+
+    def _fake_get_track_by_id(track_id: str) -> dict | None:
+        return next(
+            (t for t in _build_mock_catalog(pipeline_module) if t["id"] == track_id),
+            None,
+        )
+
+    pipeline_module.get_track_by_id = _fake_get_track_by_id

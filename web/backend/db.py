@@ -217,7 +217,15 @@ def _touch_playlist(c: sqlite3.Connection, playlist_id: int) -> None:
 
 def add_tracks_to_playlist(playlist_id: int, track_ids: list[str]) -> int:
     """Append `track_ids` at the end of the playlist. Duplicates are allowed.
-    Returns the new total count of tracks in the playlist."""
+    Returns the new total count of tracks in the playlist.
+
+    The read-modify-write sequence is wrapped in a `BEGIN IMMEDIATE`
+    transaction so concurrent appends from two clients (e.g. two open tabs
+    or async callers) cannot both observe the same `MAX(position)+1` and
+    then collide on the `(playlist_id, position)` PRIMARY KEY. `IMMEDIATE`
+    acquires a RESERVED lock at BEGIN time, serialising writers without
+    blocking readers; the second caller waits until we commit.
+    """
     if not track_ids:
         with _conn() as c:
             row = c.execute(
@@ -226,7 +234,12 @@ def add_tracks_to_playlist(playlist_id: int, track_ids: list[str]) -> int:
             ).fetchone()
             return row["n"] if row else 0
 
-    with _conn() as c:
+    c = _conn()
+    # Disable sqlite3's implicit transaction management so we can issue an
+    # explicit BEGIN IMMEDIATE that serialises concurrent writers.
+    c.isolation_level = None
+    try:
+        c.execute("BEGIN IMMEDIATE")
         row = c.execute(
             "SELECT COALESCE(MAX(position), -1) + 1 AS next_pos FROM playlist_tracks WHERE playlist_id = ?",
             (playlist_id,),
@@ -239,8 +252,13 @@ def add_tracks_to_playlist(playlist_id: int, track_ids: list[str]) -> int:
             )
             next_pos += 1
         _touch_playlist(c, playlist_id)
-        c.commit()
+        c.execute("COMMIT")
         return next_pos
+    except Exception:
+        c.execute("ROLLBACK")
+        raise
+    finally:
+        c.close()
 
 
 def remove_track_from_playlist(playlist_id: int, track_id: str) -> bool:
