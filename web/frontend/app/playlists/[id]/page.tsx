@@ -11,7 +11,6 @@ import {
   type DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
@@ -29,6 +28,8 @@ import {
 import { getUser } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import type { PlaylistDetail, PlaylistTrack, Track } from "@/lib/types";
+
+import { computeDragReorder } from "./dragLogic";
 
 function formatDuration(sec: number | null | undefined) {
   if (!sec) return "—";
@@ -172,18 +173,18 @@ export default function PlaylistDetailPage() {
 
   async function handleDragEnd(event: DragEndEvent) {
     const { active, over } = event;
-    if (!pl || !over || active.id === over.id) return;
-    const oldIndex = rowIds.indexOf(String(active.id));
-    const newIndex = rowIds.indexOf(String(over.id));
-    if (oldIndex < 0 || newIndex < 0) return;
-    const next = arrayMove(pl.tracks, oldIndex, newIndex);
+    if (!pl || !over) return;
+    const result = computeDragReorder(
+      String(active.id),
+      String(over.id),
+      pl.tracks,
+      rowIds,
+    );
+    if (!result) return;
     // Optimistic update.
-    setPl({ ...pl, tracks: next });
+    setPl({ ...pl, tracks: result.nextTracks });
     try {
-      await reorderTracks(
-        pl.id,
-        next.map((t) => t.id),
-      );
+      await reorderTracks(pl.id, result.reorderArgs);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Reorder failed");
       // Refresh from server to discard the failed local change.
