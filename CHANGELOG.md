@@ -5,6 +5,64 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-05-05
+
+Patch release closing the v2.3 cleanup backlog accumulated against
+v2.2.0 — six follow-up issues identified during the v2.2.0 release
+review (#11, #12, #13, #16, #17, #18). No new features; no behavior
+change for the user beyond perf and bug fixes.
+
+### Fixed
+- **Race condition in `add_tracks_to_playlist`** — concurrent
+  `POST /api/playlists/{id}/tracks` from two clients no longer raise
+  `IntegrityError` on the `(playlist_id, position)` primary key.
+  `db.py` now wraps the read-modify-write in a `BEGIN IMMEDIATE`
+  transaction (#16, #30).
+- **Catalog hydration O(catalog) per GET** — `pipeline.load_catalog`
+  now memoizes the parsed `tracks/tracks.json` keyed on
+  `(mtime, size)`. New `get_track_by_id()` provides O(1) lookups for
+  `/api/playlists/{id}` hydration. ~253× speedup on the smoke
+  benchmark (#17, #30).
+- **`npm run lint` broken on Next 16** — `next lint` was deprecated
+  and removed; migrated to ESLint flat config
+  (`web/frontend/eslint.config.mjs`) composing
+  `eslint-config-next/core-web-vitals` + `next/typescript`. Pinned
+  ESLint to v9.x for plugin compatibility (#11, #27).
+- **`tsconfig.tsbuildinfo` polluting `git status`** — added
+  `*.tsbuildinfo` to `.gitignore` (#12, #27).
+- **Mock pipeline silence file leaking into `tracks/lofi/`** —
+  `_ensure_mock_audio_file` now writes to `<root>/.tmp/` instead;
+  the streaming endpoint's path-traversal guard now accepts both
+  `tracks/` and `.tmp/` (#13, #27).
+
+### Tests
+- **Charmap regression** — cross-platform unit tests that simulate
+  Windows cp1252 default encoding by wrapping `builtins.open`,
+  exercise every agent tool that PR #22 hardened. Mutation-tested:
+  reverting any of the 25 `encoding="utf-8"` additions causes the
+  suite to fail with the original `0x9d` error (#22 follow-up, #26).
+- **Drag-and-drop reorder coverage** — extracted `handleDragEnd`'s
+  pure logic into `computeDragReorder()` and added 6 vitest cases
+  covering happy path, no-op branches, and the duplicate /
+  direction-sensitive corners that `arrayMove` gets wrong if you
+  swap its arguments. Mutation-tested (#18, #28).
+- **Concurrent append race** — `tests/web/test_playlist_race.py`
+  fires 20 concurrent `httpx.AsyncClient` POSTs and asserts no 500s
+  + dense 0..19 positions. Negative control: reverting the
+  `BEGIN IMMEDIATE` causes 18/20 to fail with IntegrityError.
+- **Catalog cache** — 7 unit tests covering memoization, mtime/size
+  invalidation, deleted-file fallback, and warm-from-cold lookups.
+
+### Chores
+- Followed up the cosmetic genre-guard banner (#23) — no separate
+  v2.2.1 fix; the banner was solved as part of v2.2.0's last
+  hotfix.
+
+### Open follow-ups
+- #29 — re-enable `react-hooks/set-state-in-effect` and
+  `react-hooks/refs` (disabled in #27 to keep scope small;
+  documented as React-19 ergonomics tech debt for v2.4).
+
 ## [2.2.0] — 2026-05-04
 
 UX & catalog workflow release. Adds in-browser audio streaming, named
