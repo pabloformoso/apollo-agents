@@ -5,6 +5,80 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.3.0] — 2026-05-06
+
+Agent ↔ user-data integration release. The conversational agent now
+reads the logged-in user's playlists and per-track ratings (delivered
+in v2.2.0/v2.2.1) and uses them as soft signal during planning,
+critiquing, and editing. No UX changes for the user — sessions still
+flow the same; the agent is simply better informed.
+
+### Added
+- **`user_id` threaded into agent context** — `_handle_ws_message`
+  injects `user_id` and `username` into `context_variables` once per
+  session so every agent phase can identify the requester (#32).
+- **`pipeline.load_user_context(user_id)`** — orchestrates
+  `db.list_playlists_by_user` + `db.get_user_ratings`, returns
+  `{playlists, ratings, favorite_ids, dislike_ids}`. Cached at 60s
+  TTL keyed by `(user_id, time_bucket)` (#32).
+- **Four new agent tools** in `agent/tools.py` (lazy-import
+  `web.backend.db` and `pipeline` to avoid circulars):
+  - `get_user_playlists(ctx)` — Markdown table of saved playlists.
+  - `get_playlist_tracks(playlist_id, ctx)` — hydrated tracks of a
+    given playlist with ownership check.
+  - `get_user_ratings(ctx, min_rating)` — JSON map filtered by
+    threshold.
+  - `get_favorite_tracks(ctx, genre)` — ★4+ tracks intersected with
+    the optional genre filter (#32).
+- **Planner prompt block "USER PREFERENCES"** — when a user is
+  authenticated, `phase_plan` injects a capped summary (10 favorites,
+  5 dislikes, 5 playlists) before invoking the LLM (#32).
+- **`_apply_user_rating_bias` helper** — pure function that reorders
+  each BPM cluster to put favorites at the front and dislikes at the
+  back, preserving harmonic adjacency among same-rated tracks. Wired
+  into `propose_playlist` between Camelot sort and `_fill_duration`,
+  so favorites are picked first and dislikes only land in the output
+  if duration forces it (#33).
+- **Editor + Critic awareness of ratings** — `_EDITOR_SYSTEM` and
+  `_CRITIC_SYSTEM` prompts gain a "USER PREFERENCES SIGNAL" section.
+  Critic does a deterministic post-process pass appending a
+  `structured_problem` for each track in the playlist that the user
+  has rated ★1 or ★2. `swap_track.prefer_favorites=True` (default)
+  ranks favorite candidates first when present. New
+  `_hydrate_user_context()` helper in `pipeline.py` ensures
+  `phase_critique` and `phase_editor` get the same `favorite_ids`
+  / `dislike_ids` keys that `phase_plan` already had (#34).
+
+### Tests
+- 24 new pytest cases for v2.3.0 (load_user_context, prompt
+  formatting, tool surface, phase_plan integration).
+- 16 new pytest cases for v2.3.1 (`_apply_user_rating_bias` purity,
+  cluster reordering, dislike-only-when-needed semantics, mutation
+  test caught the obvious swap of arg order).
+- New pytest cases for v2.3.2 across critic dislike-flagging,
+  editor prompt content, swap_track ranking, and phase hydration.
+- Total backend pytest: 305 → 321 → 348 (across the three PRs).
+- New Playwright spec for v2.3.0 (`user-context.spec.ts`); full E2E
+  suite remains green at 19+ tests.
+- All four CI jobs (Backend Python 3.12 + 3.13, Frontend Node 20,
+  E2E Playwright) green on every PR before merge.
+
+### Out of scope (deferred)
+- "Generate from my playlist X" as direct session input — left for
+  v2.4 if interesting.
+- Per-user memory (`memory.json` v3 with `user_id`) — v2 stays
+  intact; the agent reads SQLite at runtime and does not persist
+  per-user signals to memory.
+- Per-track ratings within session records (`write_session_record`
+  unchanged).
+- Frontend changes — none. UX is identical to v2.2.1.
+
+### Open follow-ups
+- #29 — re-enable `react-hooks/set-state-in-effect` and
+  `react-hooks/refs` rules (disabled in v2.2.1's #27 cleanup batch
+  to keep scope small). Dedicated React-19 ergonomics PR pending
+  for v2.4.
+
 ## [2.2.1] — 2026-05-05
 
 Patch release closing the v2.3 cleanup backlog accumulated against
