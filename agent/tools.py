@@ -181,6 +181,59 @@ def _harmonic_sort(tracks: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# v2.3.1 — user-rating bias for propose_playlist
+# ---------------------------------------------------------------------------
+
+def _apply_user_rating_bias(
+    clustered_tracks: list[list[dict]],
+    favorite_ids: set[str] | None,
+    dislike_ids: set[str] | None,
+) -> list[list[dict]]:
+    """Reorder each cluster so user favorites land at the front and user
+    dislikes land at the back, while preserving the relative (harmonic)
+    order among same-rated tracks.
+
+    Within every cluster the ordering becomes:
+        favorites (in original order) +
+        unrated/neutral tracks (in original order) +
+        dislikes (in original order)
+
+    When ``favorite_ids`` and ``dislike_ids`` are both empty/None the
+    function is a no-op — it returns the input cluster list untouched.
+
+    Pure function: no side effects, no mutation of the input lists.
+
+    Args:
+        clustered_tracks: list of clusters; each cluster is a list of
+            track dicts (must expose an ``id`` key).
+        favorite_ids: ids the current user rated >= 4 (treated as
+            favorites). ``None`` is equivalent to an empty set.
+        dislike_ids: ids the current user rated <= 2 (treated as
+            dislikes). ``None`` is equivalent to an empty set.
+
+    Returns:
+        New list of clusters with the bias applied. The outer list and
+        inner cluster lists are fresh objects; track dicts are NOT
+        cloned (they are referenced by identity).
+    """
+    if not favorite_ids and not dislike_ids:
+        return clustered_tracks
+    favorite_ids = favorite_ids or set()
+    dislike_ids = dislike_ids or set()
+    result: list[list[dict]] = []
+    for cluster in clustered_tracks:
+        favs = [t for t in cluster if t.get("id") in favorite_ids]
+        dislkd = [t for t in cluster if t.get("id") in dislike_ids]
+        rest = [
+            t
+            for t in cluster
+            if t.get("id") not in favorite_ids and t.get("id") not in dislike_ids
+        ]
+        result.append(favs + rest + dislkd)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Playback helper
 # ---------------------------------------------------------------------------
 
@@ -294,6 +347,32 @@ def propose_playlist(
 
     cluster = _bpm_cluster(all_tracks)
     ordered = _harmonic_sort(cluster)
+
+    # v2.3.1 — sesgo por ratings: si el usuario logueado tiene
+    # favoritos/dislikes en ctx (poblados por load_user_context en v2.3.0),
+    # reordenamos manteniendo la adyacencia harmónica entre tracks de la
+    # misma categoría. El helper opera sobre clusters, así que envolvemos
+    # el orden harmónico de un solo cluster en una lista de un elemento.
+    favorite_ids = context_variables.get("favorite_ids") or set()
+    dislike_ids = context_variables.get("dislike_ids") or set()
+    biased_clusters = _apply_user_rating_bias([ordered], favorite_ids, dislike_ids)
+    ordered = biased_clusters[0] if biased_clusters else ordered
+
+    if favorite_ids or dislike_ids:
+        progress = context_variables.get("_progress")
+        if progress is not None:
+            n_fav = sum(1 for t in ordered if t.get("id") in favorite_ids)
+            n_dis = sum(1 for t in ordered if t.get("id") in dislike_ids)
+            try:
+                progress({
+                    "stage": "bias",
+                    "message": (
+                        f"Boosted {n_fav} favorites, demoted {n_dis} dislikes "
+                        "within clusters."
+                    ),
+                })
+            except Exception:
+                pass  # never let UI plumbing break selection
 
     # Fill to duration — deduplicate display_name first, then cycle
     target_sec = duration_min * 60
