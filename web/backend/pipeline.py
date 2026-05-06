@@ -92,10 +92,14 @@ _PLANNER_TOOLS = [
     get_user_ratings,
     get_favorite_tracks,
 ]
-_CRITIC_TOOLS = [show_playlist, analyze_transition, get_energy_arc]
+_CRITIC_TOOLS = [
+    show_playlist, analyze_transition, get_energy_arc,
+    get_user_playlists, get_playlist_tracks, get_user_ratings, get_favorite_tracks,
+]
 _WEB_EDITOR_TOOLS = [
     show_playlist, analyze_transition, swap_track, move_track,
     suggest_bridge_track, insert_bridge_track, build_session,
+    get_user_playlists, get_playlist_tracks, get_user_ratings, get_favorite_tracks,
 ]
 _VALIDATOR_TOOLS = [validate_audio]
 
@@ -650,6 +654,31 @@ async def phase_genre_guard(
     return _parse_confirmed_block(response)
 
 
+async def _hydrate_user_context(ctx: dict) -> None:
+    """Populate favorite_ids/dislike_ids/user_ratings/user_playlists in ctx
+    if a user_id is present.
+
+    Idempotent: safe to call multiple times per session — the second call
+    short-circuits as soon as it sees `favorite_ids` already in ctx, so
+    phase_plan / phase_critique / phase_editor can each call this without
+    re-querying the DB. The underlying `load_user_context` is also cached
+    at 60s TTL, so even a fresh-ctx critic turn coming in 30s after a plan
+    re-uses the same payload.
+
+    No-op when no `user_id` is in ctx (e.g. anonymous CLI sessions).
+    """
+    user_id = ctx.get("user_id")
+    if user_id is None:
+        return
+    if "favorite_ids" in ctx:  # already hydrated
+        return
+    user_ctx = await asyncio.to_thread(load_user_context, user_id)
+    ctx["favorite_ids"] = user_ctx["favorite_ids"]
+    ctx["dislike_ids"] = user_ctx["dislike_ids"]
+    ctx["user_ratings"] = user_ctx["ratings"]
+    ctx["user_playlists"] = user_ctx["playlists"]
+
+
 async def phase_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str:
     """Run Planner. Populates ctx['playlist'].
 
@@ -667,13 +696,10 @@ async def phase_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str
 
     user_id = ctx.get("user_id")
     if user_id is not None:
+        await _hydrate_user_context(ctx)
+        # Re-fetch the cached payload to format the prompt block. The
+        # `load_user_context` cache (60s TTL) makes this free.
         user_ctx = await asyncio.to_thread(load_user_context, user_id)
-        # Mutate ctx so downstream tools (and v2.3.1 propose_playlist) can
-        # consult these without re-querying SQLite.
-        ctx["favorite_ids"] = user_ctx["favorite_ids"]
-        ctx["dislike_ids"] = user_ctx["dislike_ids"]
-        ctx["user_ratings"] = user_ctx["ratings"]
-        ctx["user_playlists"] = user_ctx["playlists"]
         user_summary = _format_user_summary(user_ctx, ctx.get("genre"))
         if user_summary:
             prompt += f"\n\n{user_summary}"
@@ -687,13 +713,33 @@ async def phase_critique(
     emit: Callable,
     memory_summary: str = "",
 ) -> tuple[str, list[str], list[dict]]:
-    """Run Critic. Returns (verdict, problems, structured_problems)."""
+    """Run Critic. Returns (verdict, problems, structured_problems).
+
+    v2.3.2: hydrates user context (favorite_ids/dislike_ids/user_ratings)
+    so the Critic's tool calls can reach the per-user signal AND so the
+    deterministic dislike-flagging post-process can append problems for
+    any low-rated tracks the LLM may have skipped.
+    """
+    await _hydrate_user_context(ctx)
     prompt = "A playlist has been proposed. Review it and deliver your verdict."
     if memory_summary:
         prompt += f"\n\nMemory context:\n{memory_summary}"
     messages = [{"role": "user", "content": prompt}]
     response = await run_agent_streaming(_CRITIC_SYSTEM, _CRITIC_TOOLS, messages, ctx, emit)
-    return _parse_critic_response(response, ctx.get("playlist"))
+    verdict, problems, structured_problems = _parse_critic_response(
+        response, ctx.get("playlist")
+    )
+
+    # Deterministic dislike pass: even if the LLM forgets the
+    # USER PREFERENCES guidance, surface every track the user has rated
+    # ★1 or ★2 as a structured_problem so the Editor can swap it.
+    structured_problems = _append_dislike_problems(
+        ctx.get("playlist") or [],
+        ctx.get("dislike_ids") or set(),
+        ctx.get("user_ratings") or {},
+        structured_problems,
+    )
+    return verdict, problems, structured_problems
 
 
 async def phase_editor(
@@ -702,11 +748,47 @@ async def phase_editor(
     ctx: dict,
     emit: Callable,
 ) -> str:
-    """Run one Editor turn. Mutates ctx['playlist'] via tool calls."""
+    """Run one Editor turn. Mutates ctx['playlist'] via tool calls.
+
+    v2.3.2: hydrates user context so the Editor's tools (and the new
+    USER PREFERENCES SIGNAL clause in `_EDITOR_SYSTEM`) can read
+    favorite_ids / dislike_ids / user_ratings without re-querying SQLite.
+    """
+    await _hydrate_user_context(ctx)
     history.append({"role": "user", "content": message})
     response = await run_agent_streaming(_EDITOR_SYSTEM, _WEB_EDITOR_TOOLS, history, ctx, emit)
     history.append({"role": "assistant", "content": response})
     return response
+
+
+def _append_dislike_problems(
+    playlist: list[dict],
+    dislike_ids: set,
+    ratings: dict,
+    structured_problems: list[dict],
+) -> list[dict]:
+    """Append a structured_problem for each playlist track the user dislikes.
+
+    This is a deterministic pass that runs after the LLM critic — it
+    guarantees the Editor sees every ★1/★2 track even if the LLM forgot
+    the user-preferences guidance. Pure function for easy testing.
+    """
+    if not dislike_ids:
+        return structured_problems
+    out = list(structured_problems)
+    for i, track in enumerate(playlist):
+        tid = track.get("id")
+        if tid in dislike_ids:
+            rating = ratings.get(tid, 0)
+            display = track.get("display_name", tid)
+            out.append({
+                "pos_from": i + 1,
+                "pos_to": i + 1,
+                "key_pair": "",
+                "bpm_diff": 0,
+                "text": f"User rated '{display}' as ★{rating} — consider swap",
+            })
+    return out
 
 
 async def phase_validate(session_name: str, ctx: dict, emit: Callable) -> tuple[str, list[str]]:

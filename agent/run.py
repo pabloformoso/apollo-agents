@@ -210,6 +210,14 @@ Rules:
 - Do NOT swap, move, or propose tracks. Only critique.
 - Do NOT add prose after the VERDICT line.
 - Any transition showing ⚠ Stretch >1.5× is a mandatory PROBLEMS entry — bridge track required.
+
+USER PREFERENCES SIGNAL:
+When reviewing the playlist, identify any track that the current user
+has rated ★1 or ★2 (a "dislike"). For each one, surface as a
+structured_problem with text "User rated this ★N, consider swap" so
+the Editor can replace it. This pass is in addition to your normal
+harmonic and energy checks — do not omit them. You can inspect the
+available signal via get_user_ratings or get_favorite_tracks if needed.
 """
 
 _EDITOR_SYSTEM = """\
@@ -237,6 +245,12 @@ them only after build_session has completed successfully.
 - start_live_session(session_name=""): launch live DJ mode — proactive real-time mixing.
   Offer this when the user says "play live", "go live", "live mix", or "spin it live".
   Live mode and build_session are independent — either can be used after the set is approved.
+
+USER PREFERENCES SIGNAL:
+When the user asks to swap or replace a track, prefer tracks they have
+rated ★4 or ★5, and avoid tracks they have rated ★1 or ★2. You can
+inspect the available signal via get_user_ratings, get_favorite_tracks,
+or get_user_playlists if needed.
 """
 
 _CATALOG_MANAGER_SYSTEM = """\
@@ -646,6 +660,7 @@ _EDITOR_TOOLS = [
     suggest_bridge_track, insert_bridge_track, build_session,
     play_mix, preview_transition, play_track,
     start_live_session,
+    get_user_playlists, get_playlist_tracks, get_user_ratings, get_favorite_tracks,
 ]
 _CATALOG_TOOLS = [catalog_status, rebuild_catalog, fix_incomplete, redetect_bpm, import_rekordbox, generate_beatgrid]
 
@@ -846,7 +861,10 @@ def _orchestrate() -> None:
         critic_brief += f"\n\nPAST SESSION MEMORY (user preferences):\n{memory_summary}"
     critic_messages: list[dict] = [{"role": "user", "content": critic_brief}]
     critic_response = run_agent(
-        _CRITIC_SYSTEM, [show_playlist, analyze_transition, get_energy_arc], critic_messages, context_variables
+        _CRITIC_SYSTEM,
+        [show_playlist, analyze_transition, get_energy_arc,
+         get_user_playlists, get_playlist_tracks, get_user_ratings, get_favorite_tracks],
+        critic_messages, context_variables
     )
     if critic_response:
         print(f"\n[Critic]\n{critic_response}\n")
