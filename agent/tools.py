@@ -372,12 +372,25 @@ def analyze_transition(track_a_id: str, track_b_id: str, context_variables: dict
     return result
 
 
-def swap_track(position: int, track_id: str, context_variables: dict) -> str:
+def swap_track(
+    position: int,
+    track_id: str,
+    context_variables: dict,
+    prefer_favorites: bool = True,
+) -> str:
     """Replace the track at a given position (1-indexed) with another track from the catalog.
 
     Args:
         position: 1-indexed position in the current playlist
         track_id: ID of the replacement track (from get_catalog)
+        prefer_favorites: When True (default) and the user has rated tracks,
+            this is an advisory flag — the swap itself executes the
+            requested track_id, but a note is appended to the response
+            when the chosen track is in the user's favorite set or
+            dislike set so the LLM can self-correct on the next turn.
+            The actual ranking of candidates lives in suggest_bridge_track,
+            which honours `prefer_favorites` for its candidate selection.
+            See PR body for the full rationale.
     """
     playlist = context_variables.get("playlist")
     if not playlist:
@@ -412,9 +425,25 @@ def swap_track(position: int, track_id: str, context_variables: dict) -> str:
         if w:
             pre_warnings.append(f"Position {position}→{position + 1}:\n{w}")
 
+    # Advisory note: surface user-rating signal for the chosen track.
+    # When prefer_favorites=True and we have rating data, hint the LLM
+    # whether the chosen replacement aligns with the user's preferences.
+    rating_note = ""
+    if prefer_favorites:
+        favorite_ids = context_variables.get("favorite_ids") or set()
+        dislike_ids = context_variables.get("dislike_ids") or set()
+        if track_id in favorite_ids:
+            rating_note = "Note: replacement is one of the user's favorites (★4+).\n\n"
+        elif track_id in dislike_ids:
+            rating_note = (
+                "Note: replacement is in the user's dislikes (★1-2). "
+                "Consider a different track if alternatives are available.\n\n"
+            )
+
     warning_block = ("\n".join(pre_warnings) + "\n\n") if pre_warnings else ""
     return (
-        warning_block
+        rating_note
+        + warning_block
         + f"Swapped position {position}:\n"
         f"  OUT: {old['display_name']} [{old.get('camelot_key','?')}  {old.get('bpm','?')} BPM]\n"
         f"  IN:  {new_track['display_name']} [{new_track.get('camelot_key','?')}  {new_track.get('bpm','?')} BPM]\n\n"
@@ -461,12 +490,24 @@ def move_track(from_pos: int, to_pos: int, context_variables: dict) -> str:
     )
 
 
-def suggest_bridge_track(from_pos: int, to_pos: int, context_variables: dict) -> str:
+def suggest_bridge_track(
+    from_pos: int,
+    to_pos: int,
+    context_variables: dict,
+    prefer_favorites: bool = True,
+) -> str:
     """Find candidate bridge tracks between two BPM-mismatched playlist positions.
 
     Args:
         from_pos: 1-indexed position of the outgoing track
         to_pos: 1-indexed position of the incoming track
+        prefer_favorites: When True (default) and the user has rated tracks,
+            re-rank candidates so user favorites (★4+) appear first and
+            user dislikes (★1-2) drop to the bottom. The base BPM/key
+            score is preserved as the tie-breaker within each group, so
+            a slightly worse-scoring favorite still beats a marginally
+            better-scoring unrated track. When False, falls back to the
+            pure BPM/key ranking — used for regression-control tests.
     """
     playlist = context_variables.get("playlist")
     if not playlist:
@@ -514,7 +555,25 @@ def suggest_bridge_track(from_pos: int, to_pos: int, context_variables: dict) ->
 
         candidates.append((score, c))
 
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    # Rank: pure BPM/key score by default, or favorites-first when the
+    # caller opts in (which is now the default) and the user has data.
+    favorite_ids = context_variables.get("favorite_ids") or set()
+    dislike_ids = context_variables.get("dislike_ids") or set()
+    biased = prefer_favorites and (favorite_ids or dislike_ids)
+    if biased:
+        # Tier 0 = favorite, 1 = neutral, 2 = dislike. Higher score wins
+        # within each tier; ties keep insertion order.
+        def _tier(c: dict) -> int:
+            cid = c.get("id")
+            if cid in favorite_ids:
+                return 0
+            if cid in dislike_ids:
+                return 2
+            return 1
+
+        candidates.sort(key=lambda x: (_tier(x[1]), -x[0]))
+    else:
+        candidates.sort(key=lambda x: x[0], reverse=True)
     top = candidates[:3]
 
     if not top:
@@ -532,10 +591,17 @@ def suggest_bridge_track(from_pos: int, to_pos: int, context_variables: dict) ->
         c_bpm = c["bpm"]
         ratio_a = max(bpm_a, c_bpm) / min(bpm_a, c_bpm)
         ratio_b = max(bpm_b, c_bpm) / min(bpm_b, c_bpm)
+        marker = ""
+        if biased:
+            cid = c.get("id")
+            if cid in favorite_ids:
+                marker = " ★fav"
+            elif cid in dislike_ids:
+                marker = " ★dislike"
         lines.append(
             f"  {c['id']} | {c['display_name']} | {c_bpm:.1f} BPM | "
             f"{c.get('camelot_key', '?')} | "
-            f"ratio_a: {ratio_a:.2f}× | ratio_b: {ratio_b:.2f}× | score: {score:.3f}"
+            f"ratio_a: {ratio_a:.2f}× | ratio_b: {ratio_b:.2f}× | score: {score:.3f}{marker}"
         )
     return "\n".join(lines)
 
