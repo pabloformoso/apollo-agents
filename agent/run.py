@@ -56,6 +56,10 @@ from agent.tools import (
     start_live_session,
     import_rekordbox,
     generate_beatgrid,
+    get_user_playlists,
+    get_playlist_tracks,
+    get_user_ratings,
+    get_favorite_tracks,
 )
 
 load_dotenv()
@@ -144,6 +148,12 @@ Workflow:
 
 Do NOT call show_playlist or build_session.
 Do NOT ask questions — make confident choices.
+
+You may consult get_user_playlists, get_playlist_tracks, get_user_ratings,
+or get_favorite_tracks if the USER PREFERENCES block above suggests a tighter
+fit than the genre filter alone — for example, when the user has favorites
+within the requested genre and you want to surface their exact ids before
+proposing the playlist.
 """
 
 _CHECKPOINT_SYSTEM = """\
@@ -800,7 +810,20 @@ def _orchestrate() -> None:
         planner_prompt += f"\n\nPAST SESSION MEMORY:\n{memory_summary}"
     planner_messages: list[dict] = [{"role": "user", "content": planner_prompt}]
     planner_response = run_agent(
-        _PLANNER_SYSTEM, [get_catalog, propose_playlist, get_energy_arc, swap_track, move_track], planner_messages, context_variables
+        _PLANNER_SYSTEM,
+        [
+            get_catalog,
+            propose_playlist,
+            get_energy_arc,
+            swap_track,
+            move_track,
+            get_user_playlists,
+            get_playlist_tracks,
+            get_user_ratings,
+            get_favorite_tracks,
+        ],
+        planner_messages,
+        context_variables,
     )
     if planner_response:
         print(f"\n[Planner]\n{planner_response}\n")
