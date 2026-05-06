@@ -519,6 +519,17 @@ async def session_ws(
 # ---------------------------------------------------------------------------
 
 async def _handle_ws_message(s, msg_type: str | None, content: str, emit) -> None:
+    # Inject session identity into context_variables so agent tools can
+    # consult per-user data (playlists, ratings) via SQLite. Idempotent —
+    # only populated on the first ws message; subsequent messages reuse
+    # the cached values, and a defensive `.get()` everywhere downstream
+    # means previous phases keep working when these keys are absent.
+    if "user_id" not in s.context_variables:
+        s.context_variables["user_id"] = s.user_id
+        user_row = db.get_user_by_id(s.user_id)
+        if user_row:
+            s.context_variables["username"] = user_row["username"]
+
     # ── Genre Guard ──────────────────────────────────────────────
     if msg_type == "genre_intent":
         s.phase = "genre"

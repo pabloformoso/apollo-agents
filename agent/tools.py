@@ -1546,6 +1546,118 @@ def import_rekordbox(xml_path: str, context_variables: dict) -> str:
     return summary
 
 
+# ---------------------------------------------------------------------------
+# User context tools (v2.3.0) — surface per-user playlists/ratings to the
+# planner. All four read context_variables["user_id"] and short-circuit with
+# a stable "User context not available." string when missing (e.g. CLI
+# `agent/run.py` runs that have no logged-in user).
+#
+# `web.backend.db` and `web.backend.pipeline` are imported lazily inside
+# each function body to avoid a circular import: pipeline.py imports
+# agent/tools.py at module load, so we cannot reference web.backend at
+# the top of this file.
+# ---------------------------------------------------------------------------
+
+def get_user_playlists(context_variables: dict) -> str:
+    """List the user's saved playlists as a Markdown table.
+
+    Returns "User context not available." when no `user_id` is in context
+    (e.g. when running via the CLI agent, not the web backend).
+    """
+    user_id = context_variables.get("user_id")
+    if user_id is None:
+        return "User context not available."
+    from web.backend import db  # noqa: PLC0415 — lazy to avoid circular import
+    rows = db.list_playlists_by_user(user_id)
+    if not rows:
+        return "User has no saved playlists."
+    lines = ["| id | name | tracks |", "|---|---|---|"]
+    for r in rows:
+        lines.append(f"| {r['id']} | {r['name']} | {r['track_count']} |")
+    return "\n".join(lines)
+
+
+def get_playlist_tracks(playlist_id: int, context_variables: dict) -> str:
+    """Return the ordered tracks of one of the user's playlists.
+
+    Verifies ownership: returns "Not authorized." if the playlist belongs
+    to a different user. Returns "Playlist not found." if the id doesn't
+    exist.
+    """
+    user_id = context_variables.get("user_id")
+    if user_id is None:
+        return "User context not available."
+    from web.backend import db, pipeline  # noqa: PLC0415 — lazy
+    p = db.get_playlist(playlist_id)
+    if not p:
+        return "Playlist not found."
+    if p["user_id"] != user_id:
+        return "Not authorized."
+    try:
+        catalog_tracks, _ = pipeline.load_catalog(None)
+    except pipeline.CatalogUnavailable:
+        catalog_tracks = []
+    by_id = {t.get("id"): t for t in catalog_tracks if t.get("id")}
+    lines = ["| pos | id | display_name | bpm | key |", "|---|---|---|---|---|"]
+    for i, tid in enumerate(p["track_ids"]):
+        t = by_id.get(tid, {"id": tid, "display_name": tid, "bpm": "—", "camelot_key": "—"})
+        lines.append(
+            f"| {i} | {t.get('id')} | {t.get('display_name')} | "
+            f"{t.get('bpm')} | {t.get('camelot_key')} |"
+        )
+    return "\n".join(lines)
+
+
+def get_user_ratings(context_variables: dict, min_rating: int = 1) -> str:
+    """Return the user's ratings (filtered by `min_rating`) as JSON.
+
+    Format: `{"<track_id>": <rating>, ...}`. `min_rating` defaults to 1
+    (return everything). Returns "No ratings." when the filtered set is
+    empty.
+    """
+    user_id = context_variables.get("user_id")
+    if user_id is None:
+        return "User context not available."
+    from web.backend import db  # noqa: PLC0415 — lazy
+    ratings = db.get_user_ratings(user_id)
+    filtered = {tid: r for tid, r in ratings.items() if r >= min_rating}
+    if not filtered:
+        return "No ratings."
+    return json.dumps(filtered, sort_keys=True)
+
+
+def get_favorite_tracks(context_variables: dict, genre: str | None = None) -> str:
+    """List tracks the user has rated >= 4 as a Markdown table.
+
+    When `genre` is provided, intersect with the catalog of that genre so
+    the planner only sees IDs it can actually pick. Falls back to a clear
+    "No favorites." / "No favorites within genre 'X'." message when the
+    intersection is empty.
+    """
+    user_id = context_variables.get("user_id")
+    if user_id is None:
+        return "User context not available."
+    from web.backend import db, pipeline  # noqa: PLC0415 — lazy
+    ratings = db.get_user_ratings(user_id)
+    fav_ids = {tid for tid, r in ratings.items() if r >= 4}
+    if not fav_ids:
+        return "No favorites."
+    try:
+        catalog_tracks, _ = pipeline.load_catalog(genre)
+    except pipeline.CatalogUnavailable:
+        catalog_tracks = []
+    fav_tracks = [t for t in catalog_tracks if t.get("id") in fav_ids]
+    if not fav_tracks:
+        return f"No favorites within genre '{genre}'." if genre else "No favorites in catalog."
+    lines = ["| id | display_name | bpm | key | rating |", "|---|---|---|---|---|"]
+    for t in fav_tracks:
+        lines.append(
+            f"| {t['id']} | {t['display_name']} | {t.get('bpm')} | "
+            f"{t.get('camelot_key')} | {ratings.get(t['id'])} |"
+        )
+    return "\n".join(lines)
+
+
 TOOLS = [
     list_genres,
     get_catalog,

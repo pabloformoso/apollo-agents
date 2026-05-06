@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -52,6 +53,10 @@ from agent.tools import (  # noqa: E402
     validate_audio,
     read_memory,
     write_session_record,
+    get_user_playlists,
+    get_playlist_tracks,
+    get_user_ratings,
+    get_favorite_tracks,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,7 +82,16 @@ _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODELS.get(_PROVIDER, "claude-opus-4-
 # Phase tool lists (web-safe: no local playback tools)
 # ---------------------------------------------------------------------------
 _GENRE_TOOLS = [list_genres, get_catalog]
-_PLANNER_TOOLS = [get_catalog, propose_playlist, get_energy_arc, show_playlist]
+_PLANNER_TOOLS = [
+    get_catalog,
+    propose_playlist,
+    get_energy_arc,
+    show_playlist,
+    get_user_playlists,
+    get_playlist_tracks,
+    get_user_ratings,
+    get_favorite_tracks,
+]
 _CRITIC_TOOLS = [show_playlist, analyze_transition, get_energy_arc]
 _WEB_EDITOR_TOOLS = [
     show_playlist, analyze_transition, swap_track, move_track,
@@ -282,6 +296,143 @@ def get_track_by_id(track_id: str) -> dict | None:
     except CatalogUnavailable:
         return None
     return cache["by_id"].get(track_id)
+
+
+# ---------------------------------------------------------------------------
+# User context — playlists + ratings keyed by user_id, cached per minute.
+#
+# v2.3.0 surface: phase_plan calls load_user_context() before invoking the
+# Planner so the prompt can reference the user's favorites/dislikes/playlists
+# as soft signal. The agent tools (get_user_playlists, get_favorite_tracks,
+# ...) read directly from db when invoked — they don't go through this cache,
+# but the planner's pre-load does.
+#
+# Cache shape: keyed on (user_id, time_bucket) with bucket = floor(t/60),
+# mirroring the v2.2.1 _CATALOG_CACHE pattern. Worst-case staleness is ~60s,
+# matching how often the rating UI is realistically interacted with.
+# ---------------------------------------------------------------------------
+
+_USER_CONTEXT_CACHE: dict[tuple[int, int], dict] = {}
+
+
+def load_user_context(user_id: int) -> dict:
+    """Load the per-user data the agent uses for soft-bias planning.
+
+    Returns a dict shaped:
+      {
+        "playlists": [{id, name, track_count}, ...],
+        "ratings":   {track_id: rating, ...},
+        "favorite_ids": set[track_id],   # rating >= 4
+        "dislike_ids":  set[track_id],   # rating <= 2
+      }
+    Always returns a valid dict (empty fields if user has no data). Cached
+    per `(user_id, time_bucket=int(time.time() // 60))` so the cache rolls
+    over once a minute without any explicit invalidation.
+    """
+    from . import db  # local import — keeps pipeline module's import surface tight.
+
+    bucket = int(time.time() // 60)
+    cache_key = (user_id, bucket)
+    cached = _USER_CONTEXT_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    playlists_raw = db.list_playlists_by_user(user_id)
+    ratings = db.get_user_ratings(user_id)
+    favorite_ids = {tid for tid, r in ratings.items() if r >= 4}
+    dislike_ids = {tid for tid, r in ratings.items() if r <= 2}
+    playlists = [
+        {"id": p["id"], "name": p["name"], "track_count": p["track_count"]}
+        for p in playlists_raw
+    ]
+    payload = {
+        "playlists": playlists,
+        "ratings": ratings,
+        "favorite_ids": favorite_ids,
+        "dislike_ids": dislike_ids,
+    }
+    # Trim stale buckets so the cache doesn't grow unboundedly across many
+    # users / many minutes. Keep only entries from the current bucket.
+    for k in list(_USER_CONTEXT_CACHE.keys()):
+        if k[1] != bucket:
+            _USER_CONTEXT_CACHE.pop(k, None)
+    _USER_CONTEXT_CACHE[cache_key] = payload
+    return payload
+
+
+def _format_user_summary(user_ctx: dict, genre: str | None = None) -> str:
+    """Format the user's playlists/ratings as a prompt block, or "" if empty.
+
+    Caps: 10 favorites, 5 dislikes, 5 playlists. When `genre` is provided,
+    favorites/dislikes that exist in the catalog for that genre are surfaced
+    first so the planner sees the most relevant ids without using up tokens
+    on unrelated picks.
+    """
+    favorite_ids: set[str] = user_ctx.get("favorite_ids") or set()
+    dislike_ids: set[str] = user_ctx.get("dislike_ids") or set()
+    playlists: list[dict] = user_ctx.get("playlists") or []
+
+    if not favorite_ids and not dislike_ids and not playlists:
+        return ""
+
+    fav_max = 10
+    dis_max = 5
+    pls_max = 5
+
+    in_genre_ids: set[str] = set()
+    if genre:
+        try:
+            catalog_tracks, _ = load_catalog(genre)
+            in_genre_ids = {t.get("id") for t in catalog_tracks if t.get("id")}
+        except CatalogUnavailable:
+            in_genre_ids = set()
+
+    def _ordered(ids: set[str], cap: int) -> tuple[list[str], list[str]]:
+        in_genre = sorted(i for i in ids if i in in_genre_ids)
+        others = sorted(i for i in ids if i not in in_genre_ids)
+        ordered = (in_genre + others)[:cap]
+        return ordered, in_genre
+
+    fav_show, fav_in_genre = _ordered(favorite_ids, fav_max)
+    dis_show, dis_in_genre = _ordered(dislike_ids, dis_max)
+
+    lines = ["USER PREFERENCES (current logged-in user):"]
+
+    if favorite_ids:
+        if genre:
+            count_str = f"{len(favorite_ids)} tracks (within '{genre}': {len(fav_in_genre)})"
+        else:
+            count_str = f"{len(favorite_ids)} tracks"
+        ids_str = ", ".join(fav_show) if fav_show else "(none in catalog)"
+        lines.append(f"- Favorites (rating >= 4): {count_str}. Top {len(fav_show)}: {ids_str}")
+    else:
+        lines.append("- Favorites (rating >= 4): none")
+
+    if dislike_ids:
+        if genre:
+            count_str = f"{len(dislike_ids)} tracks (within '{genre}': {len(dis_in_genre)})"
+        else:
+            count_str = f"{len(dislike_ids)} tracks"
+        ids_str = ", ".join(dis_show) if dis_show else "(none in catalog)"
+        lines.append(f"- Dislikes (rating <= 2): {count_str}. Top {len(dis_show)}: {ids_str}")
+    else:
+        lines.append("- Dislikes (rating <= 2): none")
+
+    if playlists:
+        pls_show = playlists[:pls_max]
+        pls_str = ", ".join(f'"{p["name"]}" ({p["track_count"]} tracks)' for p in pls_show)
+        more = f" (+{len(playlists) - len(pls_show)} more)" if len(playlists) > len(pls_show) else ""
+        lines.append(f"- Saved playlists: {pls_str}{more}")
+    else:
+        lines.append("- Saved playlists: none")
+
+    lines.append("")
+    lines.append(
+        "Use these as soft signal — favor user favorites within the requested "
+        "genre when filling the playlist; avoid user dislikes unless required "
+        "for harmonic continuity."
+    )
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -500,13 +651,33 @@ async def phase_genre_guard(
 
 
 async def phase_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str:
-    """Run Planner. Populates ctx['playlist']."""
+    """Run Planner. Populates ctx['playlist'].
+
+    When `ctx["user_id"]` is present, hydrate the context with the user's
+    playlists/ratings (favorite_ids, dislike_ids, etc.) and inject a
+    "USER PREFERENCES" block into the prompt so the Planner can soft-bias
+    selection toward favorites and away from dislikes.
+    """
     genre = ctx.get("genre", "")
     duration = ctx.get("duration_min", 60)
     mood = ctx.get("mood", "")
     prompt = f"Build a {duration}-minute {genre} set. Mood: {mood}."
     if memory_summary:
         prompt += f"\n\nPast session notes:\n{memory_summary}"
+
+    user_id = ctx.get("user_id")
+    if user_id is not None:
+        user_ctx = await asyncio.to_thread(load_user_context, user_id)
+        # Mutate ctx so downstream tools (and v2.3.1 propose_playlist) can
+        # consult these without re-querying SQLite.
+        ctx["favorite_ids"] = user_ctx["favorite_ids"]
+        ctx["dislike_ids"] = user_ctx["dislike_ids"]
+        ctx["user_ratings"] = user_ctx["ratings"]
+        ctx["user_playlists"] = user_ctx["playlists"]
+        user_summary = _format_user_summary(user_ctx, ctx.get("genre"))
+        if user_summary:
+            prompt += f"\n\n{user_summary}"
+
     messages = [{"role": "user", "content": prompt}]
     return await run_agent_streaming(_PLANNER_SYSTEM, _PLANNER_TOOLS, messages, ctx, emit)
 
