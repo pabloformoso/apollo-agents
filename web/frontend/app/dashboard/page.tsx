@@ -1,8 +1,8 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSession, listSessions, deleteSession } from "@/lib/api";
-import { getUser, clearAuth } from "@/lib/auth";
+import { clearAuth, useAuth } from "@/lib/auth";
 import type { SessionState } from "@/lib/types";
 
 function formatPhase(phase: string) {
@@ -19,27 +19,40 @@ function phaseColor(phase: string) {
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
+  // `useAuth` returns `{ user, hydrated }`. The redirect / fetch effect
+  // waits for `hydrated === true` so a logged-in user isn't bounced to
+  // /login on the first SSR-matching render. All later `setState` calls
+  // here run inside promise callbacks (microtasks), satisfying
+  // `react-hooks/set-state-in-effect`.
+  const { user, hydrated } = useAuth();
   const [sessions, setSessions] = useState<SessionState[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const load = useCallback(async () => {
-    try {
-      setSessions(await listSessions());
-    } catch {
-      clearAuth();
-      router.push("/login");
-    } finally {
-      setLoading(false);
-    }
-  }, [router]);
-
   useEffect(() => {
-    const u = getUser();
-    if (!u) { router.push("/login"); return; }
-    setUser(u);
-    load();
-  }, [load, router]);
+    if (!hydrated) return;
+    if (!user) {
+      router.push("/login");
+      return;
+    }
+    let cancelled = false;
+    listSessions()
+      .then((s) => {
+        if (cancelled) return;
+        setSessions(s);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        clearAuth();
+        router.push("/login");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, user, router]);
 
   async function handleCreate() {
     const s = await createSession();
