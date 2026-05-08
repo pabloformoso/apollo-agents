@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 interface LogEntry {
   type: "text" | "tool_call" | "tool_result" | "system" | "error" | "progress";
@@ -22,6 +22,25 @@ function formatElapsed(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// External "wall-clock" store — `useSyncExternalStore` is the canonical
+// React 19 way to subscribe to a ticking external value without
+// `setState`-in-`useEffect` (flagged by `react-hooks/set-state-in-effect`).
+// Each subscribe starts a 1 s interval; React reads `Date.now()` on every
+// render that depends on it.
+function subscribeSecond(onChange: () => void): () => void {
+  const id = setInterval(onChange, 1000);
+  return () => clearInterval(id);
+}
+function subscribeNoop(): () => void {
+  return () => {};
+}
+function getSecondNow(): number {
+  return Date.now();
+}
+function getServerSecondNow(): number {
+  return 0;
+}
+
 export default function AgentStream({
   entries,
   isStreaming,
@@ -29,19 +48,17 @@ export default function AgentStream({
   buildName = null,
 }: AgentStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const [now, setNow] = useState(() => Date.now());
+  // Subscribe to the global 1 s tick only when a build is in flight; the
+  // empty subscriber is a no-op so React doesn't re-render in idle.
+  const now = useSyncExternalStore(
+    buildStartedAt ? subscribeSecond : subscribeNoop,
+    getSecondNow,
+    getServerSecondNow,
+  );
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries]);
-
-  // Tick every second while a build is running so the elapsed timer updates.
-  useEffect(() => {
-    if (!buildStartedAt) return;
-    setNow(Date.now());
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [buildStartedAt]);
 
   function entryColor(type: LogEntry["type"]) {
     switch (type) {

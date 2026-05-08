@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useEffectEvent } from "react";
 import { getToken } from "./auth";
 import type { ServerEvent } from "./types";
 
@@ -21,8 +21,15 @@ export function useSessionWS(
   onEvent: (event: ServerEvent) => void,
 ) {
   const wsRef = useRef<WebSocket | null>(null);
-  const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+
+  // `useEffectEvent` (React 19) lets us read the latest `onEvent` from inside
+  // the WebSocket effect without making the effect re-run when the parent
+  // re-renders with a new callback identity. This replaces the prior pattern
+  // of mutating an `onEventRef.current` during render, which violated
+  // `react-hooks/refs`.
+  const handleEvent = useEffectEvent((event: ServerEvent) => {
+    onEvent(event);
+  });
 
   useEffect(() => {
     if (!sessionId) return;
@@ -42,7 +49,7 @@ export function useSessionWS(
     ws.onmessage = (e) => {
       try {
         const data = JSON.parse(e.data) as ServerEvent;
-        onEventRef.current(data);
+        handleEvent(data);
       } catch {
         // ignore malformed frames
       }
@@ -53,7 +60,7 @@ export function useSessionWS(
       // reload wiping the in-memory session store). Only surface errors
       // after a successful open.
       if (opened && !cancelled) {
-        onEventRef.current({ type: "error", message: "WebSocket error" });
+        handleEvent({ type: "error", message: "WebSocket error" });
       }
     };
 
@@ -68,6 +75,10 @@ export function useSessionWS(
         ws.addEventListener("open", () => ws.close(), { once: true });
       }
     };
+    // `handleEvent` is intentionally excluded from the dep array because it's
+    // a `useEffectEvent` — the React docs require it to NOT appear in deps
+    // (the function identity changes every render but always reads the latest
+    // `onEvent`, which is the whole point).
   }, [sessionId]);
 
   const send = useCallback((data: Record<string, unknown>) => {

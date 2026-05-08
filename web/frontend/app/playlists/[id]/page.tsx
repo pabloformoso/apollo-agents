@@ -25,7 +25,7 @@ import {
   renamePlaylist,
   reorderTracks,
 } from "@/lib/api";
-import { getUser } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import type { PlaylistDetail, PlaylistTrack, Track } from "@/lib/types";
 
@@ -123,7 +123,10 @@ export default function PlaylistDetailPage() {
   const params = useParams<{ id: string }>();
   const playlistId = Number(params?.id);
 
-  const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
+  // `useAuth` returns `{ user, hydrated }`. The fetch effect waits for
+  // `hydrated === true` so a logged-in user isn't bounced to /login on the
+  // first SSR-matching render.
+  const { user, hydrated } = useAuth();
   const [pl, setPl] = useState<PlaylistDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -147,15 +150,38 @@ export default function PlaylistDetailPage() {
     }
   }, [playlistId]);
 
+  // Auth gate + initial fetch. Waits for hydration before redirecting and
+  // dispatches all `setState` calls inside promise callbacks (microtasks),
+  // satisfying `react-hooks/set-state-in-effect`. The shared `load()`
+  // helper above is still used by reorder/remove recovery handlers, which
+  // are event-driven (not effect bodies).
   useEffect(() => {
-    const u = getUser();
-    if (!u) {
+    if (!hydrated) return;
+    if (!user) {
       router.push("/login");
       return;
     }
-    setUser(u);
-    load();
-  }, [load, router]);
+    if (!Number.isFinite(playlistId)) return;
+    let cancelled = false;
+    getPlaylist(playlistId)
+      .then((detail) => {
+        if (cancelled) return;
+        setPl(detail);
+        setNameDraft(detail.name);
+        setError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed to load playlist");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, user, playlistId, router]);
 
   const sensors = useSensors(
     useSensor(PointerSensor),

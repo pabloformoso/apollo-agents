@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clearRating, getCatalog, setRating } from "@/lib/api";
-import { getUser, clearAuth } from "@/lib/auth";
+import { clearAuth, useAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import StarRating from "@/components/StarRating";
 import type { Track } from "@/lib/types";
@@ -17,7 +17,11 @@ function formatDuration(sec: number | null | undefined) {
 
 export default function CatalogPage() {
   const router = useRouter();
-  const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
+  // `useAuth` returns `{ user, hydrated }`. The redirect / fetch effects
+  // only fire once `hydrated === true`, avoiding a pre-hydration bounce to
+  // /login. The `setState`-in-effect inside `useAuth` itself is the single
+  // canonical hydration-sync exception (per-line disabled there).
+  const { user, hydrated } = useAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [genres, setGenres] = useState<string[]>([]);
   const [genre, setGenre] = useState<string>("");
@@ -27,27 +31,55 @@ export default function CatalogPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Auth gate — only redirects after hydration so a logged-in user isn't
+  // bounced to /login on the first SSR-matching render. Side effect is
+  // navigation only, satisfying `react-hooks/set-state-in-effect`.
   useEffect(() => {
-    const u = getUser();
-    if (!u) {
-      router.push("/login");
-      return;
-    }
-    setUser(u);
-  }, [router]);
+    if (!hydrated) return;
+    if (!user) router.push("/login");
+  }, [hydrated, user, router]);
 
+  // Fetch catalog whenever the genre filter (or first user load) changes.
+  // All `setState` calls are dispatched from promise callbacks (microtasks),
+  // not synchronously inside the effect body, which is the canonical pattern
+  // recommended by `react-hooks/set-state-in-effect`. Loading state is
+  // toggled in the genre-change event handler (`handleGenreChange` below)
+  // for subsequent fetches; the initial render already starts with
+  // `loading = true`.
   useEffect(() => {
-    if (!user) return;
-    setLoading(true);
-    setError(null);
+    if (!hydrated || !user) return;
+    let cancelled = false;
     getCatalog(genre || undefined)
       .then((c) => {
+        if (cancelled) return;
         setTracks(c.tracks);
-        if (genres.length === 0) setGenres(c.genres);
+        setGenres((prev) => (prev.length === 0 ? c.genres : prev));
+        setError(null);
       })
-      .catch((e) => setError(e.message ?? "Failed to load catalog"))
-      .finally(() => setLoading(false));
-  }, [user, genre, genres.length]);
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e.message ?? "Failed to load catalog");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, user, genre]);
+
+  // Genre filter change — flip loading immediately so the UI reflects the
+  // pending fetch without waiting for the effect to finish. Keeps the
+  // setState out of the effect body.
+  const handleGenreChange = useCallback(
+    (next: string) => {
+      if (next === genre) return;
+      setLoading(true);
+      setGenre(next);
+    },
+    [genre],
+  );
 
   // Optimistic rating updates — patch the in-memory list immediately so the
   // card re-renders without waiting for the network round trip. The selected
@@ -161,7 +193,7 @@ export default function CatalogPage() {
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <button
-          onClick={() => setGenre("")}
+          onClick={() => handleGenreChange("")}
           className={`text-xs px-3 py-1 rounded border transition-colors ${
             genre === ""
               ? "border-neon text-neon bg-neon/10"
@@ -173,7 +205,7 @@ export default function CatalogPage() {
         {genres.map((g) => (
           <button
             key={g}
-            onClick={() => setGenre(g)}
+            onClick={() => handleGenreChange(g)}
             className={`text-xs px-3 py-1 rounded border transition-colors ${
               genre === g
                 ? "border-neon text-neon bg-neon/10"

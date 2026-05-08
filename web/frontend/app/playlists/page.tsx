@@ -1,44 +1,54 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   createPlaylist as apiCreate,
   deletePlaylist as apiDelete,
   listPlaylists,
 } from "@/lib/api";
-import { clearAuth, getUser } from "@/lib/auth";
+import { clearAuth, useAuth } from "@/lib/auth";
 import type { Playlist } from "@/lib/types";
 
 export default function PlaylistsPage() {
   const router = useRouter();
-  const [user, setUser] = useState<ReturnType<typeof getUser>>(null);
+  // `useAuth` returns `{ user, hydrated }`. The fetch effect waits for
+  // `hydrated === true` so a logged-in user isn't bounced to /login on the
+  // first SSR-matching render.
+  const { user, hydrated } = useAuth();
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      setPlaylists(await listPlaylists());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load playlists");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
+  // Auth gate + initial fetch. Waits for hydration before redirecting and
+  // dispatches all `setState` calls inside promise callbacks (microtasks),
+  // satisfying `react-hooks/set-state-in-effect`.
   useEffect(() => {
-    const u = getUser();
-    if (!u) {
+    if (!hydrated) return;
+    if (!user) {
       router.push("/login");
       return;
     }
-    setUser(u);
-    load();
-  }, [load, router]);
+    let cancelled = false;
+    listPlaylists()
+      .then((p) => {
+        if (cancelled) return;
+        setPlaylists(p);
+        setError(null);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed to load playlists");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrated, user, router]);
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
