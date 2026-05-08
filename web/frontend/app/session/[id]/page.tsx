@@ -362,14 +362,32 @@ export default function SessionPage() {
             )}
 
             {phase === "rating" && (
-              <RatingInput onSubmit={handleRate} sessionName={session.session_name} />
+              <div className="space-y-3">
+                <RatingInput onSubmit={handleRate} sessionName={session.session_name} />
+                <button
+                  data-testid="go-live-button"
+                  onClick={() => router.push(`/session/${sessionId}/live`)}
+                  className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim transition-colors"
+                >
+                  ▶ Go Live
+                </button>
+              </div>
             )}
 
             {phase === "complete" && (
-              <p className="text-neon text-xs">
-                ✓ Session complete — output saved to{" "}
-                <span className="font-bold">output/{session.session_name}/</span>
-              </p>
+              <div className="space-y-3">
+                <p className="text-neon text-xs">
+                  ✓ Session complete — output saved to{" "}
+                  <span className="font-bold">output/{session.session_name}/</span>
+                </p>
+                <button
+                  data-testid="go-live-button"
+                  onClick={() => router.push(`/session/${sessionId}/live`)}
+                  className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim transition-colors"
+                >
+                  ▶ Go Live
+                </button>
+              </div>
             )}
           </div>
         </div>
