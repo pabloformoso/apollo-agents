@@ -12,8 +12,13 @@
  * ``data-testid="visual-slot"`` div for a real ``<VisualLayer>`` in v2.5.3.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { UseLiveSessionApi } from "@/lib/live";
+import {
+  createMicPerception,
+  type MicPerceptionApi,
+  type PerceptionSample,
+} from "@/lib/mic_perception";
 
 interface LiveStageProps {
   live: UseLiveSessionApi;
@@ -46,15 +51,125 @@ export default function LiveStage({
     currentTrackTime,
     currentTrackDuration,
     log,
+    djChat,
     error,
     autoplayBlocked,
     sendCommand,
     sendUserMessage,
+    sendRaw,
     resumePlayback,
     quit,
   } = live;
 
   const [chatInput, setChatInput] = useState("");
+  const [micActive, setMicActive] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micRmsDb, setMicRmsDb] = useState<number>(-120);
+  const micApiRef = useRef<MicPerceptionApi | null>(null);
+  const meterTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const djChatPanelRef = useRef<HTMLUListElement | null>(null);
+
+  // Auto-scroll the dj_chat panel as new messages arrive. setState lives in
+  // an effect cleanup pair (canonical v2.4) — the scroll itself is a DOM
+  // mutation, no setState involved.
+  useEffect(() => {
+    const el = djChatPanelRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [djChat.length]);
+
+  // Cleanup the mic stream on unmount so a navigation away from /live
+  // releases the device immediately. Matches the v2.4 effect pattern (no
+  // setState in the body — the cleanup just stops the API).
+  useEffect(() => {
+    return () => {
+      const api = micApiRef.current;
+      if (api) {
+        try {
+          api.stop();
+        } catch {
+          /* ignore — already stopped */
+        }
+      }
+      micApiRef.current = null;
+      if (meterTimerRef.current !== null) {
+        clearInterval(meterTimerRef.current);
+        meterTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  const handleMicToggle = async (next: boolean) => {
+    setMicError(null);
+    if (next) {
+      try {
+        const api = createMicPerception((sample: PerceptionSample) => {
+          // Forward the aggregated sample over the WS — raw audio stays
+          // in this browser. The backend's phase_live ingests these into
+          // its perception buffer for the agent.
+          sendRaw({
+            type: "perception",
+            rms_db: sample.rms_db,
+            onset_density_hz: sample.onset_density_hz,
+            voice_likelihood: sample.voice_likelihood,
+            timestamp_ms: sample.timestamp_ms,
+          });
+        });
+        micApiRef.current = api;
+        await api.start();
+        setMicActive(true);
+        // Drive the level meter at ~10 Hz from the API's instantaneous RMS.
+        if (meterTimerRef.current === null) {
+          meterTimerRef.current = setInterval(() => {
+            const a = micApiRef.current;
+            if (!a) return;
+            setMicRmsDb(a.getCurrentRmsDb());
+          }, 100);
+        }
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : "could not access microphone";
+        setMicError(msg);
+        setMicActive(false);
+        const api = micApiRef.current;
+        if (api) {
+          try {
+            api.stop();
+          } catch {
+            /* ignore */
+          }
+        }
+        micApiRef.current = null;
+        if (meterTimerRef.current !== null) {
+          clearInterval(meterTimerRef.current);
+          meterTimerRef.current = null;
+        }
+      }
+    } else {
+      const api = micApiRef.current;
+      if (api) {
+        try {
+          api.stop();
+        } catch {
+          /* ignore — already stopped */
+        }
+      }
+      micApiRef.current = null;
+      if (meterTimerRef.current !== null) {
+        clearInterval(meterTimerRef.current);
+        meterTimerRef.current = null;
+      }
+      setMicActive(false);
+      setMicRmsDb(-120);
+    }
+  };
+
+  // -120 dB → 0 %, -20 dB → 100 % so room-scale ambient (–60…–30 dB)
+  // lands around the middle of the bar.
+  const meterPct = Math.max(
+    0,
+    Math.min(100, ((micRmsDb + 120) / 100) * 100),
+  );
 
   const totalTracks = playlist.length;
   // Position is 1-based and derived from the actual playlist + currentTrack
@@ -223,6 +338,55 @@ export default function LiveStage({
         </button>
       </div>
 
+      {/* Mic perception toggle (v2.5.2) — privacy: OFF by default, raw
+          audio never leaves the browser, only aggregated metrics. */}
+      <section
+        data-testid="mic-perception-section"
+        className="flex flex-wrap items-center gap-3 border border-border rounded px-3 py-2"
+      >
+        <label className="flex items-center gap-2 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            data-testid="mic-perception-toggle"
+            checked={micActive}
+            onChange={(e) => {
+              void handleMicToggle(e.target.checked);
+            }}
+            className="accent-neon"
+          />
+          <span className="text-[10px] tracking-widest uppercase text-muted">
+            Mic perception
+          </span>
+        </label>
+        <span className="text-[10px] text-muted">
+          {micActive
+            ? "Listening — only aggregated metrics leave this browser."
+            : "Off — DJ ignores room ambience."}
+        </span>
+        {micActive ? (
+          <div
+            data-testid="mic-level-meter"
+            className="flex items-center gap-2 ml-auto"
+            aria-label={`Mic level ${Math.round(micRmsDb)} dB`}
+          >
+            <div className="w-32 h-2 bg-border rounded overflow-hidden">
+              <div
+                className="h-full bg-neon"
+                style={{ width: `${meterPct}%`, transition: "width 100ms linear" }}
+              />
+            </div>
+            <span className="text-[10px] font-mono text-muted">
+              {Math.round(micRmsDb)} dB
+            </span>
+          </div>
+        ) : null}
+        {micError ? (
+          <span data-testid="mic-error" className="text-[10px] text-danger">
+            {micError}
+          </span>
+        ) : null}
+      </section>
+
       {/* Free-form chat */}
       <form
         className="flex gap-2"
@@ -250,6 +414,41 @@ export default function LiveStage({
           Send
         </button>
       </form>
+
+      {/* DJ chat panel — read-only feed of v2.5.2 ``dj_chat`` events emitted
+          by the agent's ``emit_chat`` tool. Empty until the DJ replies. */}
+      <section
+        data-testid="dj-chat-panel"
+        className="border border-border rounded p-3 bg-surface"
+      >
+        <p className="text-[10px] tracking-widest uppercase text-muted mb-2">
+          DJ chat
+        </p>
+        {djChat.length === 0 ? (
+          <p
+            data-testid="dj-chat-empty"
+            className="text-[10px] text-muted italic"
+          >
+            (Apollo will speak when there&apos;s something to say.)
+          </p>
+        ) : (
+          <ul
+            ref={djChatPanelRef}
+            data-testid="dj-chat-list"
+            className="text-xs text-[#e2e2ff] space-y-1 max-h-40 overflow-y-auto"
+          >
+            {djChat.map((entry, i) => (
+              <li
+                key={`${entry.ts}-${i}`}
+                data-testid="dj-chat-entry"
+                className="text-neon"
+              >
+                ‹ {entry.text}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {/* Visual layer placeholder — replaced by <VisualLayer /> in v2.5.3 */}
       <div

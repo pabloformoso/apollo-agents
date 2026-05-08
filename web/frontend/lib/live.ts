@@ -54,6 +54,11 @@ export interface LiveCommandLogEntry {
   ts: number;
 }
 
+export interface DjChatEntry {
+  text: string;
+  ts: number;
+}
+
 export interface UseLiveSessionApi {
   state: LiveEngineState;
   connected: boolean;
@@ -69,6 +74,12 @@ export interface UseLiveSessionApi {
   /** Duration of the active deck's current track (best-effort, may be 0). */
   currentTrackDuration: number;
   log: LiveCommandLogEntry[];
+  /**
+   * Append-only feed of ``dj_chat`` messages emitted by the agent via the
+   * v2.5.2 ``emit_chat`` tool. The UI surfaces these in the LiveStage
+   * "DJ chat" panel so the audience sees rejection / acknowledgement text.
+   */
+  djChat: DjChatEntry[];
   error: string | null;
   /** True when the browser blocked autoplay; the UI must surface a click-to-start. */
   autoplayBlocked: boolean;
@@ -78,6 +89,12 @@ export interface UseLiveSessionApi {
   sendCommand: (cmd: LiveCommand) => void;
   /** Send free-text user message to the agent. */
   sendUserMessage: (text: string) => void;
+  /**
+   * Low-level publish escape hatch used by v2.5.2 mic perception. Sends the
+   * message verbatim — the WS handler dispatches by ``type``. Avoid in
+   * application code; prefer ``sendCommand`` / ``sendUserMessage``.
+   */
+  sendRaw: (message: Record<string, unknown>) => void;
   /** Resume playback after autoplay was blocked — must be called from a user gesture. */
   resumePlayback: () => void;
   /** Quit the live session — closes the WS, stops audio, releases mic etc. */
@@ -137,6 +154,11 @@ interface ServerLiveMessage {
   content: string;
 }
 
+interface ServerDjChat {
+  type: "dj_chat";
+  text: string;
+}
+
 interface ServerError {
   type: "error";
   message: string;
@@ -147,6 +169,7 @@ type ServerEvent =
   | ServerEngineEvent
   | ServerEngineCommand
   | ServerLiveMessage
+  | ServerDjChat
   | ServerError;
 
 const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
@@ -190,6 +213,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const [secondsToCrossfade, setSecondsToCrossfade] = useState(0);
   const [playlistRemaining, setPlaylistRemaining] = useState(0);
   const [log, setLog] = useState<LiveCommandLogEntry[]>([]);
+  const [djChat, setDjChat] = useState<DjChatEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [currentTrackTime, setCurrentTrackTime] = useState(0);
@@ -452,6 +476,12 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       case "live_message":
         appendLog({ role: evt.role, text: evt.content, ts: Date.now() });
         break;
+      case "dj_chat":
+        setDjChat((prev) => [
+          ...prev,
+          { text: evt.text || "", ts: Date.now() },
+        ]);
+        break;
       case "error":
         setError(evt.message || "Live session error");
         break;
@@ -596,6 +626,16 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     [appendLog],
   );
 
+  const sendRaw = useCallback((message: Record<string, unknown>) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify(message));
+    } catch {
+      /* ignore — caller will retry on the next sample */
+    }
+  }, []);
+
   const resumePlayback = useCallback(() => {
     const ctx = audioCtxRef.current;
     if (ctx && typeof ctx.resume === "function") {
@@ -659,11 +699,13 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       currentTrackTime,
       currentTrackDuration,
       log,
+      djChat,
       error,
       autoplayBlocked,
       audioRef,
       sendCommand,
       sendUserMessage,
+      sendRaw,
       resumePlayback,
       quit,
     }),
@@ -679,10 +721,12 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       currentTrackTime,
       currentTrackDuration,
       log,
+      djChat,
       error,
       autoplayBlocked,
       sendCommand,
       sendUserMessage,
+      sendRaw,
       resumePlayback,
       quit,
     ],

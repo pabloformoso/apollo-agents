@@ -45,39 +45,36 @@ from agent.live_engine import (
 # ---------------------------------------------------------------------------
 
 _LIVE_DJ_SYSTEM = """\
-You are Apollo LiveDJ — a proactive AI DJ performing a live set right now.
+You are a DJ doing a live set. You were given an initial playlist as
+GUIDANCE — a starting point built by the planner. You are NOT bound
+to it. As the set unfolds you SHOULD:
 
-Music is playing. Your job is to make real-time decisions:
+- Read the room: ambient noise, audience reactions, requests from the
+  chat. Use them as soft signal, not commands.
+- Pick tracks beyond the initial queue when the moment calls for it.
+  Use `pick_next_track(criteria)` to search the full catalog.
+- Treat audience requests like a real DJ would: most get a polite "I
+  hear you". Accept maybe 1 in 5 if it fits the flow; reject the rest
+  with a friendly emit_chat reply.
 
-TOOLS:
-- get_live_state(): current track, position, BPM, Camelot key, seconds to crossfade
-- crossfade_now(): trigger crossfade immediately
-- extend_track(seconds): delay the upcoming auto-crossfade by N seconds
-- skip_track(): hard-cut to next track without crossfade
-- queue_swap(position, track_id): swap a future track (use get_catalog to find IDs)
-- set_crossfade_point(position_sec): manually set where crossfade begins
+Available actions:
+  - queue_swap / extend_track / skip_track / crossfade_now
+    (tweaks within the existing queue)
+  - pick_next_track(criteria) → choose any track from the catalog
+    matching given criteria (BPM range, key, energy, mood)
+  - emit_chat(text) → reply to the audience without acting
+    (for "noted, but staying course" responses)
+  - get_live_state / get_perception_window — read current context
 
-DECISION RULES:
-approaching_crossfade event:
-  → Call get_live_state() to assess: BPM diff, Camelot distance, seconds remaining.
-  → Good transition (Camelot ≤1 step, BPM diff ≤8): confirm silently (no tool call needed).
-  → Mediocre transition (Camelot 2 steps OR BPM diff 8–20): extend_track(20) to buy time.
-  → Bad transition (Camelot >2 steps OR BPM diff >20): crossfade_now() to escape quickly,
-    or queue_swap() a better track if there's time.
+PERCEPTION SIGNALS:
+- environment_changed events (rms_db_delta, voice_likelihood):
+  +6 dB → consider lifting energy / extending peak.
+  -6 dB → consider winding down / softer next.
+- audience_request events (text from chat): treat as suggestion, not
+  command. Accept rarely; reject politely most of the time via
+  emit_chat.
 
-crossfade_finished event:
-  → Log it. Update energy arc awareness. No action needed unless user asked for change.
-
-User commands:
-  "next" / "skip"         → crossfade_now()
-  "stay" / "longer"       → extend_track(30)
-  "more energetic"        → queue_swap() with higher BPM track
-  "wind down" / "chill"   → queue_swap() with lower BPM / further Camelot key
-
-STYLE:
-- Be terse. Think in beats, not paragraphs.
-- Short confirmations only ("Crossfading now." / "Extended 30s." / "Swapped track 4.").
-- Never explain the rules. Just act.
+Style: confident, brief, decisive. You are not a request bot.
 """
 
 # ---------------------------------------------------------------------------
@@ -158,6 +155,16 @@ def set_crossfade_point(position_sec: float, context_variables: dict) -> str:
     return engine.set_crossfade_point(position_sec)
 
 
+# v2.5.2 — three new tools that elevate LiveDJ from queue executor to
+# improvising DJ. Imported lazily here (rather than at module import time)
+# so a failure inside agent/tools.py doesn't cascade into the live engine
+# tests, which only need the engine-control subset above.
+from agent.tools import (  # noqa: E402  PLC0415 — module-level intent
+    emit_chat,
+    get_perception_window,
+    pick_next_track,
+)
+
 _LIVE_TOOLS = [
     get_live_state,
     crossfade_now,
@@ -165,6 +172,9 @@ _LIVE_TOOLS = [
     skip_track,
     queue_swap,
     set_crossfade_point,
+    get_perception_window,
+    pick_next_track,
+    emit_chat,
 ]
 
 # ---------------------------------------------------------------------------
@@ -394,7 +404,13 @@ async def run_live_session_async(
 def _classify(item: dict, events: list[dict], user_inputs: list[str]) -> None:
     """Sort a queue item into either the engine-events bucket or the
     user-inputs bucket. The async loop fans both into one
-    :func:`_format_turn` call so the LLM sees a unified context."""
+    :func:`_format_turn` call so the LLM sees a unified context.
+
+    v2.5.2 adds two synthetic event types — ``environment_changed``
+    (from the perception buffer) and ``audience_request_batch`` (from
+    the batched chat). Both are treated like engine events: they appear
+    in the formatted turn and trigger an LLM call.
+    """
     item_type = item.get("type")
     if item_type == "user_msg":
         text = (item.get("text") or "").strip()
@@ -407,6 +423,8 @@ def _classify(item: dict, events: list[dict], user_inputs: list[str]) -> None:
         CROSSFADE_FINISHED,
         TRACK_ENDED,
         SESSION_ENDED,
+        "environment_changed",
+        "audience_request_batch",
     }:
         events.append(item)
     # Anything else (e.g. ``engine_command`` UI hints) is browser-only and
@@ -491,6 +509,24 @@ def _format_event(ev: dict) -> str:
         return f"  TRACK_ENDED: '{tr.get('display_name','?')}'"
     if t == SESSION_ENDED:
         return "  SESSION_ENDED"
+    if t == "environment_changed":
+        delta = ev.get("rms_db_delta")
+        mean = ev.get("rms_db_mean")
+        voice = ev.get("voice_likelihood")
+        parts = ["  ENVIRONMENT_CHANGED:"]
+        if delta is not None:
+            parts.append(f" rms_db_delta={float(delta):+.1f}")
+        if mean is not None:
+            parts.append(f" rms_db_mean={float(mean):.1f}")
+        if voice is not None:
+            parts.append(f" voice_likelihood={float(voice):.2f}")
+        return "".join(parts)
+    if t == "audience_request_batch":
+        reqs = ev.get("requests") or []
+        lines = [f"  AUDIENCE_REQUEST_BATCH ({len(reqs)} requests):"]
+        for r in reqs:
+            lines.append(f"    > {r.get('text','')}")
+        return "\n".join(lines)
     return f"  {t}: {ev}"
 
 

@@ -121,6 +121,7 @@ async def fake_phase_live(
         except Exception:
             pass
 
+    perception_count = 0
     while True:
         try:
             item = await asyncio.wait_for(command_queue.get(), timeout=2.0)
@@ -130,6 +131,20 @@ async def fake_phase_live(
         if item_type == "quit":
             await emit({"type": "live_message", "role": "assistant", "content": "Stopping."})
             break
+        if item_type == "perception_sample":
+            # v2.5.2 — accept the metric, surface a synthetic dj_chat
+            # acknowledgement on the very first sample so E2E specs can
+            # observe end-to-end mic → backend → UI flow without an LLM.
+            perception_count += 1
+            ctx.setdefault("perception_buffer", []).append(item)
+            if perception_count == 1:
+                await emit(
+                    {
+                        "type": "dj_chat",
+                        "text": "Reading the room.",
+                    }
+                )
+            continue
         if item_type == "user_msg":
             text = (item.get("text") or "").strip().lower()
             if text in {"skip", "next"}:
@@ -151,6 +166,16 @@ async def fake_phase_live(
                     }
                 )
             else:
+                # v2.5.2 — audience requests get a polite dj_chat reply
+                # ("noted, but staying course") so the E2E spec for the
+                # audience-request flow has a deterministic event to wait
+                # on. Real path goes through emit_chat tool calls.
+                await emit(
+                    {
+                        "type": "dj_chat",
+                        "text": f"Heard: {item.get('text','')}. Staying the course.",
+                    }
+                )
                 await emit(
                     {
                         "type": "live_message",

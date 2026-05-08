@@ -654,7 +654,44 @@ async def live_session_ws(
                 engine.report_playback_pos(tid, current_time)
             elif msg_type in {"user_msg", "command"}:
                 text = msg.get("text") or msg.get("content") or ""
-                await command_queue.put({"type": "user_msg", "text": str(text)})
+                await command_queue.put(
+                    {
+                        "type": "user_msg",
+                        "text": str(text),
+                        "timestamp_ms": msg.get("timestamp_ms"),
+                    }
+                )
+            elif msg_type == "perception":
+                # v2.5.2 — aggregated mic metric from the browser. Raw audio
+                # never reaches the backend; only RMS / onset density / VAD
+                # likelihood. The phase_live consumer maintains a ring buffer
+                # and emits synthetic environment_changed events to the
+                # agent when the window mean shifts.
+                try:
+                    rms_db = float(msg.get("rms_db", 0.0))
+                except (TypeError, ValueError):
+                    rms_db = 0.0
+                try:
+                    onset_density_hz = float(msg.get("onset_density_hz", 0.0))
+                except (TypeError, ValueError):
+                    onset_density_hz = 0.0
+                vl_raw = msg.get("voice_likelihood")
+                if vl_raw is None:
+                    voice_likelihood: float | None = None
+                else:
+                    try:
+                        voice_likelihood = float(vl_raw)
+                    except (TypeError, ValueError):
+                        voice_likelihood = None
+                await command_queue.put(
+                    {
+                        "type": "perception_sample",
+                        "rms_db": rms_db,
+                        "onset_density_hz": onset_density_hz,
+                        "voice_likelihood": voice_likelihood,
+                        "timestamp_ms": msg.get("timestamp_ms"),
+                    }
+                )
             elif msg_type == "quit":
                 await command_queue.put({"type": "quit"})
                 break
