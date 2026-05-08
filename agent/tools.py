@@ -181,6 +181,154 @@ def _harmonic_sort(tracks: list[dict]) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# v2.5.0 — environment-aware soft bias for propose_playlist
+# ---------------------------------------------------------------------------
+#
+# The user's listening environment is captured by the Genre Guard as a free
+# text string (see ``agent/run.py::_GENRE_GUARD_SYSTEM``). We map a small set
+# of keywords to three energy archetypes and reorder each BPM cluster
+# accordingly. The catalog's ``tracks.json`` does NOT carry an explicit
+# energy field, so we use BPM as a proxy — higher BPM ≈ more energy. This is
+# imperfect (a 130 BPM ambient pad is calmer than a 120 BPM peak-time stab)
+# but it is the only signal universally available across genres in this
+# project, and the bias is explicitly documented as soft (it never hides a
+# track the way the user-rating dislike path can — see helper below).
+# ---------------------------------------------------------------------------
+
+_ENV_KEYWORDS_HIGH_ENERGY = {
+    "loud",
+    "crowded",
+    "club",
+    "bar",
+    "party",
+    "warehouse",
+    "festival",
+}
+_ENV_KEYWORDS_LOW_ENERGY = {
+    "intimate",
+    "listening",
+    "home",
+    "phones",
+    "headphones",
+    "quiet",
+}
+_ENV_KEYWORDS_MID = {
+    "outdoor",
+    "cafe",
+    "morning",
+    "background",
+    "casual",
+}
+
+
+def _classify_environment(environment: str | None) -> str | None:
+    """Classify a free-text environment description into an energy archetype.
+
+    Returns one of: ``"high"``, ``"low"``, ``"mid"`` or ``None`` (no bias).
+
+    Matching is case-insensitive, word-aware (we tokenize on non-alphanumeric
+    boundaries), and order-deterministic: the FIRST keyword set with a hit
+    wins. Empty strings, ``None``, and the sentinel ``"unspecified"`` short-
+    circuit to ``None``.
+    """
+    if not environment:
+        return None
+    lowered = environment.strip().lower()
+    if not lowered or lowered == "unspecified":
+        return None
+    tokens = set(re.findall(r"[a-z0-9]+", lowered))
+    if not tokens:
+        return None
+    if tokens & _ENV_KEYWORDS_HIGH_ENERGY:
+        return "high"
+    if tokens & _ENV_KEYWORDS_LOW_ENERGY:
+        return "low"
+    if tokens & _ENV_KEYWORDS_MID:
+        return "mid"
+    return None
+
+
+def _apply_environment_bias(
+    clusters: list[list[dict]],
+    environment: str | None,
+) -> list[list[dict]]:
+    """Reorder each cluster as a soft signal for the user's environment.
+
+    Pure function (no I/O, no ctx access). When ``environment`` is empty,
+    ``"unspecified"``, or maps to none of the keyword sets, returns the
+    input clusters unchanged (identity-preserving short-circuit).
+
+    Energy archetypes:
+
+    - ``"high"`` (e.g. "loud crowded bar") → within each cluster, sort
+      tracks descending by BPM. Tracks above 120 BPM bubble to the front of
+      their cluster.
+    - ``"low"``  (e.g. "intimate listening room") → ascending by BPM.
+      Tracks below 100 BPM bubble to the front.
+    - ``"mid"``  (e.g. "outdoor cafe morning") → mild centered bias around
+      the cluster's median BPM (tracks closer to median come first).
+
+    BPM is a proxy for energy because ``tracks.json`` doesn't carry an
+    explicit energy field — see the module-level docstring above for the
+    trade-off rationale. Tracks missing BPM are treated as 0 and slot to
+    the back regardless of archetype.
+
+    Args:
+        clusters: list of clusters; each cluster is a list of track dicts.
+            Tracks should expose a numeric ``bpm`` key (missing/null is
+            tolerated).
+        environment: free-text environment description from the Genre
+            Guard. ``None``, ``""``, and ``"unspecified"`` all short-circuit.
+
+    Returns:
+        New list of clusters with the bias applied (fresh outer list and
+        inner cluster lists). When the bias is a no-op the input ``clusters``
+        object is returned by identity so callers can detect the short-
+        circuit. Track dicts are referenced, never cloned.
+    """
+    archetype = _classify_environment(environment)
+    if archetype is None:
+        return clusters
+
+    def _bpm(t: dict) -> float:
+        try:
+            return float(t.get("bpm") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    result: list[list[dict]] = []
+    for cluster in clusters:
+        if not cluster:
+            result.append([])
+            continue
+        if archetype == "high":
+            # Descending BPM; tracks without BPM (treated as 0) drop to back.
+            ordered = sorted(cluster, key=lambda t: -_bpm(t))
+        elif archetype == "low":
+            # Ascending BPM but a missing/zero BPM should NOT be misread as
+            # the calmest track — push such tracks to the back.
+            ordered = sorted(
+                cluster,
+                key=lambda t: (_bpm(t) <= 0, _bpm(t)),
+            )
+        else:  # "mid"
+            bpms = [_bpm(t) for t in cluster if _bpm(t) > 0]
+            if bpms:
+                bpms.sort()
+                median = bpms[len(bpms) // 2]
+            else:
+                median = 0.0
+            # Tracks closer to the cluster median come first; missing BPM
+            # tracks (treated as 0) sort to the back via the tuple key.
+            ordered = sorted(
+                cluster,
+                key=lambda t: (_bpm(t) <= 0, abs(_bpm(t) - median)),
+            )
+        result.append(ordered)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # v2.3.1 — user-rating bias for propose_playlist
 # ---------------------------------------------------------------------------
 
@@ -374,6 +522,39 @@ def propose_playlist(
             except Exception:
                 pass  # never let UI plumbing break selection
 
+    # v2.5.0 — environment-aware soft bias. Runs AFTER the user-rating bias
+    # so the user's favorites stay at the front of the cluster regardless of
+    # their BPM; the environment bias only re-orders the remainder. We split
+    # the cluster on the favorite/dislike boundaries to preserve that
+    # invariant.
+    environment = context_variables.get("environment") or ""
+    env_archetype = _classify_environment(environment)
+    if env_archetype is not None:
+        # Slice ordered into [favs | rest | dislikes] using the same
+        # criteria as _apply_user_rating_bias. We bias only `rest` so user
+        # favorites remain first and explicit dislikes remain last.
+        favs = [t for t in ordered if t.get("id") in favorite_ids]
+        dislkd = [t for t in ordered if t.get("id") in dislike_ids]
+        rest = [
+            t for t in ordered
+            if t.get("id") not in favorite_ids and t.get("id") not in dislike_ids
+        ]
+        env_biased_rest = _apply_environment_bias([rest], environment)[0]
+        ordered = favs + env_biased_rest + dislkd
+
+        progress = context_variables.get("_progress")
+        if progress is not None:
+            try:
+                progress({
+                    "stage": "env_bias",
+                    "message": (
+                        f"Applied environment bias ({env_archetype}) "
+                        f"based on: \"{environment}\"."
+                    ),
+                })
+            except Exception:
+                pass  # never let UI plumbing break selection
+
     # Fill to duration — deduplicate display_name first, then cycle
     target_sec = duration_min * 60
     seen: set[str] = set()
@@ -392,6 +573,14 @@ def propose_playlist(
     context_variables["playlist"] = playlist
     context_variables["genre"] = genre
     context_variables["mood"] = mood
+    # v2.5.0 — keep ``environment`` in ctx as a stable string. The Genre
+    # Guard normalizes empty/missing input to "unspecified", but if a caller
+    # hands us an unset ctx (CLI direct invocation, tests) we mirror that
+    # convention here so downstream code never reads None.
+    context_variables.setdefault(
+        "environment",
+        context_variables.get("environment") or "unspecified",
+    )
 
     return _format_playlist(playlist, header=f"Proposed playlist ({len(playlist)} tracks, ~{duration_min} min) — mood: {mood}")
 

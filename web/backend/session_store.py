@@ -52,6 +52,9 @@ class Session:
             "genre": ctx.get("genre"),
             "duration_min": ctx.get("duration_min"),
             "mood": ctx.get("mood"),
+            # v2.5.0 — surface the environment string so the frontend can
+            # render it (and E2E specs can assert end-to-end propagation).
+            "environment": ctx.get("environment"),
             "playlist": safe_playlist,
             "session_name": self.session_name or ctx.get("last_build"),
             "critic_verdict": self.critic_verdict,

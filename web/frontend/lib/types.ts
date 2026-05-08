@@ -57,6 +57,11 @@ export interface SessionState {
   genre: string | null;
   duration_min: number | null;
   mood: string | null;
+  // v2.5.0 — environment perception. Free-text description of where the
+  // set will be played; the Planner uses it as a soft signal (see
+  // `agent/run.py::_PLANNER_SYSTEM`). Null on legacy sessions or when the
+  // user opted to leave it unspecified.
+  environment: string | null;
   playlist: Track[];
   session_name: string | null;
   critic_verdict: string | null;
