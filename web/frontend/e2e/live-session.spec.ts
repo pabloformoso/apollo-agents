@@ -78,4 +78,48 @@ test.describe("v2.5.1 — live performance bridge", () => {
     //    Agente D fills it in v2.5.3.
     await expect(page.getByTestId("visual-slot")).toBeVisible();
   });
+
+  /**
+   * v2.5.1.1 — Go Live button surfaces at phase=editing.
+   *
+   * Live mode is an *alternative* to Build, not a sequel. The button used to
+   * live only at phase=rating / phase=complete which forced the user to
+   * render the mp4 first. This test walks the planning UI up to phase=editing
+   * (after ckpt2 approve) and asserts the Go Live button is reachable there
+   * and navigates to /session/{id}/live without going through Build/Rate.
+   */
+  test("Go Live button surfaces at phase=editing as alternative to Build", async ({
+    page,
+    request,
+  }) => {
+    await signedInOnDashboard(page, request);
+
+    // Create session and walk planning flow to ckpt1 → ckpt2 → editing.
+    await page.getByRole("button", { name: /new session/i }).click();
+    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    const sid = page.url().split("/session/")[1].split("/")[0];
+
+    const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
+    await genreInput.fill("30-minute lofi set, calm");
+    await page.getByRole("button", { name: /^send$/i }).click();
+    await expectPhase(page, "ckpt1");
+
+    // Approve playlist → critic → ckpt2.
+    await page.getByRole("button", { name: /run the critic/i }).click();
+    await expectPhase(page, "ckpt2");
+
+    // Approve critique → editing.
+    await page.getByRole("button", { name: /continue to editor/i }).click();
+    await expectPhase(page, "editing");
+
+    // The new Go Live button must be visible alongside the EditorInput,
+    // BEFORE any build/rate happens.
+    const goLive = page.getByTestId("go-live-button");
+    await expect(goLive).toBeVisible();
+
+    // Click → navigate to /session/{id}/live without rendering an mp4 first.
+    await goLive.click();
+    await page.waitForURL(new RegExp(`/session/${sid}/live`));
+    expect(page.url()).toMatch(new RegExp(`/session/${sid}/live$`));
+  });
 });

@@ -354,7 +354,16 @@ export default function SessionPage() {
             )}
 
             {phase === "editing" && (
-              <EditorInput onSubmit={v => sendMsg("editor_command", v)} disabled={streaming} />
+              <div className="space-y-3">
+                <EditorInput onSubmit={v => sendMsg("editor_command", v)} disabled={streaming} />
+                <button
+                  data-testid="go-live-button"
+                  onClick={() => router.push(`/session/${sessionId}/live`)}
+                  className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim transition-colors"
+                >
+                  ▶ Go Live
+                </button>
+              </div>
             )}
 
             {(phase === "planning" || phase === "critique" || phase === "validating") && (
