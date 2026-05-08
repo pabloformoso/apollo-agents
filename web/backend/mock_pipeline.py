@@ -6,6 +6,7 @@ AGENT_PROVIDER=mock — no Anthropic/OpenAI calls, no librosa, no DALL-E.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import wave
 from pathlib import Path
@@ -77,6 +78,88 @@ async def fake_editor(message: str, history: list[dict], ctx: dict, emit: Callab
 async def fake_validate(session_name: str, ctx: dict, emit: Callable) -> tuple[str, list[str]]:
     await emit({"type": "text_delta", "content": "validator-ok"})
     return ("PASS", [])
+
+
+async def fake_phase_live(
+    playlist: list[dict],
+    ctx: dict,
+    engine,
+    emit: Callable,
+    command_queue,
+) -> None:
+    """Deterministic fake live-phase: emits a tiny scripted event timeline
+    so E2E specs can wait on real engine events without touching the LLM
+    or the LiveDJ loop. The browser still drives audio (HTML5 ``<audio>``)
+    via the engine commands the engine itself emits.
+
+    The script is intentionally short and instant:
+
+      1. ``engine.play(playlist)`` → the engine emits ``track_started`` for
+         playlist[0] and the ``engine_command`` ``load`` for the browser.
+      2. After a short delay, emit a synthetic ``approaching_crossfade``
+         event so the UI can show its countdown widget.
+      3. Drain the command queue and ack any user_msg / quit so the
+         frontend smoke test can verify command routing without an LLM.
+
+    The fake engine and live_dj are skipped entirely — the spec only needs
+    a couple of events plus an honest ack of skip/quit commands."""
+    engine.play(playlist)
+    await asyncio.sleep(0.01)
+
+    if len(playlist) > 1:
+        # Surface an APPROACHING_CF event without going through the
+        # real timing machinery so the UI shows its countdown.
+        try:
+            engine._emitter(  # type: ignore[attr-defined]
+                {
+                    "type": "approaching_crossfade",
+                    "track": playlist[0],
+                    "next_track": playlist[1],
+                    "seconds_remaining": 10.0,
+                }
+            )
+        except Exception:
+            pass
+
+    while True:
+        try:
+            item = await asyncio.wait_for(command_queue.get(), timeout=2.0)
+        except asyncio.TimeoutError:
+            continue
+        item_type = item.get("type")
+        if item_type == "quit":
+            await emit({"type": "live_message", "role": "assistant", "content": "Stopping."})
+            break
+        if item_type == "user_msg":
+            text = (item.get("text") or "").strip().lower()
+            if text in {"skip", "next"}:
+                engine.skip_track()
+                await emit(
+                    {
+                        "type": "live_message",
+                        "role": "assistant",
+                        "content": "Skipping.",
+                    }
+                )
+            elif text in {"stay", "longer", "more"}:
+                engine.extend_track(20)
+                await emit(
+                    {
+                        "type": "live_message",
+                        "role": "assistant",
+                        "content": "Extended 20s.",
+                    }
+                )
+            else:
+                await emit(
+                    {
+                        "type": "live_message",
+                        "role": "assistant",
+                        "content": f"Got it: {text}",
+                    }
+                )
+        elif item_type == "session_ended":
+            break
 
 
 async def fake_memory(genre: str, ctx: dict) -> str:
@@ -220,6 +303,7 @@ def install(pipeline_module) -> None:
     pipeline_module.phase_critique = fake_critique
     pipeline_module.phase_editor = fake_editor
     pipeline_module.phase_validate = fake_validate
+    pipeline_module.phase_live = fake_phase_live
     pipeline_module.load_memory = fake_memory
     pipeline_module.write_session_record = fake_write
     pipeline_module.check_catalog = fake_check_catalog

@@ -1,14 +1,27 @@
 """
 LiveEngine — real-time two-deck audio engine for Apollo LiveDJ.
 
-Architecture:
-  - sounddevice.OutputStream callback: fills audio buffer from pre-loaded numpy arrays.
-  - Watchdog thread: monitors playback position, fires events, triggers crossfades.
-  - Pre-stretch thread: time-stretches the next track in the background while
-    the current track plays, so crossfades are instant.
+v2.5.1 splits the engine in two:
 
-All public methods are thread-safe (protected by self._lock).
-Events are pushed to a threading.Queue shared with the LiveDJ agent.
+  ``LiveEngineLocal`` — the original v1.5 implementation (sounddevice +
+  pyrubberband + watchdog thread). Used by ``python main.py`` / the CLI flow.
+  Behavior is unchanged from v1.5.
+
+  ``LiveEngineBrowser`` — new web-mode implementation. The browser drives
+  audio playback (HTML5 ``<audio>`` + Web Audio API). This class keeps the
+  playlist state machine and emits the same 6 events as ``LiveEngineLocal``
+  but never reads or writes audio buffers. Time-of-playback comes from the
+  browser via the WS message ``{type: "playback_pos", track_id, currentTime}``
+  every ~250 ms; the watchdog logic lives inside ``report_playback_pos``
+  instead of a background thread. v2.5.1 ships without time-stretch on the
+  browser path — ``LiveEngineLocal`` keeps the pyrubberband pre-stretch for
+  CLI mode where exposing PortAudio is required anyway.
+
+Both implementations satisfy ``LiveEngineProtocol`` so ``agent/live_dj.py``
+can talk to either via the same surface (skip / extend / queue_swap /
+crossfade_now / get_state / stop). ``LiveEngine`` is kept as an alias for
+``LiveEngineLocal`` so external imports (and the existing
+``tests/test_live_engine.py`` suite) continue to work unchanged.
 """
 from __future__ import annotations
 
@@ -17,6 +30,7 @@ import threading
 import time
 from pathlib import Path
 from queue import Queue
+from typing import Callable, Protocol, runtime_checkable
 
 import numpy as np
 import soundfile as sf
@@ -66,11 +80,47 @@ _PROJECT_DIR = Path(__file__).parent.parent
 
 
 # ---------------------------------------------------------------------------
-# LiveEngine
+# Public protocol
 # ---------------------------------------------------------------------------
 
-class LiveEngine:
-    """Two-deck real-time DJ engine.
+@runtime_checkable
+class LiveEngineProtocol(Protocol):
+    """Public surface that any LiveEngine implementation must expose.
+
+    Both ``LiveEngineLocal`` (existing sounddevice + pyrubberband path) and
+    ``LiveEngineBrowser`` (new — audio plays in the browser, time reported
+    via WS) implement this. ``agent/live_dj.py`` talks to either via this
+    protocol so the same control plane (skip / extend / queue_swap /
+    crossfade_now) works for both.
+
+    Note: ``play()`` accepts an optional ``playlist`` arg. ``LiveEngineLocal``
+    was constructed with the playlist in v1.5 and ignores any value passed
+    here; ``LiveEngineBrowser`` accepts the playlist in either ``__init__``
+    or ``play()``. Either constructor pattern satisfies the protocol.
+    """
+
+    def play(self, playlist: list[dict] | None = None) -> None: ...
+    def crossfade_now(self) -> str: ...
+    def extend_track(self, seconds: int) -> str: ...
+    def skip_track(self) -> str: ...
+    def queue_swap(self, position: int, track_id: str) -> str: ...
+    def set_crossfade_point(self, position_sec: float) -> str: ...
+    def get_state(self) -> dict: ...
+    def stop(self) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# LiveEngineLocal (renamed from LiveEngine — v1.5 implementation)
+# ---------------------------------------------------------------------------
+
+class LiveEngineLocal:
+    """Two-deck real-time DJ engine with local PortAudio output.
+
+    This is the v1.5 implementation, RENAMED from ``LiveEngine`` for v2.5.1.
+    Behavior is unchanged — every private method, sounddevice callback,
+    pyrubberband pre-stretch, and watchdog thread is the same. The
+    ``LiveEngine = LiveEngineLocal`` alias at the bottom of the module keeps
+    backward compatibility for external imports and the existing test suite.
 
     Parameters
     ----------
@@ -127,8 +177,17 @@ class LiveEngine:
     # Public API
     # ------------------------------------------------------------------
 
-    def play(self) -> None:
-        """Start live playback from the first track."""
+    def play(self, playlist: list[dict] | None = None) -> None:
+        """Start live playback from the first track.
+
+        The optional ``playlist`` argument exists to satisfy
+        ``LiveEngineProtocol.play(playlist)`` — when supplied it overrides
+        the playlist passed in the constructor. v1.5 callers (and the
+        existing ``tests/test_live_engine.py`` suite) still use the no-arg
+        form, which keeps using ``self.playlist`` from ``__init__``.
+        """
+        if playlist is not None:
+            self.playlist = list(playlist)
         if not self.playlist:
             self._emit(SESSION_ENDED)
             return
@@ -503,6 +562,343 @@ class LiveEngine:
 
     def _emit(self, type_: str, **kwargs) -> None:
         self.event_queue.put({"type": type_, **kwargs})
+
+
+# ---------------------------------------------------------------------------
+# LiveEngineBrowser — v2.5.1 web-mode implementation
+# ---------------------------------------------------------------------------
+
+class LiveEngineBrowser:
+    """LiveEngine implementation where audio plays in the browser.
+
+    The browser drives playback (HTML5 ``<audio>`` + Web Audio API). This
+    class maintains:
+
+    - The playlist queue + position state machine.
+    - The watchdog event emitter (same 6 events as ``LiveEngineLocal``).
+    - State (``playing`` / ``crossfading`` / ``idle`` / ``ended``).
+
+    What it does NOT do:
+
+    - Read or write audio buffers (no ``_audio_callback``, no sounddevice).
+    - Pre-stretch with pyrubberband (v2.5.1 ships without time-stretch on
+      the browser path; ``LiveEngineLocal`` keeps stretch for terminal mode).
+
+    Time-of-playback comes from the browser via the WS message::
+
+        {"type": "playback_pos", "track_id": <id>, "currentTime": <seconds>}
+
+    sent ~every 250 ms. The watchdog uses the latest reported time instead
+    of reading a sounddevice frame counter, so no background thread is
+    needed.
+
+    The ``emitter`` is a callable injected at construction. The WS handler
+    in ``app.py`` constructs ``LiveEngineBrowser(emitter=ws_send)`` so events
+    go straight to the client.
+
+    Parameters
+    ----------
+    emitter:
+        Sync callable invoked with each event dict. The WS handler wraps an
+        async send so the engine stays threading/asyncio-agnostic.
+    crossfade_sec:
+        Crossfade blend duration in seconds (default 12).
+    approach_warn_sec:
+        How many seconds before the crossfade point to fire APPROACHING_CF
+        (default 30).
+    """
+
+    def __init__(
+        self,
+        emitter: Callable[[dict], None] | None = None,
+        crossfade_sec: int = 12,
+        approach_warn_sec: int = 30,
+    ) -> None:
+        # Default emitter is a no-op so the engine is still construct-able
+        # for unit tests that don't care about events.
+        self._emitter: Callable[[dict], None] = emitter or (lambda _ev: None)
+        self.crossfade_sec = crossfade_sec
+        self.approach_warn_sec = approach_warn_sec
+
+        self._lock = threading.Lock()
+        self._state: str = "idle"  # idle | playing | crossfading | ended
+        self.playlist: list[dict] = []
+        self._idx: int = 0
+        # Last reported currentTime per track id (browser pings it every
+        # ~250 ms).
+        self._reported_pos_sec: float = 0.0
+        # Bookkeeping for watchdog edges (per current track index).
+        self._approached: bool = False
+        self._cf_triggered: bool = False
+        self._extend_sec: float = 0.0  # accumulated extend offset in seconds
+
+    # ------------------------------------------------------------------
+    # Public API (matches LiveEngineProtocol)
+    # ------------------------------------------------------------------
+
+    def play(self, playlist: list[dict] | None = None) -> None:
+        """Start the browser-driven playback session.
+
+        Replaces any existing playlist with the new one. Emits
+        ``track_started`` for the first track and a ``cmd_load`` command so
+        the browser knows which track to load and play. If the playlist is
+        empty, emits ``session_ended`` and returns.
+        """
+        if playlist is not None:
+            self.playlist = list(playlist)
+        if not self.playlist:
+            self._emit(SESSION_ENDED)
+            return
+
+        with self._lock:
+            self._state = "playing"
+            self._idx = 0
+            self._reported_pos_sec = 0.0
+            self._approached = False
+            self._cf_triggered = False
+            self._extend_sec = 0.0
+
+        first = self.playlist[0]
+        # Tell the browser to load + play the first track.
+        self._emit_command("load", track=first, position=0)
+        self._emit(TRACK_STARTED, track=first)
+
+    def report_playback_pos(self, track_id: str, current_time: float) -> None:
+        """Update playback position from a browser ping.
+
+        Called by the WS handler whenever the browser sends a ``playback_pos``
+        message. Triggers ``approaching_crossfade``, ``crossfade_triggered``,
+        and ``track_ended`` / ``session_ended`` events as the position
+        crosses each threshold.
+        """
+        with self._lock:
+            if self._state == "idle" or self._idx >= len(self.playlist):
+                return
+            current_track = self.playlist[self._idx]
+            # Guard against stale pings from a previous track (e.g. arriving
+            # right after skip_track has flipped self._idx).
+            if track_id and current_track.get("id") and track_id != current_track.get("id"):
+                return
+            self._reported_pos_sec = float(current_time)
+            cf_sec = self._cf_point_seconds(current_track)
+            secs_to_cf = cf_sec - self._reported_pos_sec
+            approached = self._approached
+            cf_triggered = self._cf_triggered
+            idx = self._idx
+            duration = float(current_track.get("duration_sec") or 0)
+            next_track = (
+                self.playlist[idx + 1] if idx + 1 < len(self.playlist) else None
+            )
+
+        # Emit edges outside the lock so the consumer can call back into
+        # other methods without deadlocking.
+        if not approached and secs_to_cf <= self.approach_warn_sec and next_track:
+            with self._lock:
+                self._approached = True
+            self._emit(
+                APPROACHING_CF,
+                track=current_track,
+                next_track=next_track,
+                seconds_remaining=round(max(0.0, secs_to_cf), 1),
+            )
+
+        if not cf_triggered and self._reported_pos_sec >= cf_sec:
+            if next_track is not None:
+                self._begin_crossfade(current_track, next_track)
+            elif duration > 0 and self._reported_pos_sec >= duration:
+                # Last track played to its end — emit final events.
+                self._emit(TRACK_ENDED, track=current_track)
+                self._emit(SESSION_ENDED)
+                with self._lock:
+                    self._state = "idle"
+
+    def crossfade_now(self) -> str:
+        """Trigger crossfade immediately, skipping the auto-timer."""
+        with self._lock:
+            if self._state != "playing":
+                return f"Cannot crossfade: engine is '{self._state}'."
+            if self._idx + 1 >= len(self.playlist):
+                return "No next track to crossfade into."
+            current_track = self.playlist[self._idx]
+            next_track = self.playlist[self._idx + 1]
+        self._begin_crossfade(current_track, next_track)
+        return "Crossfade triggered."
+
+    def extend_track(self, seconds: int) -> str:
+        """Delay the upcoming auto-crossfade by ``seconds`` seconds."""
+        with self._lock:
+            self._extend_sec += float(seconds)
+            # An extend always re-arms the approaching warning so the
+            # listener gets a fresh countdown after the bump.
+            self._approached = False
+        return f"Crossfade delayed by {seconds}s."
+
+    def skip_track(self) -> str:
+        """Hard-cut to the next track without crossfade."""
+        with self._lock:
+            next_idx = self._idx + 1
+            if next_idx >= len(self.playlist):
+                return "No next track."
+            self._idx = next_idx
+            self._approached = False
+            self._cf_triggered = False
+            self._extend_sec = 0.0
+            self._reported_pos_sec = 0.0
+            self._state = "playing"
+            new_track = self.playlist[next_idx]
+        # Tell the browser to switch decks immediately.
+        self._emit_command("skip", track=new_track, position=0)
+        self._emit(TRACK_STARTED, track=new_track)
+        return f"Skipped to '{new_track.get('display_name', '?')}'."
+
+    def queue_swap(self, position: int, track_id: str) -> str:
+        """Replace a future playlist position with a catalog track."""
+        idx = position - 1
+        with self._lock:
+            if idx <= self._idx or idx >= len(self.playlist):
+                return f"Position {position} is not a future slot."
+        catalog = _load_catalog()
+        track = next((t for t in catalog if t.get("id") == track_id), None)
+        if not track:
+            return f"Track ID '{track_id}' not found in catalog."
+        with self._lock:
+            self.playlist[idx] = track
+        self._emit_command("queue_swap", position=position, track=track)
+        return f"Queued '{track.get('display_name', '?')}' at position {position}."
+
+    def queue_swap_with_track(self, position: int, new_track: dict) -> str:
+        """Replace a future slot with an explicit track dict (web variant).
+
+        The web flow can resolve the catalog lookup at the WS layer (where it
+        has access to the FastAPI cache + per-user filtering) and pass the
+        resolved track dict in directly. This avoids round-tripping through
+        ``_load_catalog`` on the engine side, which has no awareness of the
+        web-mode catalog substitutes used by mock_pipeline. Falls back to the
+        same validation used by ``queue_swap``.
+        """
+        idx = position - 1
+        with self._lock:
+            if idx <= self._idx or idx >= len(self.playlist):
+                return f"Position {position} is not a future slot."
+            self.playlist[idx] = new_track
+        self._emit_command("queue_swap", position=position, track=new_track)
+        return f"Queued '{new_track.get('display_name', '?')}' at position {position}."
+
+    def set_crossfade_point(self, position_sec: float) -> str:
+        """Manually set where the crossfade begins in the current track."""
+        with self._lock:
+            if self._idx >= len(self.playlist):
+                return "No track playing."
+            current_track = self.playlist[self._idx]
+            current_cf = self._cf_point_seconds(current_track)
+            self._extend_sec += float(position_sec) - current_cf
+            self._approached = False
+        return f"Crossfade point set to {position_sec:.1f}s."
+
+    def get_state(self) -> dict:
+        """Return a snapshot of engine state for the agent."""
+        with self._lock:
+            idx = self._idx
+            state = self._state
+            pos = self._reported_pos_sec
+            track = self.playlist[idx] if idx < len(self.playlist) else None
+            next_track = (
+                self.playlist[idx + 1] if idx + 1 < len(self.playlist) else None
+            )
+            cf_sec = self._cf_point_seconds(track) if track else 0.0
+
+        secs_to_cf = max(0.0, cf_sec - pos) if track else 0.0
+
+        return {
+            "state": state,
+            "position_sec": round(pos, 1),
+            "current_track": _track_summary(track),
+            "next_track": _track_summary(next_track),
+            "seconds_to_crossfade": round(secs_to_cf, 1),
+            "playlist_remaining": max(0, len(self.playlist) - idx - 1),
+        }
+
+    def stop(self) -> None:
+        """Stop the session and tell the browser to release audio resources."""
+        with self._lock:
+            already_idle = self._state == "idle"
+            self._state = "idle"
+        # Always send the stop command so the browser can clean up the
+        # ``<audio>`` elements even if we were idle (e.g. after the playlist
+        # ran out and the engine self-transitioned to idle).
+        self._emit_command("stop")
+        if not already_idle:
+            self._emit(SESSION_ENDED)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _begin_crossfade(self, from_track: dict, to_track: dict) -> None:
+        """Transition from ``from_track`` to ``to_track``.
+
+        v2.5.1 fires ``crossfade_triggered`` followed immediately by
+        ``crossfade_finished`` + ``track_ended`` (browser-side the dual-deck
+        crossfade ramp is what produces the audible blend over
+        ``crossfade_sec`` seconds — the engine doesn't need to model the
+        ramp itself because no audio buffer math happens here).
+        """
+        with self._lock:
+            self._cf_triggered = True
+            self._state = "crossfading"
+            self._idx += 1
+            self._approached = False
+            self._cf_triggered = False  # re-arm for the new current track
+            self._extend_sec = 0.0
+            self._reported_pos_sec = 0.0
+            self._state = "playing"
+        self._emit_command(
+            "crossfade", from_track=from_track, to_track=to_track,
+            crossfade_sec=self.crossfade_sec,
+        )
+        self._emit(CROSSFADE_TRIGGERED, from_track=from_track, to_track=to_track)
+        self._emit(CROSSFADE_FINISHED, from_track=from_track, to_track=to_track)
+        self._emit(TRACK_ENDED, track=from_track)
+        self._emit(TRACK_STARTED, track=to_track)
+
+    def _cf_point_seconds(self, track: dict | None) -> float:
+        if not track:
+            return 0.0
+        cues = track.get("hot_cues") or []
+        out_cues = [c for c in cues if c.get("type") == "out"]
+        if out_cues:
+            sec = float(out_cues[0].get("position_sec", 0.0))
+        else:
+            duration = float(track.get("duration_sec") or 0.0)
+            sec = max(0.0, duration - self.crossfade_sec - 5)
+        return sec + self._extend_sec
+
+    def _emit(self, type_: str, **kwargs) -> None:
+        try:
+            self._emitter({"type": type_, **kwargs})
+        except Exception:  # noqa: BLE001 — never let UI plumbing kill the engine
+            pass
+
+    def _emit_command(self, name: str, **kwargs) -> None:
+        """Emit an ``engine_command`` event so the browser can react.
+
+        Examples: ``load`` (start playing this track), ``crossfade``
+        (begin the ramp), ``skip`` (hard cut), ``queue_swap`` (replace a
+        future track in the UI), ``stop``.
+        """
+        try:
+            self._emitter({"type": "engine_command", "command": name, **kwargs})
+        except Exception:  # noqa: BLE001
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compat alias — keeps `from agent.live_engine import LiveEngine`
+# working for v1.5 callers and the existing test suite. Renaming the class
+# without this alias would break the public surface.
+# ---------------------------------------------------------------------------
+
+LiveEngine = LiveEngineLocal
 
 
 # ---------------------------------------------------------------------------

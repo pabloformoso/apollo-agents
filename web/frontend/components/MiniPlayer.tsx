@@ -1,4 +1,5 @@
 "use client";
+import { useIsLiveActive } from "@/lib/live";
 import { usePlayer } from "@/lib/player";
 
 function formatTime(sec: number): string {
@@ -21,7 +22,11 @@ export default function MiniPlayer() {
     close,
   } = usePlayer();
 
-  if (!currentTrack) return null;
+  // v2.5.1 — hide the MiniPlayer while a live session is active so the
+  // user doesn't get two parallel audio streams (the live <audio> decks
+  // own the speakers in that mode).
+  const liveActive = useIsLiveActive();
+  if (!currentTrack || liveActive) return null;
 
   const cover = currentTrack.suno?.cover_url;
   const max = durationSec || 1;

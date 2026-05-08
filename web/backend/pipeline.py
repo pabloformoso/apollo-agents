@@ -811,6 +811,49 @@ async def load_memory(genre: str, ctx: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# v2.5.1 — Live phase. The planning pipeline ends at the rating step; the
+# live phase is its own loop driven by ``agent.live_dj.run_live_session_async``
+# and a ``LiveEngineBrowser`` that publishes events through the WS handler.
+#
+# Kept here (rather than inside ``app.py``) so the mock_pipeline can swap in
+# a deterministic fake the same way it does for ``phase_plan`` etc., and so
+# anyone reading the pipeline file sees every backend phase in one place.
+# ---------------------------------------------------------------------------
+
+
+async def phase_live(
+    playlist: list[dict],
+    ctx: dict,
+    engine,
+    emit: Callable,
+    command_queue,
+) -> None:
+    """Run the live DJ session driven by ``run_live_session_async``.
+
+    ``engine`` is a :class:`agent.live_engine.LiveEngineProtocol` — in the
+    web path this is a :class:`LiveEngineBrowser` whose emitter forwards
+    events to the WS handler.
+
+    ``emit`` is the same async send-to-WS callable used by the planning
+    phases. ``command_queue`` is an :class:`asyncio.Queue` that the WS
+    handler fills with engine events + user commands.
+
+    Returns when the playlist is exhausted (``session_ended`` event), the
+    user sends a quit command, or the queue is closed by the WS handler
+    on disconnect (the handler cancels this coroutine in that case).
+    """
+    from agent import live_dj  # noqa: PLC0415 — circular import guard
+
+    engine.play(playlist)
+    try:
+        await live_dj.run_live_session_async(
+            playlist, ctx, engine, emit, command_queue
+        )
+    finally:
+        engine.stop()
+
+
+# ---------------------------------------------------------------------------
 # Mock mode — AGENT_PROVIDER=mock swaps every phase with deterministic fakes
 # so tests/E2E runs never touch Anthropic, OpenAI, librosa, or the filesystem.
 # ---------------------------------------------------------------------------
