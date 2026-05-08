@@ -62,14 +62,24 @@ export interface UseLiveSessionApi {
   secondsToCrossfade: number;
   playlistRemaining: number;
   playlist: LiveTrackSummary[];
+  /** 1-based position of the current track in the playlist (0 if unknown). */
+  currentPosition: number;
+  /** Elapsed seconds within the active deck's current track (throttled ~250ms). */
+  currentTrackTime: number;
+  /** Duration of the active deck's current track (best-effort, may be 0). */
+  currentTrackDuration: number;
   log: LiveCommandLogEntry[];
   error: string | null;
+  /** True when the browser blocked autoplay; the UI must surface a click-to-start. */
+  autoplayBlocked: boolean;
   /** Active deck — exposed as a stable ref for the future `<VisualLayer>`. */
   audioRef: React.RefObject<HTMLAudioElement | null>;
   /** Send a control command to the backend agent. */
   sendCommand: (cmd: LiveCommand) => void;
   /** Send free-text user message to the agent. */
   sendUserMessage: (text: string) => void;
+  /** Resume playback after autoplay was blocked — must be called from a user gesture. */
+  resumePlayback: () => void;
   /** Quit the live session — closes the WS, stops audio, releases mic etc. */
   quit: () => void;
 }
@@ -175,12 +185,33 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const [state, setState] = useState<LiveEngineState>("idle");
   const [connected, setConnected] = useState(false);
   const [currentTrack, setCurrentTrack] = useState<LiveTrackSummary | null>(null);
-  const [nextTrack, setNextTrack] = useState<LiveTrackSummary | null>(null);
+  const [explicitNextTrack, setExplicitNextTrack] = useState<LiveTrackSummary | null>(null);
   const [playlist, setPlaylist] = useState<LiveTrackSummary[]>([]);
   const [secondsToCrossfade, setSecondsToCrossfade] = useState(0);
   const [playlistRemaining, setPlaylistRemaining] = useState(0);
   const [log, setLog] = useState<LiveCommandLogEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [currentTrackTime, setCurrentTrackTime] = useState(0);
+  const [currentTrackDuration, setCurrentTrackDuration] = useState(0);
+
+  // Derive next track from the playlist + current track position. This is
+  // robust to event-ordering races where ``track_started`` fires before any
+  // ``approaching_crossfade`` (so the explicit next_track payload is null).
+  // Falls back to the explicit value carried by ``approaching_crossfade`` /
+  // ``live_state`` when the current track isn't found in the playlist (e.g.
+  // before ``live_state`` lands).
+  const currentPosition = useMemo(() => {
+    if (!currentTrack || playlist.length === 0) return 0;
+    const idx = playlist.findIndex((t) => t.id === currentTrack.id);
+    return idx >= 0 ? idx + 1 : 0;
+  }, [currentTrack, playlist]);
+  const nextTrack = useMemo<LiveTrackSummary | null>(() => {
+    if (!currentTrack || playlist.length === 0) return explicitNextTrack;
+    const idx = playlist.findIndex((t) => t.id === currentTrack.id);
+    if (idx < 0) return explicitNextTrack;
+    return idx + 1 < playlist.length ? playlist[idx + 1] : null;
+  }, [currentTrack, playlist, explicitNextTrack]);
 
   const appendLog = useCallback((entry: LiveCommandLogEntry) => {
     setLog((l) => [...l, entry]);
@@ -240,9 +271,20 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       el.src = streamUrl(track.id);
       try {
         await el.play();
-      } catch {
-        // Autoplay may be blocked until a user gesture — UI shows a "click
-        // anywhere to start" hint via state.
+        setAutoplayBlocked(false);
+      } catch (err) {
+        // Distinguish "browser blocked autoplay" (NotAllowedError — UI must
+        // surface a click-to-start overlay) from "media failed to load"
+        // (NotSupportedError / TypeError — no overlay would help, the src
+        // is broken). Anything we can't classify is treated as autoplay
+        // gating because that's the user-recoverable case.
+        const name = (err as { name?: string })?.name ?? "";
+        if (name === "NotAllowedError" || name === "" || name === "AbortError") {
+          console.warn("[live] autoplay blocked on load:", err);
+          setAutoplayBlocked(true);
+        } else {
+          console.warn("[live] play() failed on load (non-recoverable):", err);
+        }
       }
       currentTrackIdRef.current = track.id;
     },
@@ -270,8 +312,15 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       toEl.src = streamUrl(track.id);
       try {
         await toEl.play();
-      } catch {
-        /* user-gesture gating — UI surfaces via state */
+        setAutoplayBlocked(false);
+      } catch (err) {
+        const name = (err as { name?: string })?.name ?? "";
+        if (name === "NotAllowedError" || name === "" || name === "AbortError") {
+          console.warn("[live] autoplay blocked on crossfade:", err);
+          setAutoplayBlocked(true);
+        } else {
+          console.warn("[live] play() failed on crossfade (non-recoverable):", err);
+        }
       }
 
       const gainFrom =
@@ -343,7 +392,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         const es = evt.data.engine_state;
         setState(es.state);
         if (es.current_track) setCurrentTrack(es.current_track);
-        if (es.next_track) setNextTrack(es.next_track);
+        if (es.next_track) setExplicitNextTrack(es.next_track);
         setSecondsToCrossfade(es.seconds_to_crossfade);
         setPlaylistRemaining(es.playlist_remaining);
         break;
@@ -353,11 +402,13 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
           setCurrentTrack(evt.track);
           currentTrackIdRef.current = evt.track.id;
           setState("playing");
+          setCurrentTrackTime(0);
+          setCurrentTrackDuration(0);
         }
         break;
       }
       case "approaching_crossfade": {
-        if (evt.next_track) setNextTrack(evt.next_track);
+        if (evt.next_track) setExplicitNextTrack(evt.next_track);
         if (typeof evt.seconds_remaining === "number") {
           setSecondsToCrossfade(evt.seconds_remaining);
         }
@@ -371,6 +422,8 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         if (evt.to_track) {
           setCurrentTrack(evt.to_track);
           currentTrackIdRef.current = evt.to_track.id;
+          setCurrentTrackTime(0);
+          setCurrentTrackDuration(0);
         }
         break;
       case "track_ended":
@@ -378,7 +431,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         break;
       case "session_ended":
         setState("ended");
-        setNextTrack(null);
+        setExplicitNextTrack(null);
         // Stop audio elements and let the user navigate away.
         for (const ref of [deckARef, deckBRef]) {
           const el = ref.current;
@@ -481,34 +534,41 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     // by the rules of React they MUST NOT appear in the dep array.
   }, [sessionId, stopAllDecks]);
 
-  // ── Throttled playback_pos ping to the backend ─────────────────────────
-  // Set up an interval (NOT a setState inside effect — only event handler
-  // logic). Cleanup pair = canonical v2.4 pattern.
+  // ── Throttled playback_pos ping to the backend + UI time tick ─────────
+  // Set up an interval that both pings the backend with the current playback
+  // position AND drives the UI progress bar via ``currentTrackTime`` /
+  // ``currentTrackDuration``. setState lives in this event-handler-style
+  // callback — fully compatible with react-hooks v7 (the rule disallows
+  // setState in the *body* of an effect, not inside a setInterval handler).
+  // Cleanup pair = canonical v2.4 pattern.
+  const tickPlaybackPos = useEffectEvent(() => {
+    if (typeof WebSocket === "undefined") return;
+    const ws = wsRef.current;
+    const tid = currentTrackIdRef.current;
+    const which = activeDeckRef.current;
+    const el = which === "a" ? deckARef.current : deckBRef.current;
+    if (!el) return;
+    const ct = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+    const dur = Number.isFinite(el.duration) ? el.duration : 0;
+    setCurrentTrackTime((prev) => (Math.abs(prev - ct) > 0.05 ? ct : prev));
+    setCurrentTrackDuration((prev) => (Math.abs(prev - dur) > 0.05 ? dur : prev));
+    if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
+    try {
+      ws.send(
+        JSON.stringify({
+          type: "playback_pos",
+          track_id: tid,
+          currentTime: ct,
+        }),
+      );
+    } catch {
+      /* ignore — next tick will retry */
+    }
+  });
+
   useEffect(() => {
     if (!sessionId) return;
-    const id = window.setInterval(() => {
-      // Defensive: in tests / hot reload the global ``WebSocket`` constructor
-      // may have been unstubbed before the interval fires. Skip the tick
-      // rather than blow up on ``WebSocket.OPEN``.
-      if (typeof WebSocket === "undefined") return;
-      const ws = wsRef.current;
-      const tid = currentTrackIdRef.current;
-      const which = activeDeckRef.current;
-      const el = which === "a" ? deckARef.current : deckBRef.current;
-      if (!ws || ws.readyState !== WebSocket.OPEN || !tid || !el) return;
-      const currentTime = el.currentTime || 0;
-      try {
-        ws.send(
-          JSON.stringify({
-            type: "playback_pos",
-            track_id: tid,
-            currentTime,
-          }),
-        );
-      } catch {
-        /* ignore — next tick will retry */
-      }
-    }, PLAYBACK_POS_INTERVAL_MS);
+    const id = window.setInterval(() => tickPlaybackPos(), PLAYBACK_POS_INTERVAL_MS);
     return () => window.clearInterval(id);
   }, [sessionId]);
 
@@ -536,6 +596,44 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     [appendLog],
   );
 
+  const resumePlayback = useCallback(() => {
+    const ctx = audioCtxRef.current;
+    if (ctx && typeof ctx.resume === "function") {
+      try {
+        const maybe = ctx.resume();
+        if (maybe && typeof (maybe as Promise<void>).catch === "function") {
+          (maybe as Promise<void>).catch(() => {
+            /* ignore — best effort */
+          });
+        }
+      } catch {
+        /* ignore — context may already be running */
+      }
+    }
+    const which = activeDeckRef.current;
+    const el = which === "a" ? deckARef.current : deckBRef.current;
+    if (!el) return;
+    try {
+      const p = el.play();
+      if (p && typeof p.then === "function") {
+        p.then(
+          () => setAutoplayBlocked(false),
+          (err) => {
+             
+            console.warn("[live] resumePlayback rejected:", err);
+            setAutoplayBlocked(true);
+          },
+        );
+      } else {
+        setAutoplayBlocked(false);
+      }
+    } catch (err) {
+       
+      console.warn("[live] resumePlayback threw:", err);
+      setAutoplayBlocked(true);
+    }
+  }, []);
+
   const quit = useCallback(() => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -557,11 +655,16 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       secondsToCrossfade,
       playlistRemaining,
       playlist,
+      currentPosition,
+      currentTrackTime,
+      currentTrackDuration,
       log,
       error,
+      autoplayBlocked,
       audioRef,
       sendCommand,
       sendUserMessage,
+      resumePlayback,
       quit,
     }),
     [
@@ -572,10 +675,15 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       secondsToCrossfade,
       playlistRemaining,
       playlist,
+      currentPosition,
+      currentTrackTime,
+      currentTrackDuration,
       log,
       error,
+      autoplayBlocked,
       sendCommand,
       sendUserMessage,
+      resumePlayback,
       quit,
     ],
   );
