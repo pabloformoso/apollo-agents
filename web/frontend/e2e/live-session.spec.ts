@@ -56,6 +56,16 @@ test.describe("v2.5.1 — live performance bridge", () => {
       { timeout: 15000 },
     );
 
+    // 3b. Headless Chromium blocks autoplay without a prior user gesture
+    //     (we navigated to /live programmatically). The UI surfaces a
+    //     click-to-start overlay — dismiss it so the action buttons are
+    //     reachable.
+    const resumeBtn = page.getByTestId("live-autoplay-resume");
+    if (await resumeBtn.isVisible().catch(() => false)) {
+      await resumeBtn.click();
+      await expect(page.getByTestId("live-autoplay-overlay")).toHaveCount(0);
+    }
+
     // 4. Skip → mock engine advances to the second track and emits
     //    track_started for it. The UI reflects it in the now-playing card.
     await page.getByTestId("live-skip").click();

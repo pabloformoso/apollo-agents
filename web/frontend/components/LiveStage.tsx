@@ -41,21 +41,32 @@ export default function LiveStage({
     currentTrack,
     nextTrack,
     secondsToCrossfade,
-    playlistRemaining,
     playlist,
+    currentPosition,
+    currentTrackTime,
+    currentTrackDuration,
     log,
     error,
+    autoplayBlocked,
     sendCommand,
     sendUserMessage,
+    resumePlayback,
     quit,
   } = live;
 
   const [chatInput, setChatInput] = useState("");
 
   const totalTracks = playlist.length;
-  const playedSoFar = Math.max(0, totalTracks - playlistRemaining - 1);
-  const fakePct =
-    totalTracks > 0 ? Math.min(100, (playedSoFar / totalTracks) * 100) : 0;
+  // Position is 1-based and derived from the actual playlist + currentTrack
+  // identity (robust to engine state races where ``playlist_remaining`` lands
+  // before the playlist itself does).
+  const displayedPosition = currentPosition > 0 ? currentPosition : Math.min(1, totalTracks);
+  // Per-track elapsed % for the progress bar — updates every ~250 ms via
+  // ``useLiveSession``'s playback tick.
+  const trackPct =
+    currentTrackDuration > 0
+      ? Math.min(100, (currentTrackTime / currentTrackDuration) * 100)
+      : 0;
 
   return (
     <section
@@ -99,16 +110,16 @@ export default function LiveStage({
         </div>
 
         <div className="flex items-center gap-2 text-[10px] text-muted">
-          <span>
-            Track {Math.min(playedSoFar + 1, totalTracks)} of {totalTracks}
+          <span data-testid="live-position">
+            Track {totalTracks > 0 ? displayedPosition : 0} of {totalTracks}
           </span>
           {durationMin ? <span>· target {durationMin} min</span> : null}
         </div>
-        <div className="h-1 w-full bg-border rounded overflow-hidden">
+        <div className="h-2 w-full bg-border rounded overflow-hidden">
           <div
             data-testid="live-progress-bar"
-            className="h-full bg-neon transition-all duration-500"
-            style={{ width: `${fakePct}%` }}
+            className="h-full bg-gradient-to-r from-neon-dim to-neon"
+            style={{ width: `${trackPct}%`, transition: "width 250ms linear" }}
           />
         </div>
       </header>
@@ -126,13 +137,13 @@ export default function LiveStage({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <article
           data-testid="live-current-track"
-          className="bg-surface border border-border rounded p-4 space-y-2"
+          className="bg-surface border border-neon/40 rounded p-5 space-y-3 shadow-[0_0_24px_-10px_rgba(0,229,255,0.4)]"
         >
-          <p className="text-[10px] tracking-widest uppercase text-muted">
+          <p className="text-[10px] tracking-[0.2em] uppercase text-neon">
             Now playing
           </p>
           <h2
-            className="text-lg text-[#e2e2ff] font-bold"
+            className="text-2xl text-[#e2e2ff] font-bold leading-tight"
             data-testid="live-current-track-name"
           >
             {currentTrack?.display_name ?? "—"}
@@ -141,19 +152,25 @@ export default function LiveStage({
             {currentTrack?.bpm ? `${currentTrack.bpm} BPM` : "BPM ?"}
             {currentTrack?.camelot_key ? ` · ${currentTrack.camelot_key}` : ""}
           </p>
-          <p className="text-xs text-neon" data-testid="live-countdown">
-            Crossfade in: {Math.round(secondsToCrossfade)}s
+          <p
+            className="text-sm font-bold text-neon tracking-widest uppercase"
+            data-testid="live-countdown"
+          >
+            Crossfade in {Math.round(secondsToCrossfade)}s
           </p>
         </article>
 
         <article
           data-testid="live-next-track"
-          className="bg-surface border border-border rounded p-4 space-y-2"
+          className="bg-surface border border-border rounded p-5 space-y-3"
         >
-          <p className="text-[10px] tracking-widest uppercase text-muted">
+          <p className="text-[10px] tracking-[0.2em] uppercase text-muted">
             Next up
           </p>
-          <h2 className="text-lg text-[#e2e2ff] font-bold">
+          <h2
+            className="text-2xl text-[#e2e2ff] font-bold leading-tight"
+            data-testid="live-next-track-name"
+          >
             {nextTrack?.display_name ?? "—"}
           </h2>
           <p className="text-xs text-muted">
@@ -167,7 +184,7 @@ export default function LiveStage({
       <div className="flex flex-wrap gap-2">
         <button
           data-testid="live-skip"
-          className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors disabled:opacity-40"
+          className="border border-border text-[#e2e2ff] px-5 py-2.5 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
           onClick={() => sendCommand({ type: "skip" })}
           disabled={state === "ended"}
         >
@@ -175,7 +192,7 @@ export default function LiveStage({
         </button>
         <button
           data-testid="live-stay"
-          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          className="border border-border text-[#e2e2ff] px-5 py-2.5 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
           onClick={() => sendCommand({ type: "stay" })}
           disabled={state === "ended"}
         >
@@ -183,7 +200,7 @@ export default function LiveStage({
         </button>
         <button
           data-testid="live-energetic"
-          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          className="bg-neon text-[#0a0a0f] px-5 py-2.5 rounded text-xs font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors disabled:opacity-40"
           onClick={() => sendCommand({ type: "more_energetic" })}
           disabled={state === "ended"}
         >
@@ -191,7 +208,7 @@ export default function LiveStage({
         </button>
         <button
           data-testid="live-wind-down"
-          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          className="border border-border text-[#e2e2ff] px-5 py-2.5 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
           onClick={() => sendCommand({ type: "wind_down" })}
           disabled={state === "ended"}
         >
@@ -199,7 +216,7 @@ export default function LiveStage({
         </button>
         <button
           data-testid="live-quit"
-          className="border border-danger text-danger px-4 py-2 rounded text-xs uppercase tracking-widest hover:bg-danger hover:text-[#0a0a0f] transition-colors ml-auto"
+          className="border border-danger text-danger px-5 py-2.5 rounded text-xs uppercase tracking-widest hover:bg-danger hover:text-[#0a0a0f] transition-colors ml-auto"
           onClick={quit}
         >
           Quit
@@ -241,6 +258,24 @@ export default function LiveStage({
       >
         Visual layer — v2.5.3
       </div>
+
+      {/* Autoplay-blocked overlay — surfaces when the browser refused to play
+          without a user gesture. Click forwards to ``resumePlayback`` which
+          calls ``audioCtx.resume()`` + ``el.play()``. */}
+      {autoplayBlocked ? (
+        <div
+          data-testid="live-autoplay-overlay"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-[#0a0a0f]/80 backdrop-blur-sm"
+        >
+          <button
+            data-testid="live-autoplay-resume"
+            onClick={resumePlayback}
+            className="bg-neon text-[#0a0a0f] px-8 py-4 rounded text-sm font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors"
+          >
+            ▶ Click to start
+          </button>
+        </div>
+      ) : null}
 
       {/* Recent commands log */}
       {log.length > 0 ? (
