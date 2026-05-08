@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { signedInOnDashboard } from "./fixtures/auth";
+import { expectPhase } from "./fixtures/phase";
 
 /**
  * v2.5.1 — Live performance smoke E2E.
@@ -12,102 +13,59 @@ import { signedInOnDashboard } from "./fixtures/auth";
  *   3. Acks ``user_msg`` commands ("skip" / "stay" / etc.) by calling the
  *      matching engine method (no LLM in the loop).
  *
- * This spec drives the UI through the full path: log in → seed playlist
- * via the API → navigate to /session/{id}/live → assert the live stage,
- * the first track, and that "Skip" lands on the second track.
+ * This spec drives the UI through the full path: log in → walk the
+ * planning flow until ckpt1 (which seeds ctx.playlist) → navigate to
+ * /session/{id}/live → assert the live stage, the first track, and that
+ * "Skip" lands on the second track. We deliberately use the UI-driven
+ * planning flow instead of opening a raw WebSocket from the test process:
+ * Node 20's global ``WebSocket`` only landed in 22, and the CI runner
+ * uses 20.x, so a top-level ``new WebSocket(...)`` would be a
+ * ReferenceError there.
  */
-
-const API_BASE = process.env.APOLLO_E2E_API ?? "http://localhost:8801";
-
-async function seedSession(
-  request: import("@playwright/test").APIRequestContext,
-  token: string,
-): Promise<string> {
-  // Create a fresh session.
-  const create = await request.post(`${API_BASE}/api/sessions`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  expect(create.ok(), `create session failed: ${await create.text()}`).toBeTruthy();
-  const sid = (await create.json()).id as string;
-
-  // Drive a single genre_intent through the WS so the planning phase fires
-  // and seeds ``ctx.playlist`` — that's exactly what the live WS expects on
-  // the session. Doing this via the real WS is the cheapest setup that
-  // mirrors a real flow without coupling the spec to the planning UI.
-  const wsBase = (process.env.APOLLO_E2E_WS ?? API_BASE).replace(
-    /^http/,
-    "ws",
-  );
-  await new Promise<void>((resolve, reject) => {
-    const ws = new WebSocket(
-      `${wsBase}/ws/sessions/${sid}?token=${encodeURIComponent(token)}`,
-    );
-    let receivedPhaseComplete = false;
-    const timeout = setTimeout(() => {
-      ws.close();
-      if (receivedPhaseComplete) resolve();
-      else reject(new Error("planning never landed"));
-    }, 15000);
-    ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: "genre_intent",
-          content: "30-minute lofi set, calm",
-        }),
-      );
-    };
-    ws.onmessage = (msg) => {
-      try {
-        const data = JSON.parse(msg.data as string) as {
-          type?: string;
-          phase?: string;
-        };
-        if (data.type === "phase_complete" && data.phase === "planning") {
-          receivedPhaseComplete = true;
-          clearTimeout(timeout);
-          ws.close();
-          resolve();
-        }
-      } catch {
-        /* ignore */
-      }
-    };
-    ws.onerror = () => {
-      clearTimeout(timeout);
-      reject(new Error("session WS error"));
-    };
-  });
-  return sid;
-}
 
 test.describe("v2.5.1 — live performance bridge", () => {
   test("live page renders, shows first track, and Skip advances", async ({
     page,
     request,
   }) => {
-    const user = await signedInOnDashboard(page, request);
-    const sid = await seedSession(request, user.token);
+    await signedInOnDashboard(page, request);
 
+    // 1. Create a session and walk through the planning flow until ckpt1
+    //    so the backend persists ctx.playlist into the session — the live
+    //    WS rejects sessions with no playlist.
+    await page.getByRole("button", { name: /new session/i }).click();
+    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    const url = page.url();
+    const sid = url.split("/session/")[1].split("/")[0];
+
+    const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
+    await genreInput.fill("30-minute lofi set, calm");
+    await page.getByRole("button", { name: /^send$/i }).click();
+    await expectPhase(page, "ckpt1");
+
+    // 2. Navigate to the live page directly.
     await page.goto(`/session/${sid}/live`);
-    await expect(page.getByTestId("live-stage")).toBeVisible({ timeout: 15000 });
+    await expect(page.getByTestId("live-stage")).toBeVisible({
+      timeout: 15000,
+    });
 
-    // Allow the WS to handshake, the engine to emit track_started, and the
-    // hook to update the "current track" card.
+    // 3. Wait for the WS handshake + the engine's first track_started to
+    //    propagate into the now-playing card.
     await expect(page.getByTestId("live-current-track-name")).toContainText(
       "Track 1",
       { timeout: 15000 },
     );
 
-    // Skip → the mock engine advances to the second track and emits
-    // track_started for it, which the UI reflects in the now-playing card.
+    // 4. Skip → mock engine advances to the second track and emits
+    //    track_started for it. The UI reflects it in the now-playing card.
     await page.getByTestId("live-skip").click();
     await expect(page.getByTestId("live-current-track-name")).toContainText(
       "Track 2",
       { timeout: 15000 },
     );
 
-    // The visual layer slot is intentionally a placeholder in v2.5.1 —
-    // Agente D fills it in v2.5.3.
+    // 5. The visual layer slot is intentionally a placeholder in v2.5.1 —
+    //    Agente D fills it in v2.5.3.
     await expect(page.getByTestId("visual-slot")).toBeVisible();
   });
 });
