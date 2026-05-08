@@ -48,7 +48,36 @@ async def test_send_disconnects_on_error():
 
 def test_disconnect_removes_session():
     mgr = WSManager()
-    mgr._connections["sid"] = MagicMock()  # type: ignore[assignment]
+    # v2.5.1 — connections are keyed on (session_id, channel) so planning
+    # and live websockets can coexist on the same session id.
+    mgr._connections[("sid", "planning")] = MagicMock()  # type: ignore[assignment]
     mgr.disconnect("sid")
     assert not mgr.is_connected("sid")
     mgr.disconnect("sid")  # idempotent
+
+
+@pytest.mark.asyncio
+async def test_planning_and_live_channels_are_independent():
+    """A single session can host /ws/sessions/{id} (planning) and
+    /ws/live/{id} (live) at the same time without overwriting each other."""
+    mgr = WSManager()
+    planning = MagicMock()
+    planning.accept = AsyncMock()
+    planning.send_json = AsyncMock()
+    live = MagicMock()
+    live.accept = AsyncMock()
+    live.send_json = AsyncMock()
+
+    await mgr.connect("sid", planning)
+    await mgr.connect("sid", live, channel="live")
+    assert mgr.is_connected("sid")
+    assert mgr.is_connected("sid", channel="live")
+
+    await mgr.send("sid", {"type": "p"})
+    await mgr.send("sid", {"type": "l"}, channel="live")
+    planning.send_json.assert_awaited_once_with({"type": "p"})
+    live.send_json.assert_awaited_once_with({"type": "l"})
+
+    mgr.disconnect("sid", channel="live")
+    assert mgr.is_connected("sid")
+    assert not mgr.is_connected("sid", channel="live")

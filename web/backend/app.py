@@ -514,6 +514,179 @@ async def session_ws(
 
 
 # ---------------------------------------------------------------------------
+# WebSocket — live performance channel (v2.5.1)
+# ---------------------------------------------------------------------------
+
+@app.websocket("/ws/live/{session_id}")
+async def live_session_ws(
+    websocket: WebSocket,
+    session_id: str,
+    token: str = Query(...),
+):
+    """Bridge between the browser-driven audio player and ``LiveEngineBrowser``.
+
+    The live channel is a second websocket over the same ``session_id``,
+    distinct from ``/ws/sessions/{id}`` (which carries planning events).
+    On connect we resolve the session's last approved playlist, construct
+    a :class:`LiveEngineBrowser` whose emitter forwards each event back
+    over this websocket, and spawn the live DJ loop. The browser drives
+    audio playback and pings ``playback_pos`` every ~250 ms so the engine
+    can detect crossfade thresholds without a background thread.
+    """
+    payload = auth.decode_token(token)
+    if not payload:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    user = db.get_user_by_id(int(payload.get("sub", 0)))
+    if not user:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    s = store.get(session_id)
+    if not s or s.user_id != user["id"]:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    playlist = list(s.context_variables.get("playlist") or [])
+    if not playlist:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await ws_manager.connect(session_id, websocket, channel="live")
+
+    # Inject session identity into context_variables so the live tools can
+    # see the current user (mirrors the planning WS handler).
+    if "user_id" not in s.context_variables:
+        s.context_variables["user_id"] = s.user_id
+        user_row = db.get_user_by_id(s.user_id)
+        if user_row:
+            s.context_variables["username"] = user_row["username"]
+
+    loop = asyncio.get_running_loop()
+
+    async def emit(data: dict) -> None:
+        await ws_manager.send(session_id, data, channel="live")
+
+    # Engine events arrive on the engine's emitter (called from arbitrary
+    # threads in the local engine, sync in the browser engine). Funnel
+    # everything through the same asyncio.Queue the live_dj loop drains
+    # so the agent sees one ordered stream of events + user commands.
+    command_queue: asyncio.Queue = asyncio.Queue()
+
+    def engine_emitter(event: dict) -> None:
+        # Push into both the WS (so the browser sees it) and the agent
+        # queue (so the live_dj loop reacts). The browser engine emits
+        # synchronously from this same loop thread (no background watchdog),
+        # so we schedule via the loop rather than blocking on
+        # ``run_coroutine_threadsafe`` (which deadlocks when called from
+        # the loop thread). Both are wrapped in try/except so flaky UI
+        # plumbing never kills the engine.
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            try:
+                loop.create_task(emit(event))
+            except Exception:
+                pass
+            try:
+                command_queue.put_nowait(dict(event))
+            except Exception:
+                pass
+        else:
+            try:
+                asyncio.run_coroutine_threadsafe(emit(event), loop)
+            except Exception:
+                pass
+            try:
+                loop.call_soon_threadsafe(command_queue.put_nowait, dict(event))
+            except Exception:
+                pass
+
+    from agent.live_engine import LiveEngineBrowser
+
+    engine = LiveEngineBrowser(emitter=engine_emitter)
+
+    # Spawn the live DJ loop. We supervise it ourselves so a crash in the
+    # agent surfaces as a WS error event instead of silently dropping the
+    # connection.
+    async def run_phase() -> None:
+        try:
+            await pipeline.phase_live(
+                playlist, s.context_variables, engine, emit, command_queue
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — surface to UI banner
+            await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+
+    phase_task = asyncio.create_task(run_phase())
+
+    try:
+        # Initial state event so the client knows what's loaded before any
+        # engine events arrive.
+        await emit(
+            {
+                "type": "live_state",
+                "data": {
+                    "session_id": session_id,
+                    "playlist": playlist,
+                    "engine_state": engine.get_state(),
+                },
+            }
+        )
+
+        while True:
+            msg = await ws_manager.receive(session_id, channel="live")
+            if msg is None:
+                break
+
+            msg_type = msg.get("type")
+            if msg_type == "playback_pos":
+                tid = str(msg.get("track_id", ""))
+                try:
+                    current_time = float(msg.get("currentTime", 0.0))
+                except (TypeError, ValueError):
+                    current_time = 0.0
+                # report_playback_pos is sync but small (no I/O), so we can
+                # call it directly on the event loop without to_thread.
+                engine.report_playback_pos(tid, current_time)
+            elif msg_type in {"user_msg", "command"}:
+                text = msg.get("text") or msg.get("content") or ""
+                await command_queue.put({"type": "user_msg", "text": str(text)})
+            elif msg_type == "quit":
+                await command_queue.put({"type": "quit"})
+                break
+            elif msg_type == "get_state":
+                await emit(
+                    {
+                        "type": "live_state",
+                        "data": {
+                            "session_id": session_id,
+                            "playlist": list(engine.playlist),
+                            "engine_state": engine.get_state(),
+                        },
+                    }
+                )
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            engine.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        if not phase_task.done():
+            phase_task.cancel()
+            try:
+                await phase_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        ws_manager.disconnect(session_id, channel="live")
+
+
+# ---------------------------------------------------------------------------
 # WS message dispatcher (separated so the outer loop can catch phase failures
 # and emit a graceful `error` event instead of dropping the connection)
 # ---------------------------------------------------------------------------

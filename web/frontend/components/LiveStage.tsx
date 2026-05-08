@@ -1,0 +1,266 @@
+"use client";
+/**
+ * LiveStage — primary UI surface for the v2.5.1 live performance flow.
+ *
+ * The component is intentionally read-mostly: every interactive control is
+ * a thin wrapper around ``useLiveSession``'s ``sendCommand`` /
+ * ``sendUserMessage`` / ``quit`` helpers. State for the duration progress,
+ * countdown and "now playing" card all derives from the engine events
+ * received over ``/ws/live/{id}``.
+ *
+ * The visual layer placeholder is intentional — Agente D will swap the
+ * ``data-testid="visual-slot"`` div for a real ``<VisualLayer>`` in v2.5.3.
+ */
+
+import { useState } from "react";
+import type { UseLiveSessionApi } from "@/lib/live";
+
+interface LiveStageProps {
+  live: UseLiveSessionApi;
+  /** Optional — surfaces session metadata for the header. Falls back to
+   * the playlist length if absent. */
+  durationMin?: number | null;
+  sessionName?: string | null;
+}
+
+const STATE_LABEL: Record<string, string> = {
+  idle: "Idle",
+  playing: "Playing",
+  crossfading: "Crossfade",
+  ended: "Set complete",
+};
+
+export default function LiveStage({
+  live,
+  durationMin,
+  sessionName,
+}: LiveStageProps) {
+  const {
+    state,
+    connected,
+    currentTrack,
+    nextTrack,
+    secondsToCrossfade,
+    playlistRemaining,
+    playlist,
+    log,
+    error,
+    sendCommand,
+    sendUserMessage,
+    quit,
+  } = live;
+
+  const [chatInput, setChatInput] = useState("");
+
+  const totalTracks = playlist.length;
+  const playedSoFar = Math.max(0, totalTracks - playlistRemaining - 1);
+  const fakePct =
+    totalTracks > 0 ? Math.min(100, (playedSoFar / totalTracks) * 100) : 0;
+
+  return (
+    <section
+      data-testid="live-stage"
+      className="flex flex-col gap-6 px-4 py-6 md:px-8 max-w-5xl mx-auto"
+    >
+      {/* Header */}
+      <header className="flex flex-col gap-2">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <p className="text-[10px] tracking-widest uppercase text-muted">
+              Live Performance
+            </p>
+            <h1 className="text-xl font-pixel text-neon">
+              {sessionName ?? "Apollo LiveDJ"}
+            </h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              data-testid="live-state-badge"
+              className={`text-[10px] tracking-widest uppercase px-2 py-1 rounded border ${
+                state === "playing"
+                  ? "border-neon text-neon"
+                  : state === "crossfading"
+                  ? "border-yellow-400 text-yellow-300"
+                  : state === "ended"
+                  ? "border-muted text-muted"
+                  : "border-border text-muted"
+              }`}
+            >
+              {STATE_LABEL[state] ?? state}
+            </span>
+            <span
+              data-testid="live-connection"
+              className={`w-2 h-2 rounded-full ${
+                connected ? "bg-neon" : "bg-muted"
+              }`}
+              aria-label={connected ? "Connected" : "Disconnected"}
+            />
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 text-[10px] text-muted">
+          <span>
+            Track {Math.min(playedSoFar + 1, totalTracks)} of {totalTracks}
+          </span>
+          {durationMin ? <span>· target {durationMin} min</span> : null}
+        </div>
+        <div className="h-1 w-full bg-border rounded overflow-hidden">
+          <div
+            data-testid="live-progress-bar"
+            className="h-full bg-neon transition-all duration-500"
+            style={{ width: `${fakePct}%` }}
+          />
+        </div>
+      </header>
+
+      {error ? (
+        <div
+          data-testid="live-error"
+          className="border border-danger text-danger text-xs px-3 py-2 rounded"
+        >
+          {error}
+        </div>
+      ) : null}
+
+      {/* Now playing + next */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <article
+          data-testid="live-current-track"
+          className="bg-surface border border-border rounded p-4 space-y-2"
+        >
+          <p className="text-[10px] tracking-widest uppercase text-muted">
+            Now playing
+          </p>
+          <h2
+            className="text-lg text-[#e2e2ff] font-bold"
+            data-testid="live-current-track-name"
+          >
+            {currentTrack?.display_name ?? "—"}
+          </h2>
+          <p className="text-xs text-muted">
+            {currentTrack?.bpm ? `${currentTrack.bpm} BPM` : "BPM ?"}
+            {currentTrack?.camelot_key ? ` · ${currentTrack.camelot_key}` : ""}
+          </p>
+          <p className="text-xs text-neon" data-testid="live-countdown">
+            Crossfade in: {Math.round(secondsToCrossfade)}s
+          </p>
+        </article>
+
+        <article
+          data-testid="live-next-track"
+          className="bg-surface border border-border rounded p-4 space-y-2"
+        >
+          <p className="text-[10px] tracking-widest uppercase text-muted">
+            Next up
+          </p>
+          <h2 className="text-lg text-[#e2e2ff] font-bold">
+            {nextTrack?.display_name ?? "—"}
+          </h2>
+          <p className="text-xs text-muted">
+            {nextTrack?.bpm ? `${nextTrack.bpm} BPM` : "BPM ?"}
+            {nextTrack?.camelot_key ? ` · ${nextTrack.camelot_key}` : ""}
+          </p>
+        </article>
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex flex-wrap gap-2">
+        <button
+          data-testid="live-skip"
+          className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors disabled:opacity-40"
+          onClick={() => sendCommand({ type: "skip" })}
+          disabled={state === "ended"}
+        >
+          Skip
+        </button>
+        <button
+          data-testid="live-stay"
+          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          onClick={() => sendCommand({ type: "stay" })}
+          disabled={state === "ended"}
+        >
+          Stay
+        </button>
+        <button
+          data-testid="live-energetic"
+          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          onClick={() => sendCommand({ type: "more_energetic" })}
+          disabled={state === "ended"}
+        >
+          More energetic
+        </button>
+        <button
+          data-testid="live-wind-down"
+          className="border border-border text-[#e2e2ff] px-4 py-2 rounded text-xs uppercase tracking-widest hover:border-neon hover:text-neon transition-colors disabled:opacity-40"
+          onClick={() => sendCommand({ type: "wind_down" })}
+          disabled={state === "ended"}
+        >
+          Wind down
+        </button>
+        <button
+          data-testid="live-quit"
+          className="border border-danger text-danger px-4 py-2 rounded text-xs uppercase tracking-widest hover:bg-danger hover:text-[#0a0a0f] transition-colors ml-auto"
+          onClick={quit}
+        >
+          Quit
+        </button>
+      </div>
+
+      {/* Free-form chat */}
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (!chatInput.trim()) return;
+          sendUserMessage(chatInput);
+          setChatInput("");
+        }}
+      >
+        <input
+          data-testid="live-chat-input"
+          value={chatInput}
+          onChange={(e) => setChatInput(e.target.value)}
+          placeholder='Talk to Apollo — "more groove", "drop the energy", anything goes'
+          disabled={state === "ended"}
+          className="flex-1 bg-[#0a0a0f] border border-border rounded px-3 py-2 text-sm text-[#e2e2ff] focus:outline-none focus:border-neon transition-colors disabled:opacity-40"
+        />
+        <button
+          type="submit"
+          data-testid="live-chat-send"
+          className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors disabled:opacity-40"
+          disabled={state === "ended" || !chatInput.trim()}
+        >
+          Send
+        </button>
+      </form>
+
+      {/* Visual layer placeholder — replaced by <VisualLayer /> in v2.5.3 */}
+      <div
+        data-testid="visual-slot"
+        className="w-full h-64 bg-surface border border-border rounded flex items-center justify-center text-muted text-[10px] tracking-widest uppercase"
+      >
+        Visual layer — v2.5.3
+      </div>
+
+      {/* Recent commands log */}
+      {log.length > 0 ? (
+        <ul
+          data-testid="live-log"
+          className="text-xs text-muted space-y-1 max-h-40 overflow-y-auto"
+        >
+          {log.slice(-12).map((entry, i) => (
+            <li
+              key={`${entry.ts}-${i}`}
+              className={
+                entry.role === "user" ? "text-[#e2e2ff]" : "text-neon"
+              }
+            >
+              {entry.role === "user" ? "› " : "‹ "}
+              {entry.text}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </section>
+  );
+}

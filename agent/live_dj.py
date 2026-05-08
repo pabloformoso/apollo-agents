@@ -1,25 +1,34 @@
 """
-LiveDJ — proactive event-driven DJ agent for Apollo v1.5.
+LiveDJ — proactive event-driven DJ agent for Apollo v1.5+.
 
 Architecture:
-  - run_live_session(): main loop that drains engine events + user input,
-    batches them into LLM turns, and executes tool calls.
-  - Events arrive from LiveEngine via a threading.Queue.
-  - User input is read in a daemon thread to avoid blocking the event loop.
-  - The LLM is called with a tight max_turns budget per event batch (5 turns),
-    preventing runaway token spend while staying responsive.
+  - run_live_session(): sync main loop (CLI mode) — drains engine events +
+    stdin user input, batches them into LLM turns, and executes tool calls.
+  - run_live_session_async(): async variant for FastAPI WebSocket
+    integration — same control logic but driven by an asyncio.Queue and
+    awaiting an async ``emit`` callable.
+  - Events arrive from LiveEngine via a threading.Queue (CLI path) or
+    directly through the engine's ``emitter`` callback (web path).
+  - The LLM is called with a tight ``max_turns`` budget per event batch
+    (5 turns), preventing runaway token spend while staying responsive.
+
+Both loops share the same ``_LIVE_DJ_SYSTEM`` prompt and the 6 tools
+(``get_live_state`` / ``crossfade_now`` / ``extend_track`` / ``skip_track``
+/ ``queue_swap`` / ``set_crossfade_point``).
 
 Circular-import note:
-  run_agent() lives in agent/run.py which also imports from agent/tools.py.
-  live_dj.py is imported by agent/tools.py (via start_live_session), so we
-  defer the import of run_agent() inside the function to break the cycle.
+  ``run_agent()`` lives in ``agent/run.py`` which also imports from
+  ``agent/tools.py``. ``live_dj.py`` is imported by ``agent/tools.py`` (via
+  ``start_live_session``), so we defer the import of ``run_agent`` /
+  ``run_agent_streaming`` inside the function bodies to break the cycle.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from queue import Empty, Queue
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from agent.live_engine import (
     APPROACHING_CF,
@@ -28,7 +37,7 @@ from agent.live_engine import (
     SESSION_ENDED,
     TRACK_ENDED,
     TRACK_STARTED,
-    LiveEngine,
+    LiveEngineProtocol,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,7 +86,7 @@ STYLE:
 
 def get_live_state(context_variables: dict) -> str:
     """Return current engine state: position, track, BPM, Camelot key, time to crossfade."""
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     s = engine.get_state()
@@ -98,7 +107,7 @@ def get_live_state(context_variables: dict) -> str:
 
 def crossfade_now(context_variables: dict) -> str:
     """Trigger crossfade immediately."""
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     return engine.crossfade_now()
@@ -110,7 +119,7 @@ def extend_track(seconds: int, context_variables: dict) -> str:
     Args:
         seconds: Number of seconds to delay the crossfade.
     """
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     return engine.extend_track(seconds)
@@ -118,7 +127,7 @@ def extend_track(seconds: int, context_variables: dict) -> str:
 
 def skip_track(context_variables: dict) -> str:
     """Hard-cut to next track without crossfade."""
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     return engine.skip_track()
@@ -131,7 +140,7 @@ def queue_swap(position: int, track_id: str, context_variables: dict) -> str:
         position: 1-indexed future playlist position to replace.
         track_id: Catalog track ID to insert (use get_catalog to find IDs).
     """
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     return engine.queue_swap(position, track_id)
@@ -143,7 +152,7 @@ def set_crossfade_point(position_sec: float, context_variables: dict) -> str:
     Args:
         position_sec: Target crossfade start, in seconds from track start.
     """
-    engine: LiveEngine = context_variables.get("_engine")
+    engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
         return "Engine not running."
     return engine.set_crossfade_point(position_sec)
@@ -159,7 +168,7 @@ _LIVE_TOOLS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Event loop
+# Sync event loop (CLI mode, unchanged from v1.5)
 # ---------------------------------------------------------------------------
 
 def run_live_session(playlist: list[dict], context_variables: dict) -> None:
@@ -168,13 +177,15 @@ def run_live_session(playlist: list[dict], context_variables: dict) -> None:
     Blocks until the session ends (all tracks played, user quits, or engine stops).
     Stores engine in context_variables["_engine"] so live tools can reach it.
     """
-    # Deferred import to break circular dependency (tools → live_dj → run)
+    # Deferred imports to break the circular dependency
+    # (tools → live_dj → run + live_engine).
+    from agent.live_engine import LiveEngineLocal  # noqa: PLC0415
     from agent.run import run_agent  # noqa: PLC0415
 
     event_queue: Queue = Queue()
     user_input_queue: Queue = Queue()
 
-    engine = LiveEngine(playlist, event_queue)
+    engine = LiveEngineLocal(playlist, event_queue)
     context_variables["_engine"] = engine
 
     # Daemon thread reads blocking stdin without stalling the event loop
@@ -237,8 +248,170 @@ def run_live_session(playlist: list[dict], context_variables: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Async event loop (web mode — FastAPI WS handler integration)
+# ---------------------------------------------------------------------------
+
+async def run_live_session_async(
+    playlist: list[dict],
+    context_variables: dict,
+    engine: LiveEngineProtocol,
+    emit: Callable[[dict], Awaitable[None]],
+    command_queue: asyncio.Queue,
+    *,
+    max_idle_loops: int | None = None,
+) -> None:
+    """Async live DJ loop suitable for FastAPI WebSocket integration.
+
+    Mirrors :func:`run_live_session` but:
+
+    - Drains commands from an :class:`asyncio.Queue` (placed there by the
+      WS handler) instead of stdin.
+    - Drains engine events from the same queue (the WS handler also forwards
+      them so the loop sees a single ordered stream).
+    - Awaits ``emit(...)`` to publish agent assistant text back to the
+      browser.
+
+    The synchronous :func:`run_live_session` is preserved for CLI mode and
+    must not be modified.
+
+    Parameters
+    ----------
+    playlist:
+        The set the engine is playing. Used to seed the agent's first
+        prompt (the engine itself already has it).
+    context_variables:
+        Shared context dict — the engine is stored as ``_engine`` so the
+        live tools can reach it. The WS handler passes the same dict that
+        was hydrated by the planning phase.
+    engine:
+        Any object implementing :class:`LiveEngineProtocol`. In the web
+        path this is a :class:`LiveEngineBrowser`. The caller is
+        responsible for ``engine.play(playlist)`` and ``engine.stop()`` —
+        this loop does not own the engine lifecycle.
+    emit:
+        Async callable used to send agent responses back to the browser.
+        The engine's own events are emitted via the engine's emitter,
+        not through this function.
+    command_queue:
+        Stream of dicts. Each dict is either an engine event
+        (``{"type": "track_started", ...}`` etc.) — forwarded by the WS
+        handler from the engine's emitter — or a user command
+        (``{"type": "user_msg", "text": "..."}`` /
+        ``{"type": "quit"}``). The loop ends on ``quit`` or
+        ``session_ended``.
+    max_idle_loops:
+        Test-only escape hatch. When given, the loop exits after this
+        many empty drains. Production callers leave this ``None`` so the
+        loop runs until ``session_ended`` or ``quit``.
+    """
+    # Deferred import — pipeline imports run.py which imports tools.py which
+    # imports live_dj.py, so we have to break the cycle here as well.
+    from web.backend.pipeline import run_agent_streaming  # noqa: PLC0415
+
+    context_variables["_engine"] = engine
+
+    messages: list[dict] = [
+        {
+            "role": "user",
+            "content": (
+                "Live session started.\n" + _playlist_summary(playlist)
+            ),
+        },
+        {"role": "assistant", "content": "On deck. Let's go."},
+    ]
+
+    idle_loops = 0
+    try:
+        while True:
+            events: list[dict] = []
+            user_inputs: list[str] = []
+            quit_requested = False
+
+            # Block briefly waiting for the first item, then drain any others
+            # that already piled up so a burst of pings produces one agent
+            # turn instead of one turn per ping.
+            try:
+                first = await asyncio.wait_for(command_queue.get(), timeout=0.2)
+                _classify(first, events, user_inputs)
+                if first.get("type") == "quit":
+                    quit_requested = True
+            except asyncio.TimeoutError:
+                pass
+
+            while not command_queue.empty():
+                try:
+                    item = command_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                _classify(item, events, user_inputs)
+                if item.get("type") == "quit":
+                    quit_requested = True
+
+            if quit_requested:
+                break
+
+            if any(e.get("type") == SESSION_ENDED for e in events):
+                # Surface the closing event so the WS handler can cleanup.
+                break
+
+            if not events and not user_inputs:
+                idle_loops += 1
+                if max_idle_loops is not None and idle_loops >= max_idle_loops:
+                    break
+                continue
+            idle_loops = 0
+
+            content = _format_turn(events, user_inputs, engine.get_state())
+            messages.append({"role": "user", "content": content})
+
+            # Forward to LLM. The streaming runner publishes its own
+            # text_delta / tool_call / tool_result events via emit, so we
+            # only need to add a final assistant chat marker.
+            try:
+                response = await run_agent_streaming(
+                    _LIVE_DJ_SYSTEM,
+                    _LIVE_TOOLS,
+                    messages,
+                    context_variables,
+                    emit,
+                    max_turns=5,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface to UI
+                await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+                response = ""
+
+            if response:
+                messages.append({"role": "assistant", "content": response})
+                await emit({"type": "live_message", "role": "assistant", "content": response})
+    finally:
+        context_variables.pop("_engine", None)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _classify(item: dict, events: list[dict], user_inputs: list[str]) -> None:
+    """Sort a queue item into either the engine-events bucket or the
+    user-inputs bucket. The async loop fans both into one
+    :func:`_format_turn` call so the LLM sees a unified context."""
+    item_type = item.get("type")
+    if item_type == "user_msg":
+        text = (item.get("text") or "").strip()
+        if text:
+            user_inputs.append(text)
+    elif item_type in {
+        TRACK_STARTED,
+        APPROACHING_CF,
+        CROSSFADE_TRIGGERED,
+        CROSSFADE_FINISHED,
+        TRACK_ENDED,
+        SESSION_ENDED,
+    }:
+        events.append(item)
+    # Anything else (e.g. ``engine_command`` UI hints) is browser-only and
+    # the agent doesn't need to see it.
+
 
 def _stdin_reader(q: Queue) -> None:
     """Blocking stdin reader — runs in a daemon thread."""
@@ -278,7 +451,7 @@ def _format_turn(
         for u in user_inputs:
             parts.append(f"  > {u}")
 
-    parts.append(f"=== Current state ===")
+    parts.append("=== Current state ===")
     cur = state.get("current_track") or {}
     parts.append(
         f"  {cur.get('display_name','?')} | "
