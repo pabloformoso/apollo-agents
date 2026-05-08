@@ -690,7 +690,14 @@ async def phase_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str
     genre = ctx.get("genre", "")
     duration = ctx.get("duration_min", 60)
     mood = ctx.get("mood", "")
+    environment = ctx.get("environment", "") or ""
     prompt = f"Build a {duration}-minute {genre} set. Mood: {mood}."
+    # v2.5.0 — surface the environment string in the prompt so the Planner
+    # honours the ENVIRONMENT SIGNAL block from ``_PLANNER_SYSTEM``. We omit
+    # the line entirely when the value is empty / "unspecified" to avoid
+    # sending noise the planner is told to ignore anyway.
+    if environment and environment.strip().lower() != "unspecified":
+        prompt += f"\nEnvironment: {environment}."
     if memory_summary:
         prompt += f"\n\nPast session notes:\n{memory_summary}"
 

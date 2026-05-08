@@ -105,26 +105,33 @@ _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODEL)
 
 _GENRE_GUARD_SYSTEM = """\
 You are a DJ set intake assistant. Your only job is to confirm the user's
-genre, duration, and mood before any planning starts.
+genre, duration, mood, and (optionally) listening environment before any
+planning starts.
 
 Workflow:
-1. Try to extract genre, duration, and mood directly from the user's message.
+1. Try to extract genre, duration, mood, and environment directly from the
+   user's message.
    Common shorthands: "lofi" → "lofi - ambient", "deep house", "techno", "cyberpunk".
-2. If the genre is ambiguous or not recognized, call list_genres and ask the user
-   to pick. Be friendly. Repeat until they pick a valid one.
-3. Confirm all three values with the user:
-   genre / duration in minutes / mood description
+   Environment hints: "loud club", "intimate listening room", "outdoor cafe",
+   "headphones at home", etc. If the user does not mention environment, do
+   not pester — accept "skip" / empty / "unspecified" as a valid answer.
+2. If the genre is ambiguous or not recognized, call list_genres and ask the
+   user to pick. Be friendly. Repeat until they pick a valid one.
+3. Confirm all four values with the user:
+   genre / duration / mood / environment description (optional, defaults to "unspecified")
 4. Once the user confirms, output EXACTLY this block and nothing else:
 
 CONFIRMED
 genre: <exact folder name, lowercase>
 duration_min: <integer>
 mood: <user's description>
+environment: <user's description or "unspecified">
 
 Rules:
 - Never call any tool other than list_genres.
 - Never proceed or guess with an invalid genre.
 - One question at a time. Keep it brief.
+- environment is optional — never block on it; "unspecified" is fine.
 """
 
 _PLANNER_SYSTEM = """\
@@ -154,6 +161,16 @@ or get_favorite_tracks if the USER PREFERENCES block above suggests a tighter
 fit than the genre filter alone — for example, when the user has favorites
 within the requested genre and you want to surface their exact ids before
 proposing the playlist.
+
+ENVIRONMENT SIGNAL:
+The `environment` string describes where the set will be played. Use it as
+soft signal (do NOT override the genre filter):
+  - "loud / crowded / club / bar"   → bias toward higher-energy tracks,
+    fewer ambient gaps, peaks earlier in the duration.
+  - "intimate / listening / home / phones" → favor longer ambient sections,
+    softer transitions, slower energy ramp.
+  - "outdoor / cafe / morning"       → mid-low energy, no peak required.
+If `environment` is "unspecified", behave as before.
 """
 
 _CHECKPOINT_SYSTEM = """\
@@ -590,7 +607,16 @@ def _parse_validator_response(text: str) -> tuple[str, list[str]]:
 
 
 def _parse_confirmed_block(text: str) -> dict | None:
-    """Parse Genre Guard's CONFIRMED block → {genre, duration_min, mood} or None."""
+    """Parse Genre Guard's CONFIRMED block.
+
+    Returns ``{genre, duration_min, mood, environment}`` or ``None`` when the
+    block is missing or malformed.
+
+    Backward compat: blocks emitted by the pre-v2.5 prompt only have three
+    fields (genre / duration_min / mood). When ``environment`` is absent we
+    default it to ``"unspecified"`` so existing CONFIRMED blocks (and the
+    legacy callers in older sessions) keep parsing successfully.
+    """
     lines = [l.strip() for l in text.splitlines()]
     try:
         idx = lines.index("CONFIRMED")
@@ -607,6 +633,12 @@ def _parse_confirmed_block(text: str) -> dict | None:
         result["duration_min"] = int(result["duration_min"])
     except (ValueError, KeyError):
         return None
+    # v2.5.0 — environment is optional; default to "unspecified" so older
+    # CONFIRMED blocks continue to parse and downstream phases always have
+    # a string they can read (planner/propose_playlist treat "unspecified"
+    # as a no-op signal).
+    env = (result.get("environment") or "").strip()
+    result["environment"] = env if env else "unspecified"
     return result
 
 
@@ -804,10 +836,16 @@ def _orchestrate() -> None:
     context_variables["genre"] = confirmed["genre"]
     context_variables["duration_min"] = confirmed["duration_min"]
     context_variables["mood"] = confirmed["mood"]
+    context_variables["environment"] = confirmed.get("environment", "unspecified")
+    env_summary = (
+        f" | Env: \"{context_variables['environment']}\""
+        if context_variables["environment"] != "unspecified"
+        else ""
+    )
     print(
         f"\n✓ Genre: {confirmed['genre']} | "
         f"{confirmed['duration_min']} min | "
-        f"Mood: \"{confirmed['mood']}\"\n"
+        f"Mood: \"{confirmed['mood']}\"{env_summary}\n"
     )
 
     # Load memory for this genre (used by Planner and Critic)
@@ -821,6 +859,9 @@ def _orchestrate() -> None:
         f"Build a {confirmed['duration_min']}-minute {confirmed['genre']} set. "
         f"Mood: {confirmed['mood']}"
     )
+    env = context_variables.get("environment", "unspecified")
+    if env and env != "unspecified":
+        planner_prompt += f"\nEnvironment: {env}"
     if "No memory" not in memory_summary:
         planner_prompt += f"\n\nPAST SESSION MEMORY:\n{memory_summary}"
     planner_messages: list[dict] = [{"role": "user", "content": planner_prompt}]

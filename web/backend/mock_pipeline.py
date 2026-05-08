@@ -30,7 +30,25 @@ async def fake_genre(message: str, history: list[dict], ctx: dict, emit: Callabl
         genre = "techno"
     # Sentinel for C2: "crash" in the prompt makes the planner blow up later.
     mood = "crash" if "crash" in lowered else "dark"
-    return {"genre": genre, "duration_min": 60, "mood": mood}
+    # v2.5.0 — environment-perception. The frontend appends a
+    # "(environment: <text>)" suffix to the user's message when the
+    # decorative environment textarea is non-empty. We round-trip whatever
+    # appears between the parens so E2E specs can assert the value flows
+    # end-to-end. Anything else falls back to "unspecified".
+    environment = "unspecified"
+    if "(environment:" in lowered:
+        try:
+            start = lowered.index("(environment:") + len("(environment:")
+            end = lowered.index(")", start)
+            environment = (message or "")[start:end].strip() or "unspecified"
+        except ValueError:
+            environment = "unspecified"
+    return {
+        "genre": genre,
+        "duration_min": 60,
+        "mood": mood,
+        "environment": environment,
+    }
 
 
 async def fake_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str:

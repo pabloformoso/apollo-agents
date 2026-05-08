@@ -9,6 +9,7 @@ import type { SessionState, Phase, ServerEvent } from "@/lib/types";
 import AgentStream, { LogEntry } from "@/components/AgentStream";
 import PlaylistPanel from "@/components/PlaylistPanel";
 import CriticPanel from "@/components/CriticPanel";
+import GenreInput from "@/components/GenreInput";
 
 // ---------------------------------------------------------------------------
 // Phase status bar
@@ -38,35 +39,6 @@ function PhaseBar({ current }: { current: Phase }) {
 // ---------------------------------------------------------------------------
 // Phase-specific input areas
 // ---------------------------------------------------------------------------
-function GenreInput({ onSubmit, disabled }: { onSubmit: (v: string) => void; disabled: boolean }) {
-  const [value, setValue] = useState("");
-  const submit = () => { if (value.trim()) { onSubmit(value.trim()); setValue(""); } };
-  return (
-    <div className="space-y-2">
-      <p className="text-xs text-muted">Describe your session — genre, duration, mood.</p>
-      <p className="text-xs text-muted/60">Example: &quot;Build a 60-minute deep house set, late night vibes&quot;</p>
-      <div className="flex gap-2">
-        <input
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && submit()}
-          placeholder="60-minute cyberpunk set, dark and intense..."
-          disabled={disabled}
-          className="flex-1 bg-[#0a0a0f] border border-border rounded px-3 py-2 text-sm text-[#e2e2ff] focus:outline-none focus:border-neon transition-colors disabled:opacity-40"
-          autoFocus
-        />
-        <button
-          onClick={submit}
-          disabled={disabled || !value.trim()}
-          className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold uppercase tracking-widest hover:bg-neon-dim transition-colors disabled:opacity-40"
-        >
-          Send
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function CheckpointActions({
   phase,
   onApprove,
@@ -258,6 +230,18 @@ export default function SessionPage() {
         // Backend sends the full session dict as data — replace wholesale so
         // the authoritative `phase` (the next phase) is what the UI reacts to.
         setSession(event.data as SessionState);
+        // v2.5.0 — when the genre phase completes with a non-empty
+        // environment, surface it in the log so the user gets visible
+        // confirmation that the description was captured.
+        if (event.phase === "genre") {
+          const envValue = (event.data as SessionState).environment;
+          if (envValue && envValue.toLowerCase() !== "unspecified") {
+            setLogEntries(prev => [
+              ...prev,
+              { type: "system", content: `environment: ${envValue}` },
+            ]);
+          }
+        }
         break;
       case "state":
         setSession(event.data);
