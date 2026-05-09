@@ -113,7 +113,14 @@ export type LiveCommand =
 
 interface ServerEngineCommand {
   type: "engine_command";
-  command: "load" | "skip" | "crossfade" | "queue_swap" | "stop";
+  command:
+    | "load"
+    | "skip"
+    | "crossfade"
+    | "queue_swap"
+    | "stop"
+    /** v2.5.0.1 — release the active deck so the next ``load`` starts cleanly. */
+    | "stop_deck";
   track?: LiveTrackSummary;
   to_track?: LiveTrackSummary;
   from_track?: LiveTrackSummary;
@@ -271,6 +278,32 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       el.crossOrigin = "anonymous";
       refObj.current = el;
 
+      // v2.5.0.1 — natural end-of-track notification.
+      //
+      // When `<audio>` finishes its buffer it fires ``ended``, pauses, and
+      // freezes ``currentTime``. The 250 ms ``playback_pos`` interval keeps
+      // pinging the same value to the backend, which never crosses the
+      // crossfade threshold — so the engine never advances. The fix is to
+      // forward ``ended`` as a synthetic ``track_ended`` WS message; the
+      // backend's ``LiveEngineBrowser.report_track_ended`` then advances
+      // the cursor and emits ``track_started`` for the next track.
+      //
+      // Only the *active* deck's ``ended`` matters. The inactive deck
+      // also fires ``ended`` mid-set if a previous src plays past the
+      // crossfade — guarding on ``activeDeckRef.current`` keeps the
+      // synthetic event tied to the track the user is hearing.
+      el.addEventListener("ended", () => {
+        if (activeDeckRef.current !== which) return;
+        const ws = wsRef.current;
+        const tid = currentTrackIdRef.current;
+        if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
+        try {
+          ws.send(JSON.stringify({ type: "track_ended", track_id: tid }));
+        } catch {
+          /* ignore — backend has the endgame safeguard as a fallback */
+        }
+      });
+
       const ctx = ensureAudioContext();
       if (ctx) {
         try {
@@ -297,6 +330,24 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       if (!el) return;
       audioRef.current = el;
       el.src = streamUrl(track.id);
+      // v2.5.0.1 — defensive gain restore. After a crossfade the
+      // previously-inactive deck's gain was ramped down to 0; if a
+      // ``load`` (rather than another ``crossfade``) is the next event
+      // (e.g. the engine advanced via ``track_ended``), the new track
+      // would play silently. Reset both Web Audio gain (when wired) and
+      // the element-level volume so playback is audible regardless of
+      // path.
+      const ctx = ensureAudioContext();
+      const gain = which === "a" ? gainARef.current : gainBRef.current;
+      if (ctx && gain) {
+        try {
+          gain.gain.cancelScheduledValues(ctx.currentTime);
+          gain.gain.setValueAtTime(1, ctx.currentTime);
+        } catch {
+          /* ignore */
+        }
+      }
+      el.volume = 1;
       try {
         await el.play();
         setAutoplayBlocked(false);
@@ -316,7 +367,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       }
       currentTrackIdRef.current = track.id;
     },
-    [ensureDeck],
+    [ensureDeck, ensureAudioContext],
   );
 
   const hardCutToTrack = useCallback(
@@ -405,6 +456,21 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       void hardCutToTrack(evt.track);
     } else if (command === "crossfade" && evt.to_track) {
       void crossfadeToNext(evt.to_track, evt.crossfade_sec ?? 12);
+    } else if (command === "stop_deck") {
+      // v2.5.0.1 — release just the active deck (not both) so the next
+      // ``load`` plays into a fresh element and the previous track's
+      // ``ended`` fallback can't re-fire.
+      const which = activeDeckRef.current;
+      const el = which === "a" ? deckARef.current : deckBRef.current;
+      if (el) {
+        try {
+          el.pause();
+          el.removeAttribute("src");
+          el.load();
+        } catch {
+          /* ignore */
+        }
+      }
     } else if (command === "stop") {
       stopAllDecks();
     }
