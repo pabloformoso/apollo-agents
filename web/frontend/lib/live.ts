@@ -46,6 +46,10 @@ export interface LiveTrackSummary {
   bpm?: number | null;
   camelot_key?: string | null;
   duration_sec?: number | null;
+  /** Optional precomputed beatgrid — populated when the catalog has it.
+   * Consumed by the v2.5.3 ``<VisualLayer>`` for sample-accurate beat sync.
+   * Tracks without a beatgrid fall back to AnalyserNode onset detection. */
+  beatgrid?: { bpm: number; first_beat_sec: number } | null;
 }
 
 export interface LiveCommandLogEntry {

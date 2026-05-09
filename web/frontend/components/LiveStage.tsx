@@ -453,9 +453,12 @@ export default function LiveStage({
       {/* Visual layer placeholder — replaced by <VisualLayer /> in v2.5.3 */}
       <div
         data-testid="visual-slot"
-        className="w-full h-64 bg-surface border border-border rounded flex items-center justify-center text-muted text-[10px] tracking-widest uppercase"
+        className="w-full h-64 md:h-80"
       >
-        Visual layer — v2.5.3
+        <VisualLayer
+          audioRef={live.audioRef}
+          currentTrack={currentTrack}
+        />
       </div>
 
       {/* Autoplay-blocked overlay — surfaces when the browser refused to play
