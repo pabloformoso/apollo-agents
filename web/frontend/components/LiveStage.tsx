@@ -14,6 +14,7 @@
 
 import { useState } from "react";
 import type { UseLiveSessionApi } from "@/lib/live";
+import VisualLayer from "@/components/VisualLayer";
 
 interface LiveStageProps {
   live: UseLiveSessionApi;
@@ -251,12 +252,15 @@ export default function LiveStage({
         </button>
       </form>
 
-      {/* Visual layer placeholder — replaced by <VisualLayer /> in v2.5.3 */}
+      {/* Visual layer — v2.5.3 beat-synced (particles / strobe / fractal). */}
       <div
         data-testid="visual-slot"
-        className="w-full h-64 bg-surface border border-border rounded flex items-center justify-center text-muted text-[10px] tracking-widest uppercase"
+        className="w-full h-64 md:h-80"
       >
-        Visual layer — v2.5.3
+        <VisualLayer
+          audioRef={live.audioRef}
+          currentTrack={currentTrack}
+        />
       </div>
 
       {/* Autoplay-blocked overlay — surfaces when the browser refused to play

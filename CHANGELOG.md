@@ -5,6 +5,54 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v2.5.3 — Visual layer beat-sync
+
+Beat-synced visual layer for the live performance flow. The visual slot
+left as a placeholder by v2.5.1 in `<LiveStage>` is now a fully
+functional canvas with three switchable effects, all driven by the
+active deck's `currentTime` plus the catalog's `beatgrid` metadata.
+
+### Added
+- **`web/frontend/lib/visualizer/beat_clock.ts`** — pure function
+  turning `(bpm, first_beat_sec, current_time_sec)` into
+  `{beat_index, phase_in_beat, is_downbeat}`. Edge-case-safe (bpm=0,
+  pre-first-beat, NaN inputs all return zeros).
+- **`web/frontend/lib/visualizer/effects/{particles,strobe,fractal}.ts`**:
+  - `particles` — Three.js `Points` field (~1500 particles), beat-pulse
+    on size + opacity, hue rotation every 16 beats keyed to the
+    Camelot-key palette.
+  - `strobe` — DOM overlay div, exponential-out flash on every Nth
+    downbeat. Default safety cap at 3 Hz to mitigate
+    photosensitive-epilepsy risk.
+  - `fractal` — Julia-set fragment shader (~30 lines GLSL) on a
+    fullscreen quad; zoom breathes per-beat, twist drifts, color
+    pulled from the Camelot palette.
+- **`web/frontend/components/VisualLayer.tsx`** — owns the canvas
+  + effect selector + fullscreen toggle, drives a `requestAnimationFrame`
+  loop wrapped in `useEffectEvent` (v7 react-hooks compliant). Tracks
+  without `beatgrid` show a degraded-sync banner.
+- **`/session/{id}/live/visual-only`** — OBS-friendly fullscreen route.
+  Reuses `useLiveSession` over the existing `/ws/live/{id}` so an OBS
+  browser source can capture it without any chrome. Lays the groundwork
+  for v2.6 broadcast without rework.
+- **`<VisualLayer>` mounted into `<LiveStage>`** — replaces the
+  v2.5.1 visual-slot placeholder div.
+
+### Tests
+- 13 new vitest cases covering `beat_clock` math + edge cases.
+- 11 new vitest cases covering particles / strobe / fractal lifecycle
+  and the strobe rate-cap.
+- 4 new Playwright E2E cases (3 effect toggles + fullscreen button +
+  OBS visual-only route + auth gate).
+
+### Notes
+- Three.js was chosen over vanilla WebGL: bundle size impact ~131 KB
+  gzipped (well under any "unacceptable" threshold), and the
+  Scene/Camera/Material API saved meaningful boilerplate over raw
+  WebGL for the particle field.
+- No backend changes were necessary — `track_started` events already
+  forward the full track dict including `beatgrid`.
+
 ## [2.3.0] — 2026-05-06
 
 Agent ↔ user-data integration release. The conversational agent now
