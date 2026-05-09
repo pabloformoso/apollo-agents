@@ -107,6 +107,11 @@ class LiveEngineProtocol(Protocol):
     def set_crossfade_point(self, position_sec: float) -> str: ...
     def get_state(self) -> dict: ...
     def stop(self) -> None: ...
+    # v2.5.0.1 — surfaced so the WS handler can advance ``LiveEngineBrowser``
+    # when the browser reports a natural end-of-track. ``LiveEngineLocal``
+    # never needs this (its watchdog detects end-of-buffer directly), so the
+    # implementation falls back to a no-op.
+    def report_track_ended(self, track_id: str) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +328,17 @@ class LiveEngineLocal:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+
+    def report_track_ended(self, track_id: str) -> None:  # noqa: ARG002
+        """Protocol no-op for the local engine.
+
+        ``LiveEngineLocal`` detects end-of-track by reading the sounddevice
+        sample counter directly in ``_audio_callback`` / ``_watchdog_loop`` —
+        the browser-side ``ended`` notification is meaningless here. The
+        method is required by ``LiveEngineProtocol`` (so the WS handler
+        can call it without an isinstance check), but does nothing.
+        """
+        return None
 
     # ------------------------------------------------------------------
     # Audio callback (runs in sounddevice's low-latency thread)
@@ -670,6 +686,19 @@ class LiveEngineBrowser:
         message. Triggers ``approaching_crossfade``, ``crossfade_triggered``,
         and ``track_ended`` / ``session_ended`` events as the position
         crosses each threshold.
+
+        v2.5.0.1 endgame safeguard
+        --------------------------
+        The browser stops emitting ``playback_pos`` updates once natural
+        playback ends (the ``<audio>`` element fires ``ended`` and pauses,
+        which freezes ``currentTime``). If the watchdog never crosses the
+        crossfade threshold we'd be stuck on the last reported position
+        forever — the user observes "track 1 plays out, then silence". To
+        defend against that we synthesise a ``track_ended`` advance whenever
+        the reported position lands within the last 2 s of the track AND no
+        crossfade has fired yet. The dedicated browser ``ended`` listener
+        sends ``{type: track_ended}`` over WS for the same situation; the
+        two paths are independent so either one alone suffices.
         """
         with self._lock:
             if self._state == "idle" or self._idx >= len(self.playlist):
@@ -711,6 +740,87 @@ class LiveEngineBrowser:
                 self._emit(SESSION_ENDED)
                 with self._lock:
                     self._state = "idle"
+            return
+
+        # Endgame safeguard: if we're inside the last 2 s of the track and
+        # no crossfade has been triggered yet, force a ``track_ended``-style
+        # advance. This is a belt-and-braces complement to the explicit
+        # browser ``ended`` event — it catches the case where the
+        # ``playback_pos`` ping wins the race and arrives just before the
+        # browser gets a chance to emit its own ``track_ended`` message.
+        if (
+            not cf_triggered
+            and duration > 0
+            and self._reported_pos_sec >= max(0.0, duration - 2.0)
+        ):
+            self.report_track_ended(track_id or current_track.get("id", ""))
+
+    def report_track_ended(self, track_id: str) -> None:
+        """Advance the engine when the browser reports a natural ``ended``.
+
+        v2.5.0.1 — the browser's ``<audio>`` element fires ``ended`` when
+        natural playback finishes; the frontend forwards that as a
+        ``{type: track_ended}`` WS message. The WS handler invokes this
+        method, which advances the cursor to the next track (if any) or
+        ends the session.
+
+        Idempotent: stale pings for a track that's no longer current
+        (e.g. arriving right after a manual ``skip_track``) are ignored,
+        same as ``report_playback_pos``.
+        """
+        with self._lock:
+            if self._state == "idle" or self._idx >= len(self.playlist):
+                return
+            current_track = self.playlist[self._idx]
+            # Stale-ping guard. If track_id is empty we accept the message
+            # — the browser fallback path may not know the id.
+            if (
+                track_id
+                and current_track.get("id")
+                and track_id != current_track.get("id")
+            ):
+                return
+            idx = self._idx
+            next_idx = idx + 1
+            has_next = next_idx < len(self.playlist)
+            next_track = self.playlist[next_idx] if has_next else None
+            # Mark the current track as already-handled so a late
+            # ``playback_pos`` ping doesn't re-fire the safeguard.
+            self._cf_triggered = True
+
+        self._emit(TRACK_ENDED, track=current_track)
+        if has_next and next_track is not None:
+            self._emit_next_track(next_track)
+        else:
+            self._emit(SESSION_ENDED)
+            with self._lock:
+                self._state = "idle"
+
+    def _emit_next_track(self, next_track: dict) -> None:
+        """Advance the cursor and tell the browser to load the next track.
+
+        Used by ``report_track_ended`` (and the endgame safeguard) when we
+        need to advance without going through a full crossfade ramp. We
+        emit a ``stop_deck`` command first to tell the browser to release
+        the active deck (so the new track plays cleanly into the same
+        deck), then a ``load`` command for the new track plus the
+        ``track_started`` engine event.
+        """
+        with self._lock:
+            self._idx += 1
+            self._approached = False
+            self._cf_triggered = False
+            self._extend_sec = 0.0
+            self._reported_pos_sec = 0.0
+            self._state = "playing"
+
+        # Stop the active deck so its audio doesn't bleed into the new
+        # track (browser-side this releases the <audio> src).
+        self._emit_command("stop_deck")
+        # Tell the browser to load + play the new track in the active
+        # deck — same payload shape ``play()`` uses for the first track.
+        self._emit_command("load", track=next_track, position=0)
+        self._emit(TRACK_STARTED, track=next_track)
 
     def crossfade_now(self) -> str:
         """Trigger crossfade immediately, skipping the auto-timer."""

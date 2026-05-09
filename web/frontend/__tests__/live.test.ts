@@ -65,6 +65,7 @@ class FakeWebSocket {
 class FakeAudioElement {
   static nextPlayBehavior: "resolve" | "reject" = "resolve";
   static lastInstance: FakeAudioElement | null = null;
+  static instances: FakeAudioElement[] = [];
 
   src = "";
   currentTime = 0;
@@ -73,6 +74,8 @@ class FakeAudioElement {
   paused = true;
   preload = "auto";
   crossOrigin: string | null = null;
+  // Listener bus so the v2.5.0.1 tests can fire a real ``ended`` event.
+  _listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
   play = vi.fn(() => {
     if (FakeAudioElement.nextPlayBehavior === "reject") {
       const err = new Error("NotAllowedError: autoplay blocked") as Error & {
@@ -89,11 +92,23 @@ class FakeAudioElement {
   });
   load = vi.fn();
   removeAttribute = vi.fn();
-  addEventListener = vi.fn();
+  addEventListener = vi.fn(
+    (type: string, cb: (...args: unknown[]) => void) => {
+      (this._listeners[type] ||= []).push(cb);
+    },
+  );
   removeEventListener = vi.fn();
+
+  // Test helper — fire a registered listener.
+  dispatch(type: string) {
+    for (const cb of this._listeners[type] || []) {
+      cb();
+    }
+  }
 
   constructor() {
     FakeAudioElement.lastInstance = this;
+    FakeAudioElement.instances.push(this);
   }
 }
 
@@ -148,6 +163,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   FakeWebSocket.lastInstance = null;
   FakeAudioElement.lastInstance = null;
+  FakeAudioElement.instances = [];
   FakeAudioElement.nextPlayBehavior = "resolve";
 });
 
@@ -524,6 +540,207 @@ describe("useLiveSession", () => {
     });
     expect(playSpy.mock.calls.length).toBeGreaterThan(callsBefore);
     expect(result.current.autoplayBlocked).toBe(false);
+  });
+
+  // ── v2.5.0.1 — natural end-of-track must publish track_ended ────────────
+  it("publishes track_ended over WS when the active deck fires 'ended'", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-ended"));
+    await flushOpen();
+    const playlist = [
+      { id: "A", display_name: "A" },
+      { id: "B", display_name: "B" },
+    ];
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "live_state",
+        data: {
+          session_id: "sid-ended",
+          playlist,
+          engine_state: {
+            state: "playing",
+            position_sec: 0,
+            current_track: playlist[0],
+            next_track: playlist[1],
+            seconds_to_crossfade: 0,
+            playlist_remaining: 1,
+          },
+        },
+      });
+    });
+    // engine_command load must construct the deck (which registers the
+    // 'ended' listener) and then track_started locks in currentTrackId.
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: playlist[0],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: playlist[0],
+      });
+      // Let the awaited play() resolve.
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const fakeAudio = FakeAudioElement.lastInstance!;
+    expect(fakeAudio).not.toBeNull();
+    // Fire the natural ``ended`` event — the hook's listener should
+    // forward a synthetic ``track_ended`` WS message with the current
+    // track id.
+    act(() => {
+      fakeAudio.dispatch("ended");
+    });
+    const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
+    expect(sent).toContainEqual({ type: "track_ended", track_id: "A" });
+
+    // After backend processes that, it would emit track_started for "B".
+    // Verify the hook loads "B" into the active deck (sets src to its
+    // stream URL).
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "stop_deck",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: playlist[1],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: playlist[1],
+      });
+    });
+    expect(result.current.currentTrack?.id).toBe("B");
+  });
+
+  it("does not publish track_ended when the inactive deck fires 'ended'", async () => {
+    // Edge case: the previously-active deck fires 'ended' AFTER a
+    // crossfade has already swapped active to the other deck. The
+    // listener must guard on activeDeckRef === which to avoid posting
+    // a stale track_ended that the engine would process twice.
+    renderHook(() => useLiveSession("sid-ended-inactive"));
+    await flushOpen();
+    const playlist = [
+      { id: "A", display_name: "A" },
+      { id: "B", display_name: "B" },
+    ];
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "live_state",
+        data: {
+          session_id: "sid-ended-inactive",
+          playlist,
+          engine_state: {
+            state: "playing",
+            position_sec: 0,
+            current_track: playlist[0],
+            next_track: playlist[1],
+            seconds_to_crossfade: 0,
+            playlist_remaining: 1,
+          },
+        },
+      });
+    });
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: playlist[0],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: playlist[0],
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    // Crossfade flips active deck to "b".
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "crossfade",
+        to_track: playlist[1],
+        crossfade_sec: 1,
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    // The deck-A instance is the FIRST element constructed.
+    const deckA = FakeAudioElement.instances[0];
+    const sentBefore = FakeWebSocket.lastInstance!.sent.length;
+    act(() => {
+      deckA.dispatch("ended");
+    });
+    const sentAfter = FakeWebSocket.lastInstance!.sent
+      .slice(sentBefore)
+      .map((s) => JSON.parse(s));
+    // No track_ended should have been posted by the inactive deck.
+    expect(
+      sentAfter.find((m: { type: string }) => m.type === "track_ended"),
+    ).toBeUndefined();
+  });
+
+  it("loads the new track via engine_command 'load' after track_ended advances the engine", async () => {
+    // Verify the full natural-end → next-track path WITHOUT any prior
+    // approaching_crossfade. This is the exact failure mode the user
+    // hit in v2.5.0: track 1 ends, no crossfade, no next track.
+    const { result } = renderHook(() => useLiveSession("sid-flow"));
+    await flushOpen();
+    const playlist = [
+      { id: "A", display_name: "A" },
+      { id: "B", display_name: "B" },
+    ];
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "live_state",
+        data: {
+          session_id: "sid-flow",
+          playlist,
+          engine_state: {
+            state: "playing",
+            position_sec: 0,
+            current_track: playlist[0],
+            next_track: playlist[1],
+            seconds_to_crossfade: 0,
+            playlist_remaining: 1,
+          },
+        },
+      });
+    });
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: playlist[0],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: playlist[0],
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    // Backend processes track_ended → emits stop_deck + load + track_started
+    // for B (no crossfade_triggered in between).
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_ended",
+        track: playlist[0],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "stop_deck",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: playlist[1],
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: playlist[1],
+      });
+    });
+    expect(result.current.currentTrack?.id).toBe("B");
+    expect(result.current.state).toBe("playing");
   });
 });
 

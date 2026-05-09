@@ -25,19 +25,45 @@ function formatElapsed(ms: number): string {
 // External "wall-clock" store — `useSyncExternalStore` is the canonical
 // React 19 way to subscribe to a ticking external value without
 // `setState`-in-`useEffect` (flagged by `react-hooks/set-state-in-effect`).
-// Each subscribe starts a 1 s interval; React reads `Date.now()` on every
-// render that depends on it.
+//
+// CRITICAL: `getSnapshot` MUST return a referentially stable value between
+// React render passes — React calls it during every render to check whether
+// the store changed, and if it returns a *new* number on every call (e.g.
+// raw `Date.now()`), React thinks the store keeps changing and re-renders
+// forever. We cache the result at 1 s resolution and only invalidate the
+// cache when ``subscribeSecond``'s interval fires — that gives the UI a
+// 1 Hz update for the elapsed counter without risking an infinite loop.
+let _cachedSecondMs: number | null = null;
+
+function _refreshCachedSecondMs(): number {
+  const ms = Math.floor(Date.now() / 1000) * 1000;
+  _cachedSecondMs = ms;
+  return ms;
+}
+
 function subscribeSecond(onChange: () => void): () => void {
-  const id = setInterval(onChange, 1000);
+  const id = setInterval(() => {
+    _refreshCachedSecondMs();
+    onChange();
+  }, 1000);
   return () => clearInterval(id);
 }
 function subscribeNoop(): () => void {
+  // Even when there's no subscription we MUST keep the snapshot stable:
+  // initialise the cache once (lazily on first read) so re-renders of
+  // ``AgentStream`` while idle don't churn.
   return () => {};
 }
 function getSecondNow(): number {
-  return Date.now();
+  if (_cachedSecondMs === null) {
+    return _refreshCachedSecondMs();
+  }
+  return _cachedSecondMs;
 }
 function getServerSecondNow(): number {
+  // Server-render snapshot must also be stable across calls. 0 is a safe
+  // sentinel — the elapsed counter only renders when buildStartedAt is set
+  // (client-only path).
   return 0;
 }
 

@@ -652,6 +652,15 @@ async def live_session_ws(
                 # report_playback_pos is sync but small (no I/O), so we can
                 # call it directly on the event loop without to_thread.
                 engine.report_playback_pos(tid, current_time)
+            elif msg_type == "track_ended":
+                # v2.5.0.1 — the browser fires ``ended`` on its <audio>
+                # element when natural playback finishes and the
+                # ``setInterval`` polling stops advancing ``currentTime``.
+                # The hook forwards that as a synthetic ``track_ended``
+                # message so the engine can advance even if the
+                # ``playback_pos`` watchdog never crossed the threshold.
+                tid = str(msg.get("track_id", ""))
+                engine.report_track_ended(tid)
             elif msg_type in {"user_msg", "command"}:
                 text = msg.get("text") or msg.get("content") or ""
                 await command_queue.put(
