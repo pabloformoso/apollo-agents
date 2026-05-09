@@ -677,7 +677,15 @@ class LiveEngineBrowser:
         first = self.playlist[0]
         # Tell the browser to load + play the first track.
         self._emit_command("load", track=first, position=0)
-        self._emit(TRACK_STARTED, track=first)
+        # v2.5.2 — include ``cf_point_sec`` so the frontend can drive a
+        # live-ticking countdown from the deck's ``currentTime`` instead of
+        # relying on the single ``approaching_crossfade`` emit (which was
+        # the v2.5.1 source of the "Crossfade in: 0s stuck" bug).
+        self._emit(
+            TRACK_STARTED,
+            track=first,
+            cf_point_sec=round(self._cf_point_seconds(first), 2),
+        )
 
     def report_playback_pos(self, track_id: str, current_time: float) -> None:
         """Update playback position from a browser ping.
@@ -729,6 +737,11 @@ class LiveEngineBrowser:
                 track=current_track,
                 next_track=next_track,
                 seconds_remaining=round(max(0.0, secs_to_cf), 1),
+                # v2.5.2 — authoritative crossfade target time so the
+                # frontend can derive a live-ticking countdown from the
+                # deck's ``currentTime`` (rather than freezing on the
+                # single emit).
+                cf_point_sec=round(cf_sec, 2),
             )
 
         if not cf_triggered and self._reported_pos_sec >= cf_sec:
@@ -820,7 +833,11 @@ class LiveEngineBrowser:
         # Tell the browser to load + play the new track in the active
         # deck — same payload shape ``play()`` uses for the first track.
         self._emit_command("load", track=next_track, position=0)
-        self._emit(TRACK_STARTED, track=next_track)
+        self._emit(
+            TRACK_STARTED,
+            track=next_track,
+            cf_point_sec=round(self._cf_point_seconds(next_track), 2),
+        )
 
     def crossfade_now(self) -> str:
         """Trigger crossfade immediately, skipping the auto-timer."""
@@ -844,7 +861,18 @@ class LiveEngineBrowser:
         return f"Crossfade delayed by {seconds}s."
 
     def skip_track(self) -> str:
-        """Hard-cut to the next track without crossfade."""
+        """Hard-cut to the next track without a crossfade ramp.
+
+        Skip is intentionally a hard cut: it's a user-initiated immediate
+        response (button press / agent command), and the audible delay of
+        a crossfade ramp would defeat that purpose. For a *ramped* skip
+        (fast crossfade), use :meth:`crossfade_now` instead — the agent
+        and the UI both have access to that method.
+
+        See PR #v2.5.2a for the design discussion behind keeping skip as
+        a hard cut while making the natural-end-of-track path always run
+        a full crossfade ramp.
+        """
         with self._lock:
             next_idx = self._idx + 1
             if next_idx >= len(self.playlist):
@@ -858,7 +886,11 @@ class LiveEngineBrowser:
             new_track = self.playlist[next_idx]
         # Tell the browser to switch decks immediately.
         self._emit_command("skip", track=new_track, position=0)
-        self._emit(TRACK_STARTED, track=new_track)
+        self._emit(
+            TRACK_STARTED,
+            track=new_track,
+            cf_point_sec=round(self._cf_point_seconds(new_track), 2),
+        )
         return f"Skipped to '{new_track.get('display_name', '?')}'."
 
     def queue_swap(self, position: int, track_id: str) -> str:
@@ -952,13 +984,21 @@ class LiveEngineBrowser:
         crossfade ramp is what produces the audible blend over
         ``crossfade_sec`` seconds — the engine doesn't need to model the
         ramp itself because no audio buffer math happens here).
+
+        v2.5.2 — advance ``_idx`` and re-arm the per-track watchdog flags so
+        the new current track's ``approaching_crossfade`` /
+        ``crossfade_triggered`` thresholds fire afresh. The state machine
+        leaves ``crossfading`` immediately because the engine doesn't model
+        the ramp itself; the audible ramp is fully owned by the browser.
         """
         with self._lock:
-            self._cf_triggered = True
-            self._state = "crossfading"
             self._idx += 1
+            # Re-arm watchdog edges for the new current track. The previous
+            # ``_cf_triggered`` flag was scoped to ``from_track`` — a new
+            # crossfade for ``to_track`` must be allowed when we cross its
+            # threshold later.
             self._approached = False
-            self._cf_triggered = False  # re-arm for the new current track
+            self._cf_triggered = False
             self._extend_sec = 0.0
             self._reported_pos_sec = 0.0
             self._state = "playing"
@@ -969,7 +1009,11 @@ class LiveEngineBrowser:
         self._emit(CROSSFADE_TRIGGERED, from_track=from_track, to_track=to_track)
         self._emit(CROSSFADE_FINISHED, from_track=from_track, to_track=to_track)
         self._emit(TRACK_ENDED, track=from_track)
-        self._emit(TRACK_STARTED, track=to_track)
+        self._emit(
+            TRACK_STARTED,
+            track=to_track,
+            cf_point_sec=round(self._cf_point_seconds(to_track), 2),
+        )
 
     def _cf_point_seconds(self, track: dict | None) -> float:
         if not track:

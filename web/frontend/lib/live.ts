@@ -157,6 +157,15 @@ interface ServerEngineEvent {
   from_track?: LiveTrackSummary;
   to_track?: LiveTrackSummary;
   seconds_remaining?: number;
+  /**
+   * v2.5.2 — authoritative crossfade-trigger position (seconds within the
+   * track). Carried by ``track_started`` and ``approaching_crossfade`` so
+   * the frontend can derive a live-ticking countdown from the deck's
+   * ``currentTime`` instead of freezing on the single-emit
+   * ``seconds_remaining`` value. ``null`` / undefined when the engine
+   * hasn't computed a target yet (e.g. last track, or duration unknown).
+   */
+  cf_point_sec?: number | null;
 }
 
 interface ServerLiveMessage {
@@ -221,7 +230,6 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const [currentTrack, setCurrentTrack] = useState<LiveTrackSummary | null>(null);
   const [explicitNextTrack, setExplicitNextTrack] = useState<LiveTrackSummary | null>(null);
   const [playlist, setPlaylist] = useState<LiveTrackSummary[]>([]);
-  const [secondsToCrossfade, setSecondsToCrossfade] = useState(0);
   const [playlistRemaining, setPlaylistRemaining] = useState(0);
   const [log, setLog] = useState<LiveCommandLogEntry[]>([]);
   const [djChat, setDjChat] = useState<DjChatEntry[]>([]);
@@ -229,6 +237,15 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [currentTrackTime, setCurrentTrackTime] = useState(0);
   const [currentTrackDuration, setCurrentTrackDuration] = useState(0);
+  // v2.5.2 — authoritative crossfade-trigger time within the active deck's
+  // track, populated by ``track_started`` / ``approaching_crossfade`` events
+  // (the engine sends ``cf_point_sec``). The displayed countdown is
+  // derived from this minus the live ``currentTrackTime`` so it ticks down
+  // every 250 ms instead of freezing on a single emit. Falls back to a
+  // legacy seconds_remaining value when the server hasn't sent
+  // ``cf_point_sec`` yet (older backend).
+  const [cfTargetSec, setCfTargetSec] = useState<number | null>(null);
+  const [legacySecsToCf, setLegacySecsToCf] = useState<number | null>(null);
 
   // Derive next track from the playlist + current track position. This is
   // robust to event-ordering races where ``track_started`` fires before any
@@ -247,6 +264,31 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     if (idx < 0) return explicitNextTrack;
     return idx + 1 < playlist.length ? playlist[idx + 1] : null;
   }, [currentTrack, playlist, explicitNextTrack]);
+
+  // v2.5.2 — live-ticking countdown.
+  //
+  // Bug A1 (v2.5.1): the backend's ``approaching_crossfade`` event fires
+  // exactly once when crossing the warn threshold, so the previous code
+  // (which set ``secondsToCrossfade`` from the event payload alone) was
+  // frozen at whatever value arrived first — typically 30 s, sometimes 0
+  // when the threshold raced with the trigger. The fix derives the
+  // displayed countdown from ``cfTargetSec - currentTrackTime`` so it
+  // ticks down every 250 ms (matching the playback_pos interval).
+  //
+  // Fallback chain:
+  //   1. Authoritative: ``cfTargetSec - currentTrackTime``.
+  //   2. Legacy server snapshot (``seconds_to_crossfade`` from
+  //      ``live_state`` or ``seconds_remaining`` from
+  //      ``approaching_crossfade``) when an older backend doesn't yet
+  //      send ``cf_point_sec``.
+  //   3. Zero (no crossfade scheduled — last track or duration unknown).
+  const secondsToCrossfade = useMemo<number>(() => {
+    if (cfTargetSec !== null && cfTargetSec > 0) {
+      return Math.max(0, cfTargetSec - currentTrackTime);
+    }
+    if (legacySecsToCf !== null) return Math.max(0, legacySecsToCf);
+    return 0;
+  }, [cfTargetSec, currentTrackTime, legacySecsToCf]);
 
   const appendLog = useCallback((entry: LiveCommandLogEntry) => {
     setLog((l) => [...l, entry]);
@@ -487,7 +529,11 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         setState(es.state);
         if (es.current_track) setCurrentTrack(es.current_track);
         if (es.next_track) setExplicitNextTrack(es.next_track);
-        setSecondsToCrossfade(es.seconds_to_crossfade);
+        // Initial hint — until a ``track_started`` (or
+        // ``approaching_crossfade``) lands with ``cf_point_sec``, we use
+        // the engine's snapshot value. Once the engine sends an
+        // authoritative cf target, the live-ticking derivation takes over.
+        setLegacySecsToCf(es.seconds_to_crossfade);
         setPlaylistRemaining(es.playlist_remaining);
         break;
       }
@@ -498,13 +544,28 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
           setState("playing");
           setCurrentTrackTime(0);
           setCurrentTrackDuration(0);
+          // v2.5.2 — engine emits the authoritative crossfade-trigger
+          // time so the countdown can tick live from the deck's
+          // ``currentTime``. ``cf_point_sec`` may be null when the engine
+          // is on the final track (no successor — no crossfade).
+          if (typeof evt.cf_point_sec === "number") {
+            setCfTargetSec(evt.cf_point_sec);
+          } else {
+            setCfTargetSec(null);
+          }
+          // Reset legacy fallback so a stale seconds_remaining from the
+          // previous track doesn't bleed into the new one's countdown.
+          setLegacySecsToCf(null);
         }
         break;
       }
       case "approaching_crossfade": {
         if (evt.next_track) setExplicitNextTrack(evt.next_track);
+        if (typeof evt.cf_point_sec === "number") {
+          setCfTargetSec(evt.cf_point_sec);
+        }
         if (typeof evt.seconds_remaining === "number") {
-          setSecondsToCrossfade(evt.seconds_remaining);
+          setLegacySecsToCf(evt.seconds_remaining);
         }
         break;
       }
@@ -518,6 +579,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
           currentTrackIdRef.current = evt.to_track.id;
           setCurrentTrackTime(0);
           setCurrentTrackDuration(0);
+          // ``track_started`` (which carries the new ``cf_point_sec``)
+          // follows this event, so just clear the previous target.
+          setCfTargetSec(null);
+          setLegacySecsToCf(null);
         }
         break;
       case "track_ended":
@@ -526,6 +591,8 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       case "session_ended":
         setState("ended");
         setExplicitNextTrack(null);
+        setCfTargetSec(null);
+        setLegacySecsToCf(null);
         // Stop audio elements and let the user navigate away.
         for (const ref of [deckARef, deckBRef]) {
           const el = ref.current;

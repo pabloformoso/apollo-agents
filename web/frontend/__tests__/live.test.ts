@@ -742,6 +742,234 @@ describe("useLiveSession", () => {
     expect(result.current.currentTrack?.id).toBe("B");
     expect(result.current.state).toBe("playing");
   });
+
+  // ── v2.5.2 — Bug A1 regression: live-ticking countdown ─────────────────
+  it("seeds secondsToCrossfade from track_started's cf_point_sec", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cf-1"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: { id: "A", display_name: "A" },
+        // 60 s track, default cf_sec=12 + 5 buffer ⇒ cf_point at 43 s.
+        cf_point_sec: 43,
+      });
+    });
+    // currentTrackTime is 0 right after track_started, so countdown is the
+    // full cf_point_sec.
+    expect(result.current.secondsToCrossfade).toBe(43);
+  });
+
+  it("ticks secondsToCrossfade down as the deck's currentTime advances", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveSession("sid-cf-2"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5);
+      });
+      const playlist = [{ id: "A", display_name: "A" }];
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: "sid-cf-2",
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: null,
+              seconds_to_crossfade: 0,
+              playlist_remaining: 0,
+            },
+          },
+        });
+        // Construct the deck via engine_command load.
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        // track_started carries the authoritative cf_point.
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+          cf_point_sec: 30,
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // Initial countdown: currentTrackTime=0, target=30 ⇒ 30 s.
+      expect(result.current.secondsToCrossfade).toBe(30);
+      // Advance the deck's currentTime by 5 s and tick the playback_pos
+      // interval.
+      const fakeAudio = FakeAudioElement.lastInstance!;
+      fakeAudio.currentTime = 5;
+      fakeAudio.duration = 60;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+      // currentTrackTime now 5 ⇒ countdown 30 - 5 = 25.
+      expect(result.current.secondsToCrossfade).toBe(25);
+      // Tick another 10 s.
+      fakeAudio.currentTime = 15;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+      expect(result.current.secondsToCrossfade).toBe(15);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("clamps secondsToCrossfade to 0 once the deck passes cf_point_sec", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveSession("sid-cf-3"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5);
+      });
+      const playlist = [{ id: "A", display_name: "A" }];
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: "sid-cf-3",
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: null,
+              seconds_to_crossfade: 0,
+              playlist_remaining: 0,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+          cf_point_sec: 10,
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const fakeAudio = FakeAudioElement.lastInstance!;
+      fakeAudio.currentTime = 25; // past cf_point
+      fakeAudio.duration = 60;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+      expect(result.current.secondsToCrossfade).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("approaching_crossfade refreshes cf_point_sec mid-track (extend support)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveSession("sid-cf-4"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5);
+      });
+      const playlist = [
+        { id: "A", display_name: "A" },
+        { id: "B", display_name: "B" },
+      ];
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: "sid-cf-4",
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+          cf_point_sec: 43,
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // Approaching event arrives mid-track with an UPDATED cf_point_sec
+      // (e.g. an extend pushed the trigger back to 53 s).
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "approaching_crossfade",
+          track: playlist[0],
+          next_track: playlist[1],
+          seconds_remaining: 30,
+          cf_point_sec: 53,
+        });
+      });
+      // Tick a frame so the memo re-runs.
+      const fakeAudio = FakeAudioElement.lastInstance!;
+      fakeAudio.currentTime = 23;
+      fakeAudio.duration = 60;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+      // 53 - 23 = 30 (matches the extend-bumped trigger).
+      expect(result.current.secondsToCrossfade).toBe(30);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("falls back to seconds_remaining when an older backend omits cf_point_sec", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cf-5"));
+    await flushOpen();
+    // No track_started yet — only an approaching_crossfade with the
+    // legacy seconds_remaining field. The hook must surface that value
+    // so old backends still produce a non-zero countdown.
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "approaching_crossfade",
+        seconds_remaining: 25,
+      });
+    });
+    expect(result.current.secondsToCrossfade).toBe(25);
+  });
+
+  it("resets secondsToCrossfade to 0 on session_ended", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cf-6"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: { id: "A", display_name: "A" },
+        cf_point_sec: 43,
+      });
+    });
+    expect(result.current.secondsToCrossfade).toBe(43);
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({ type: "session_ended" });
+    });
+    expect(result.current.secondsToCrossfade).toBe(0);
+  });
 });
 
 describe("useIsLiveActive", () => {
