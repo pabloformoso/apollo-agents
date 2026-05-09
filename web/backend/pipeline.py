@@ -821,6 +821,203 @@ async def load_memory(genre: str, ctx: dict) -> str:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# v2.5.2 perception buffer + audience-request batcher (live phase only)
+# ---------------------------------------------------------------------------
+
+# Synthesis thresholds. Tuned to match the v2.5.2 plan defaults:
+#   - 6 dB shift between consecutive windows triggers environment_changed
+#   - At most one synthetic event per 30 s
+#   - Audience requests batch with a 5 s collection window
+#   - At most one audience_request_batch per 30 s
+PERCEPTION_BUFFER_LEN = 10
+PERCEPTION_RMS_DELTA_DB = 6.0
+PERCEPTION_VOICE_DROP = 0.5
+ENVIRONMENT_CHANGED_RATELIMIT_SEC = 30.0
+AUDIENCE_BATCH_WINDOW_SEC = 5.0
+AUDIENCE_RATELIMIT_SEC = 30.0
+
+
+def _perception_window_means(buffer: list[dict]) -> tuple[float, float | None]:
+    """Return (rms_mean, voice_mean) for the ring buffer. Voice is None
+    when no sample carries a numeric ``voice_likelihood``."""
+    if not buffer:
+        return (0.0, None)
+    rms_vals = [float(s.get("rms_db", 0.0)) for s in buffer]
+    rms_mean = sum(rms_vals) / len(rms_vals)
+    voice_vals = [
+        float(s["voice_likelihood"])
+        for s in buffer
+        if s.get("voice_likelihood") is not None
+    ]
+    voice_mean = sum(voice_vals) / len(voice_vals) if voice_vals else None
+    return (rms_mean, voice_mean)
+
+
+def _detect_environment_change(
+    prev_means: tuple[float, float | None],
+    new_means: tuple[float, float | None],
+) -> dict | None:
+    """Return a synthetic event payload when the window means shift past
+    the v2.5.2 thresholds, otherwise None.
+
+    A single delta crossing is enough — we look at RMS dB delta first
+    (most reliable), then a voice-likelihood drop as a secondary trigger.
+    """
+    prev_rms, prev_voice = prev_means
+    new_rms, new_voice = new_means
+    rms_delta = new_rms - prev_rms
+    if abs(rms_delta) >= PERCEPTION_RMS_DELTA_DB:
+        return {
+            "type": "environment_changed",
+            "rms_db_delta": rms_delta,
+            "rms_db_mean": new_rms,
+            "voice_likelihood": new_voice,
+        }
+    if (
+        prev_voice is not None
+        and new_voice is not None
+        and prev_voice - new_voice >= PERCEPTION_VOICE_DROP
+    ):
+        return {
+            "type": "environment_changed",
+            "rms_db_delta": rms_delta,
+            "rms_db_mean": new_rms,
+            "voice_likelihood": new_voice,
+            "voice_likelihood_delta": new_voice - prev_voice,
+        }
+    return None
+
+
+async def _live_relay(
+    source_queue: asyncio.Queue,
+    inner_queue: asyncio.Queue,
+    ctx: dict,
+    *,
+    now: Callable[[], float] = time.monotonic,
+) -> None:
+    """Bridge the WS-side queue into the agent loop, synthesising
+    ``environment_changed`` and ``audience_request_batch`` events.
+
+    All non-perception / non-audience items pass through verbatim so the
+    agent loop keeps seeing engine events + control messages in order.
+    """
+    perception_buffer: list[dict] = ctx.setdefault("perception_buffer", [])
+    last_env_emit_ts: float | None = None
+    # Baseline window mean — captured once the buffer first reaches a
+    # comparable size, then refreshed every time we emit an event so
+    # subsequent deltas measure against the new "normal" rather than the
+    # original silence floor. This is the per-sample equivalent of "two
+    # consecutive 20-second windows": each new sample shifts the active
+    # mean and we compare against the snapshot taken at the last reset.
+    baseline_means: tuple[float, float | None] | None = None
+    BASELINE_MIN_SAMPLES = 3
+
+    pending_requests: list[dict] = []
+    last_audience_emit_ts: float | None = None
+    audience_flush_at: float | None = None
+
+    async def flush_audience() -> None:
+        nonlocal pending_requests, last_audience_emit_ts, audience_flush_at
+        if not pending_requests:
+            audience_flush_at = None
+            return
+        cur = now()
+        if (
+            last_audience_emit_ts is not None
+            and (cur - last_audience_emit_ts) < AUDIENCE_RATELIMIT_SEC
+        ):
+            # Drop this batch — the agent is still in the cooldown for the
+            # previous one. We log on the context for tests / debugging.
+            ctx.setdefault("audience_dropped", []).extend(pending_requests)
+            pending_requests = []
+            audience_flush_at = None
+            return
+        await inner_queue.put(
+            {
+                "type": "audience_request_batch",
+                "requests": list(pending_requests),
+            }
+        )
+        last_audience_emit_ts = cur
+        pending_requests = []
+        audience_flush_at = None
+
+    while True:
+        # Compute the next deadline — either the audience batch flush or
+        # an indefinite wait. We use ``asyncio.wait_for`` with a short
+        # timeout so flushes happen even when the source queue is idle.
+        if audience_flush_at is not None:
+            timeout = max(0.0, audience_flush_at - now())
+        else:
+            timeout = None
+
+        try:
+            if timeout is None:
+                item = await source_queue.get()
+            else:
+                item = await asyncio.wait_for(source_queue.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await flush_audience()
+            continue
+
+        item_type = item.get("type") if isinstance(item, dict) else None
+
+        if item_type == "perception_sample":
+            perception_buffer.append(item)
+            if len(perception_buffer) > PERCEPTION_BUFFER_LEN:
+                # Drop oldest — keep last N samples for the window.
+                del perception_buffer[: len(perception_buffer) - PERCEPTION_BUFFER_LEN]
+            new_means = _perception_window_means(perception_buffer)
+            if (
+                baseline_means is None
+                and len(perception_buffer) >= BASELINE_MIN_SAMPLES
+            ):
+                # First time the window has settled — anchor here.
+                baseline_means = new_means
+            elif baseline_means is not None:
+                synthetic = _detect_environment_change(baseline_means, new_means)
+                if synthetic:
+                    cur = now()
+                    if (
+                        last_env_emit_ts is None
+                        or (cur - last_env_emit_ts)
+                        >= ENVIRONMENT_CHANGED_RATELIMIT_SEC
+                    ):
+                        await inner_queue.put(synthetic)
+                        last_env_emit_ts = cur
+                        # Reset the baseline so we measure the *next* shift
+                        # against the new normal — otherwise we'd keep
+                        # firing while the room stays loud.
+                        baseline_means = new_means
+            continue
+
+        if item_type == "user_msg":
+            # An audience request — buffer for the batch window so a burst
+            # of asks generates a single LLM call. Empty / control commands
+            # ("skip", "stay", "next", "quit") still fall through as
+            # user_msg so the existing engine wiring keeps working — but
+            # ALSO trigger a flush so the agent doesn't see a stale batch.
+            text = (item.get("text") or "").strip()
+            text_l = text.lower()
+            CONTROL_TOKENS = {"skip", "next", "stay", "longer", "more", "quit"}
+            if text_l in CONTROL_TOKENS or not text:
+                await inner_queue.put(item)
+                continue
+            pending_requests.append(
+                {
+                    "text": text,
+                    "timestamp_ms": item.get("timestamp_ms"),
+                }
+            )
+            if audience_flush_at is None:
+                audience_flush_at = now() + AUDIENCE_BATCH_WINDOW_SEC
+            continue
+
+        # Engine events / quit / anything else: pass through verbatim.
+        await inner_queue.put(item)
+
+
 async def phase_live(
     playlist: list[dict],
     ctx: dict,
@@ -836,7 +1033,12 @@ async def phase_live(
 
     ``emit`` is the same async send-to-WS callable used by the planning
     phases. ``command_queue`` is an :class:`asyncio.Queue` that the WS
-    handler fills with engine events + user commands.
+    handler fills with engine events + user commands + perception samples.
+
+    v2.5.2: a relay coroutine sits between the WS-side queue and the agent
+    loop, maintaining the perception buffer and batching audience requests
+    so the LiveDJ loop sees synthesised ``environment_changed`` /
+    ``audience_request_batch`` events instead of raw ticks.
 
     Returns when the playlist is exhausted (``session_ended`` event), the
     user sends a quit command, or the queue is closed by the WS handler
@@ -844,12 +1046,28 @@ async def phase_live(
     """
     from agent import live_dj  # noqa: PLC0415 — circular import guard
 
+    # Hydrate the agent context with the v2.5.2 buffers + emitter so the
+    # tools (get_perception_window, emit_chat) and the relay all share state.
+    ctx.setdefault("perception_buffer", [])
+    ctx["_event_emitter"] = emit
+
+    inner_queue: asyncio.Queue = asyncio.Queue()
+    relay_task = asyncio.create_task(
+        _live_relay(command_queue, inner_queue, ctx)
+    )
+
     engine.play(playlist)
     try:
         await live_dj.run_live_session_async(
-            playlist, ctx, engine, emit, command_queue
+            playlist, ctx, engine, emit, inner_queue
         )
     finally:
+        relay_task.cancel()
+        try:
+            await relay_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
+        ctx.pop("_event_emitter", None)
         engine.stop()
 
 

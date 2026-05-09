@@ -1992,6 +1992,243 @@ def get_favorite_tracks(context_variables: dict, genre: str | None = None) -> st
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# v2.5.2 — Live DJ improvisation tools
+#
+# These three tools turn the LiveDJ from a queue-executor into a real DJ:
+#   - get_perception_window: read the last 30 s of mic perception samples
+#     so the agent can correlate "the room got louder" with track choice.
+#   - pick_next_track: search the FULL catalog (not just the initial
+#     queue) by BPM range / key / mood. The agent uses this to swap in
+#     tracks that the planner didn't pre-select.
+#   - emit_chat: publish a `dj_chat` event over the WS so the LiveStage
+#     chat panel surfaces a polite reply ("noted, but staying course").
+# ---------------------------------------------------------------------------
+
+
+def _mood_match(track: dict, mood: str) -> bool:
+    """Return True when ``mood`` (case-insensitive) appears in any of the
+    track's free-text fields. Used by ``pick_next_track`` for soft mood
+    biasing — the planner already pre-filters by genre, so this is just
+    a fuzzy contains-style search.
+    """
+    if not mood:
+        return True
+    needle = mood.strip().lower()
+    if not needle:
+        return True
+    haystack_parts: list[str] = []
+    for k in ("display_name", "genre", "genre_folder", "mood", "tags"):
+        v = track.get(k)
+        if isinstance(v, str):
+            haystack_parts.append(v.lower())
+        elif isinstance(v, list):
+            haystack_parts.extend(str(x).lower() for x in v)
+    suno = track.get("suno")
+    if isinstance(suno, dict):
+        for k in ("tags", "prompt"):
+            v = suno.get(k)
+            if isinstance(v, str):
+                haystack_parts.append(v.lower())
+            elif isinstance(v, list):
+                haystack_parts.extend(str(x).lower() for x in v)
+    return any(needle in part for part in haystack_parts)
+
+
+def _format_duration(duration_sec: float | int | None) -> str:
+    if duration_sec is None:
+        return "?"
+    try:
+        d = float(duration_sec)
+    except (TypeError, ValueError):
+        return "?"
+    if d <= 0:
+        return "?"
+    minutes = int(d // 60)
+    seconds = int(d - minutes * 60)
+    return f"{minutes}:{seconds:02d}"
+
+
+def get_perception_window(context_variables: dict) -> str:
+    """Summarise the last ~30 s of mic perception samples.
+
+    Reads ``context_variables['perception_buffer']`` — populated by the
+    web pipeline's ``phase_live`` from samples published by the browser
+    (raw audio never leaves the browser; only RMS / onset density / VAD
+    likelihood). Returns mean & max RMS for the last 15 samples (≈30 s
+    at the default 2 s publish interval), the delta vs the session-wide
+    average, and a voice likelihood mean when a VAD payload is present.
+
+    Use to confirm an environment_changed event before reacting, or to
+    poll the room when no synthetic event has fired in a while.
+    """
+    buf = context_variables.get("perception_buffer") or []
+    if not buf:
+        return "No perception data yet."
+    recent = buf[-15:]
+
+    def _mean(values: list[float]) -> float:
+        return sum(values) / len(values) if values else 0.0
+
+    rms_recent = [float(s.get("rms_db", 0.0)) for s in recent]
+    rms_session = [float(s.get("rms_db", 0.0)) for s in buf]
+    rms_mean = _mean(rms_recent)
+    rms_max = max(rms_recent) if rms_recent else 0.0
+    rms_session_mean = _mean(rms_session)
+
+    voice_recent = [
+        float(s["voice_likelihood"]) for s in recent
+        if s.get("voice_likelihood") is not None
+    ]
+    voice_str = (
+        f"{_mean(voice_recent):.2f}" if voice_recent else "N/A"
+    )
+
+    return (
+        "Perception window (last 30s):\n"
+        f"  rms_db: mean={rms_mean:.1f}, max={rms_max:.1f}, "
+        f"delta vs session={rms_mean - rms_session_mean:+.1f}\n"
+        f"  voice_likelihood: mean={voice_str}\n"
+        f"  samples: {len(recent)}"
+    )
+
+
+def pick_next_track(
+    bpm_min: float,
+    bpm_max: float,
+    context_variables: dict,
+    key: str | None = None,
+    mood: str | None = None,
+) -> str:
+    """Search the FULL catalog for tracks matching BPM range / key / mood.
+
+    Returns up to 5 candidates as a markdown table. The agent then picks
+    one and feeds it to ``queue_swap`` or extends the queue with it. This
+    is what makes the planner's playlist a guidance instead of a contract
+    — the LiveDJ can pull anything from the catalog when the moment calls
+    for it.
+
+    Args:
+        bpm_min: Minimum BPM (inclusive).
+        bpm_max: Maximum BPM (inclusive).
+        key: Optional Camelot key to prefer (e.g. "9A"). Out-of-key
+            matches are still returned but ranked below.
+        mood: Optional free-text mood — fuzzy matched against the
+            track's display_name / genre / tags / suno prompt.
+    """
+    # Lazy import of the backend pipeline — agent/tools.py is imported by
+    # the web backend itself, so eager import would cycle. Pattern set up
+    # in v2.3.0 for tools that read backend state.
+    try:
+        from web.backend import pipeline  # noqa: PLC0415
+        catalog, _ = pipeline.load_catalog(None)
+    except Exception:  # noqa: BLE001 — fall back to direct catalog read
+        try:
+            with open(_CATALOG_PATH, "r", encoding="utf-8") as fh:
+                catalog = json.load(fh).get("tracks", [])
+        except Exception:  # noqa: BLE001
+            return "Catalog unavailable."
+
+    try:
+        bpm_lo = float(bpm_min)
+        bpm_hi = float(bpm_max)
+    except (TypeError, ValueError):
+        return "bpm_min and bpm_max must be numeric."
+    if bpm_lo > bpm_hi:
+        bpm_lo, bpm_hi = bpm_hi, bpm_lo
+
+    matches: list[dict] = []
+    for t in catalog:
+        bpm = t.get("bpm")
+        if not isinstance(bpm, (int, float)):
+            continue
+        if not (bpm_lo <= float(bpm) <= bpm_hi):
+            continue
+        if key:
+            # When a key is requested but the track has none, exclude — the
+            # agent can re-call without `key` if it wants any match.
+            tk = t.get("camelot_key")
+            if not tk:
+                continue
+        if not _mood_match(t, mood or ""):
+            continue
+        matches.append(t)
+
+    if not matches:
+        crit = (
+            f"bpm=[{bpm_lo:g}, {bpm_hi:g}]"
+            + (f", key={key}" if key else "")
+            + (f", mood={mood}" if mood else "")
+        )
+        return f"No tracks in catalog matching {crit}."
+
+    mid_bpm = (bpm_lo + bpm_hi) / 2
+    matches.sort(
+        key=lambda t: (
+            0 if (key and t.get("camelot_key") == key) else 1,
+            abs(float(t.get("bpm") or 0) - mid_bpm),
+        )
+    )
+    top = matches[:5]
+
+    lines = [
+        "| id | display_name | bpm | key | duration |",
+        "|---|---|---|---|---|",
+    ]
+    for t in top:
+        lines.append(
+            f"| {t.get('id','?')} | {t.get('display_name','?')} | "
+            f"{t.get('bpm','?')} | {t.get('camelot_key','?')} | "
+            f"{_format_duration(t.get('duration_sec'))} |"
+        )
+    return "\n".join(lines)
+
+
+def emit_chat(text: str, context_variables: dict) -> str:
+    """Publish a ``dj_chat`` event over the live WebSocket.
+
+    The LiveStage UI surfaces this in its DJ chat panel — used to reply
+    to audience requests without acting on the queue ("noted, but staying
+    course"), or for ambient banter.
+
+    Args:
+        text: The reply to publish. Empty strings are dropped.
+    """
+    text = (text or "").strip()
+    if not text:
+        return "(emit_chat: empty text — nothing to publish)"
+    emitter = context_variables.get("_event_emitter")
+    if emitter is None:
+        # Running outside the WS path (CLI mode, tests). Stash on context
+        # for inspection rather than failing the tool call.
+        context_variables.setdefault("_dj_chat_log", []).append(text)
+        return f"(emit_chat: no event_emitter in context — running in non-WS mode) {text}"
+
+    payload = {"type": "dj_chat", "text": text}
+
+    # The emitter is async-callable. Try to schedule on the running loop
+    # so the agent's worker thread can call us safely; fall back to a sync
+    # invocation when ``emitter`` is a plain callable (CLI / test wrapper).
+    try:
+        import asyncio  # noqa: PLC0415
+
+        result = emitter(payload)
+        if asyncio.iscoroutine(result):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(result)
+            except RuntimeError:
+                # No running loop — best effort; create the task on the
+                # default policy's loop. In normal operation this branch
+                # is unreachable because the WS handler always runs us
+                # inside its own loop.
+                asyncio.run(result)
+    except Exception as exc:  # noqa: BLE001 — never crash the agent on a chat hiccup
+        return f"(emit_chat: failed to publish — {type(exc).__name__}: {exc})"
+
+    return f"emitted: {text}"
+
+
 TOOLS = [
     list_genres,
     get_catalog,

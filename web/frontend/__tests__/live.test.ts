@@ -271,6 +271,49 @@ describe("useLiveSession", () => {
     expect(sent).toContainEqual({ type: "quit" });
   });
 
+  // ── v2.5.2 — dj_chat + sendRaw ─────────────────────────────────────────
+  it("appends dj_chat events to the dedicated djChat feed (separate from log)", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-djchat"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "dj_chat",
+        text: "Heard you — staying the course.",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "dj_chat",
+        text: "Lifting the energy.",
+      });
+    });
+    expect(result.current.djChat).toHaveLength(2);
+    expect(result.current.djChat[0].text).toBe("Heard you — staying the course.");
+    expect(result.current.djChat[1].text).toBe("Lifting the energy.");
+    // dj_chat must NOT bleed into the user/assistant command log.
+    expect(result.current.log).toHaveLength(0);
+  });
+
+  it("sendRaw publishes arbitrary JSON over the WS", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-raw"));
+    await flushOpen();
+    act(() => {
+      result.current.sendRaw({
+        type: "perception",
+        rms_db: -42.0,
+        onset_density_hz: 1.5,
+        voice_likelihood: null,
+        timestamp_ms: 1700000000000,
+      });
+    });
+    const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
+    expect(sent).toContainEqual({
+      type: "perception",
+      rms_db: -42.0,
+      onset_density_hz: 1.5,
+      voice_likelihood: null,
+      timestamp_ms: 1700000000000,
+    });
+  });
+
   it("appends live_message events to the log", async () => {
     const { result } = renderHook(() => useLiveSession("sid-9"));
     await flushOpen();
