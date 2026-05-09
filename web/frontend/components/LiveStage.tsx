@@ -19,6 +19,7 @@ import {
   type MicPerceptionApi,
   type PerceptionSample,
 } from "@/lib/mic_perception";
+import VisualLayer from "./VisualLayer";
 
 interface LiveStageProps {
   live: UseLiveSessionApi;
