@@ -5,53 +5,99 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v2.5.3 — Visual layer beat-sync
+## [2.5.0] — 2026-05-09
 
-Beat-synced visual layer for the live performance flow. The visual slot
-left as a placeholder by v2.5.1 in `<LiveStage>` is now a fully
-functional canvas with three switchable effects, all driven by the
-active deck's `currentTime` plus the catalog's `beatgrid` metadata.
+Live performance release. Pivots the v2.5 line from "Plugin
+Architecture" (deferred to v2.7+) to a live-DJ flow conducted by the
+agent: it perceives the environment (text description + optional mic),
+plays from the browser in real time, improvises beyond the initial
+playlist, and runs a beat-synced visual layer. Rolls up the v2.4
+react-hooks v7 cleanup and the v2.5.{0,1,1.1,2,3} feature drops into
+a single tagged release.
 
-### Added
-- **`web/frontend/lib/visualizer/beat_clock.ts`** — pure function
-  turning `(bpm, first_beat_sec, current_time_sec)` into
-  `{beat_index, phase_in_beat, is_downbeat}`. Edge-case-safe (bpm=0,
-  pre-first-beat, NaN inputs all return zeros).
-- **`web/frontend/lib/visualizer/effects/{particles,strobe,fractal}.ts`**:
-  - `particles` — Three.js `Points` field (~1500 particles), beat-pulse
-    on size + opacity, hue rotation every 16 beats keyed to the
-    Camelot-key palette.
-  - `strobe` — DOM overlay div, exponential-out flash on every Nth
-    downbeat. Default safety cap at 3 Hz to mitigate
-    photosensitive-epilepsy risk.
-  - `fractal` — Julia-set fragment shader (~30 lines GLSL) on a
-    fullscreen quad; zoom breathes per-beat, twist drifts, color
-    pulled from the Camelot palette.
-- **`web/frontend/components/VisualLayer.tsx`** — owns the canvas
-  + effect selector + fullscreen toggle, drives a `requestAnimationFrame`
-  loop wrapped in `useEffectEvent` (v7 react-hooks compliant). Tracks
-  without `beatgrid` show a degraded-sync banner.
-- **`/session/{id}/live/visual-only`** — OBS-friendly fullscreen route.
-  Reuses `useLiveSession` over the existing `/ws/live/{id}` so an OBS
-  browser source can capture it without any chrome. Lays the groundwork
-  for v2.6 broadcast without rework.
-- **`<VisualLayer>` mounted into `<LiveStage>`** — replaces the
-  v2.5.1 visual-slot placeholder div.
+### Added (Live performance — primary thesis of v2.5)
+
+- **Environment description input + planner soft bias** (#37) —
+  fourth field in the genre-guard CONFIRMED block; planner uses it
+  as soft signal alongside `mood`. `_apply_environment_bias` helper
+  in `propose_playlist` biases by BPM-as-energy proxy.
+- **Web ↔ LiveEngine bridge** (#38, follow-ups #39/#40) — refactored
+  `agent/live_engine.py` to a `LiveEngineProtocol` with two impls:
+  `LiveEngineLocal` (sounddevice + pyrubberband, terminal mode v1.5
+  preserved) and `LiveEngineBrowser` (event-sourced, audio plays in
+  browser via dual `<audio>` + `AudioContext` + `GainNode` crossfade).
+  New `WS /ws/live/{id}`, `phase_live` in pipeline, `useLiveSession`
+  hook, `<LiveStage>` component, `/session/[id]/live` route.
+- **Go Live button** (#39 + #40) — surfaces during `phase=editing`
+  as alternative to Build, with fallback at `phase=rating` and
+  `phase=complete`.
+- **Live DJ improvisation** (#42) — `_LIVE_DJ_SYSTEM` rewrite:
+  playlist becomes guidance, not contract. Three new tools:
+  `get_perception_window`, `pick_next_track` (full catalog search,
+  not just queue), `emit_chat` (DJ replies to audience without
+  acting). Mic perception module (`lib/mic_perception.ts`) captures
+  RMS / onset / voice-likelihood client-side; backend synthesizes
+  `environment_changed` events at ±6 dB deltas. Audience requests
+  treated as soft signal — "accept maybe 1 in 5".
+- **Beat-synced visual layer** (#41) — `<VisualLayer>` with three
+  effects (particles, strobe, fractal) synced to active deck's
+  `currentTime + beatgrid`. Three.js (~131 KB gzipped). Strobe
+  capped at 3 Hz for epilepsy safety. New OBS-friendly route
+  `/session/[id]/live/visual-only` (no chrome) prepares v2.6 broadcast
+  without rework.
+
+### Fixed (UX issues caught in real-world testing)
+
+- **LiveStage runtime bugs** (#39) — cursor "X of N" off-by-one,
+  empty `nextTrack`, static progress bar, silent autoplay block.
+  Now: cursor derived from `playlist.findIndex` of current track,
+  `nextTrack` derived from `playlist[idx+1]`, progress bar wired to
+  `<audio>.timeupdate` (250 ms throttled, transition CSS), autoplay
+  block surfaces "Click to start" overlay calling
+  `audioCtx.resume() + el.play()`.
+
+### Changed (developer ergonomics)
+
+- **react-hooks v7 rules re-enabled** (#36) — `set-state-in-effect`
+  and `refs` rules disabled in v2.2.1 are now back on. Call-sites
+  refactored to canonical React 19 patterns: derived state, event-
+  handler-driven setState, `useEffectEvent`, hydration via centralized
+  `useAuth()` hook.
 
 ### Tests
-- 13 new vitest cases covering `beat_clock` math + edge cases.
-- 11 new vitest cases covering particles / strobe / fractal lifecycle
-  and the strobe rate-cap.
-- 4 new Playwright E2E cases (3 effect toggles + fullscreen button +
-  OBS visual-only route + auth gate).
 
-### Notes
-- Three.js was chosen over vanilla WebGL: bundle size impact ~131 KB
-  gzipped (well under any "unacceptable" threshold), and the
-  Scene/Camera/Material API saved meaningful boilerplate over raw
-  WebGL for the particle field.
-- No backend changes were necessary — `track_started` events already
-  forward the full track dict including `beatgrid`.
+- Backend pytest: 348 → 453 (added live-engine protocol, browser
+  engine, perception buffer, environment bias, audience request
+  rejection rate, `pick_next_track`, plus follow-ups for autoplay /
+  cursor / nextTrack / progress fixes).
+- Frontend Vitest: 33 → 89 (live hook, mic perception, beat clock,
+  visualizer, react-hooks v7 compliance fixes).
+- Playwright: 19 → 29 (live session, mic perception, audience
+  request, visualizer, visual-only route, Go Live button placement).
+- All four CI jobs (Backend Python 3.12 + 3.13, Frontend Node 20,
+  E2E Playwright) green on every PR before merge.
+
+### Out of scope (deferred)
+
+- **Broadcast externo** (RTMP / Icecast / WebRTC / YouTube / Twitch)
+  — diferido a v2.6. v2.5.3 deja la ruta `/visual-only` capturable
+  por OBS para que v2.6 enchufe encoder + tokens + UI sin rework.
+- **Webcam / pose detection** — descartado.
+- **Custom shader editors / parameter UI** — diferido.
+- **Adaptación BPM dinámica mid-track** — diferido.
+- **Reorden masivo del set restante mid-sesión** — diferido.
+- **Memoria per-sesión-live** en `agent/memory.json` — diferido a
+  v2.6 con un memory v3 rework dedicado.
+- **Plugin Architecture** (la antigua v2.5 del ROADMAP) — diferido
+  a v2.7+.
+
+### Known follow-ups
+
+- Mic VAD (`voice_likelihood`) shipped without WebRTC VAD WASM
+  integration — currently `null`. Add in v2.5.x patch if useful.
+- Time-stretch (pyrubberband) intentionally not on the browser path
+  for v2.5.1 — graduate to it (`/api/live/{id}/prestretched/{track_id}`)
+  if audio quality demands it.
 
 ## [2.3.0] — 2026-05-06
 
