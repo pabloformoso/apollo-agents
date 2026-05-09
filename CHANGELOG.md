@@ -5,6 +5,48 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.5.1] — 2026-05-09
+
+Patch release fixing two bugs surfaced during real-world testing of
+v2.5.0:
+
+### Fixed
+
+- **Live track transitions stalling at end-of-track** ([#45](https://github.com/pabloformoso/apollo-agents/pull/45)) —
+  `LiveEngineBrowser` is event-sourced via `playback_pos` pings from
+  the browser. When `<audio>` finishes naturally it pauses and freezes
+  `currentTime`, so the watchdog's edge-detector never crossed the
+  crossfade threshold and the engine never advanced. Two-pronged fix:
+  (a) the frontend hook attaches `addEventListener('ended', ...)` on
+  each deck and forwards `{type: track_ended}` over WS; the backend's
+  new `report_track_ended` advances the cursor explicitly. (b)
+  `report_playback_pos` now has an endgame safeguard that synthesizes
+  the same advance when `current_time` lands within the last 2 s of
+  the track without a prior crossfade — catches the case where the
+  browser's `ended` event is lost.
+- **AgentStream infinite render loop** ([#45](https://github.com/pabloformoso/apollo-agents/pull/45)) —
+  `getSecondNow()` returned `Date.now()` directly, producing a fresh
+  number on every React render. `useSyncExternalStore` interpreted that
+  as continuous external mutation and re-rendered forever. Fix: cache
+  the snapshot at 1-second resolution; invalidate only inside
+  `subscribeSecond`'s `setInterval` callback.
+
+### Tests
+
+- Backend pytest: 453 → 463 (+10).
+- Frontend Vitest: 89 → 94 (+5).
+- Playwright E2E: 29 → 30 (+1) — new
+  `e2e/live-session-transition.spec.ts` reproduces the natural-end
+  scenario with a short mock track and asserts the second track's
+  stream is requested.
+
+### Known issues (deferred)
+
+- Visualizer effect switching glitches + strobe not firing — tracked
+  in issue [#44](https://github.com/pabloformoso/apollo-agents/issues/44).
+  v2.5.1 does not address these; they are scheduled for a follow-up
+  patch or v2.6.
+
 ## [2.5.0] — 2026-05-09
 
 Live performance release. Pivots the v2.5 line from "Plugin
