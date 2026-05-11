@@ -2204,13 +2204,12 @@ def build_mix(tracks, target_duration_sec=TARGET_DURATION_SEC):
               f"LUFS gain {lufs_gain_db:+.1f} dB)")
 
         # --- First track ---
+        # Don't pre-cut: the next transition will phase-lock its anchor
+        # somewhere in [duration - CROSSFADE_SEC, duration] and slice the
+        # xfade tail from there. If this is the *only* track, the final
+        # fade_out at the end of build_mix handles a clean ending.
         if i == 0:
-            target_cut = duration_sec - CROSSFADE_SEC
-            cut_sec, tier = find_phrase_anchor(
-                downbeats, target_cut, duration_sec,
-                min_tail_sec=CROSSFADE_SEC + 0.5,
-            )
-            mix = segment[: int(cut_sec * 1000)]
+            mix = segment
             mix_bpm = native_bpm
             transitions.append({"name": name, "start_sec": 0.0, "stretch_ratio": 1.0})
             grid_tracker.set_first(
@@ -2219,8 +2218,7 @@ def build_mix(tracks, target_duration_sec=TARGET_DURATION_SEC):
                 downbeats_sec=downbeats,
                 beats_per_bar=beats_per_bar,
             )
-            print(f"  Body cut at {cut_sec:.2f}s ({tier}) | "
-                  f"Mix: {len(mix)/1000/60:.1f} min")
+            print(f"  Loaded {duration_sec:.1f}s | Mix: {len(mix)/1000/60:.1f} min")
             continue
 
         # --- Transition BPM & strategy ---
