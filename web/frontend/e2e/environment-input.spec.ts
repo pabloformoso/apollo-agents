@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -30,10 +30,9 @@ test.describe("v2.5.0 — environment-perception input", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
     await expect(genreInput).toBeEnabled();
@@ -63,10 +62,9 @@ test.describe("v2.5.0 — environment-perception input", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
     await genreInput.fill("60-minute techno set, dark");

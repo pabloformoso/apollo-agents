@@ -30,8 +30,36 @@ class CheckpointRequest(BaseModel):
     feedback: Optional[str] = None
 
 
+class CreateSessionRequest(BaseModel):
+    """Body for ``POST /api/sessions``.
+
+    v2.6.0 — when ``brief`` is provided, the backend parses it via
+    ``brief_parser`` and kicks off ``run_planning_from_brief`` as a
+    background task. Legacy clients omit the body entirely and get an
+    empty session back (backwards-compatible with the v2.5.x flow).
+    """
+    brief: Optional[str] = None
+    environment: Optional[str] = None
+
+
 class EditorCommandRequest(BaseModel):
     message: str
+
+
+class SessionTracksReorder(BaseModel):
+    """Body for ``POST /api/sessions/{id}/tracks/reorder`` (v2.6.0)."""
+    order: list[int] = Field(..., min_length=1)
+
+
+class SessionTrackInsert(BaseModel):
+    """Body for ``POST /api/sessions/{id}/tracks/insert`` (v2.6.0)."""
+    at: int = Field(ge=0)
+    track_id: str = Field(..., min_length=1)
+
+
+class SessionEditorCommand(BaseModel):
+    """Body for ``POST /api/sessions/{id}/editor_command`` (v2.6.0 SSE)."""
+    text: str = Field(..., min_length=1)
 
 
 class RatingRequest(BaseModel):

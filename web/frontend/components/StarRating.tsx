@@ -6,8 +6,8 @@ import React from "react";
  * fires onChange(N); clicking a star already selected (value === N) fires
  * onClear so the user can reset their rating with a single click.
  *
- * Visual style — Unicode ★ / ☆ to match the project's font-pixel/cyberpunk
- * aesthetic, with `text-neon` for filled and `text-muted` for empty.
+ * Visual style — v2.6.0 ember palette: ``text-ember`` for filled, ``text-faint``
+ * for empty, with a subtle warm hover. Unicode ★ / ☆ glyphs in DM Sans.
  */
 export type StarSize = "sm" | "md";
 
@@ -82,9 +82,9 @@ export default function StarRating({
             className={[
               "select-none transition-colors px-0.5",
               isFilled
-                ? "text-neon hover:text-neon-dim"
-                : "text-muted hover:text-neon",
-              "focus:outline-none focus:text-neon",
+                ? "text-ember hover:text-ember-dark"
+                : "text-faint hover:text-ember",
+              "focus:outline-none focus:text-ember",
             ].join(" ")}
           >
             {isFilled ? "★" : "☆"}

@@ -9,10 +9,14 @@ import { registerViaApi, installToken } from "./fixtures/auth";
  * state reflects paused.
  */
 test.describe("v2.2.0 — player", () => {
-  test("plays a track from /catalog and the mini-player persists across navigation", async ({
+  test.skip("plays a track from /catalog and the mini-player persists across navigation", async ({
     page,
     request,
   }) => {
+    // v2.6.0 — `<MiniPlayer>` was retired from the global layout because
+    // the ember design replaces it with the in-page player surfaces in
+    // the redesigned Curate / Editor / Live screens. Re-enable this
+    // spec once the v2.6.0 player surface lands.
     const user = await registerViaApi(request);
     await installToken(page, user);
 

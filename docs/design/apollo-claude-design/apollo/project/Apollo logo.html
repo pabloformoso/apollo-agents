@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Apollo · logo</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" />
+<style>
+  :root {
+    --ink: #0a0807;
+    --surf: #13100e;
+    --surf2: #1c1814;
+    --line: rgba(255,238,220,0.10);
+    --line2: rgba(255,238,220,0.20);
+    --text: #fbf3e6;
+    --mute: rgba(251,243,230,0.62);
+    --faint: rgba(251,243,230,0.36);
+    --red: #e8553a;
+    --cream: #f0e3c8;
+    --display: "Instrument Serif", Georgia, serif;
+    --sans: "DM Sans", system-ui, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  html, body { margin: 0; padding: 0; background: var(--ink); color: var(--text); font-family: var(--sans); }
+  * { box-sizing: border-box; }
+
+  .page { padding: 64px 80px 120px; max-width: 1480px; margin: 0 auto; }
+  .top { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 32px; border-bottom: 1px solid var(--line); margin-bottom: 56px; }
+  .top h1 { font-family: var(--display); font-style: italic; font-size: 64px; font-weight: 400; letter-spacing: -0.025em; margin: 0; }
+  .top .meta { font-family: var(--mono); font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.22em; }
+  .lede { font-family: var(--display); font-style: italic; font-size: 24px; color: var(--mute); max-width: 720px; line-height: 1.35; margin: -24px 0 64px; }
+
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 28px; }
+  .card { background: var(--surf); border: 1px solid var(--line); display: flex; flex-direction: column; }
+  .card .canvas { aspect-ratio: 16/9; display: grid; place-items: center; position: relative; padding: 40px; overflow: hidden; }
+  .card .canvas.cream { background: var(--cream); color: var(--ink); }
+  .card .meta { display: flex; justify-content: space-between; align-items: baseline; padding: 18px 22px; border-top: 1px solid var(--line); }
+  .card .meta .num { font-family: var(--mono); font-size: 10px; color: var(--red); text-transform: uppercase; letter-spacing: 0.22em; }
+  .card .meta .name { font-family: var(--display); font-style: italic; font-size: 22px; }
+  .card .meta .sub { font-family: var(--mono); font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.18em; }
+
+  .badge { position: absolute; top: 14px; left: 18px; font-family: var(--mono); font-size: 9px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.22em; }
+  .canvas.cream .badge { color: rgba(10,8,7,0.5); }
+
+  /* applied row */
+  .applied { margin-top: 80px; }
+  .applied h2 { font-family: var(--display); font-style: italic; font-weight: 400; font-size: 40px; letter-spacing: -0.02em; margin: 0 0 24px; }
+  .approw { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+  .approw > div { background: var(--surf); border: 1px solid var(--line); padding: 28px; min-height: 180px; display: flex; flex-direction: column; justify-content: space-between; gap: 16px; }
+  .approw .swatch { background: var(--cream); color: var(--ink); }
+  .approw .red { background: var(--red); color: var(--cream); }
+  .approw .label { font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.22em; opacity: 0.6; }
+
+  /* favicon row */
+  .fav { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+  .fav .chip { width: 56px; height: 56px; display: grid; place-items: center; border: 1px solid var(--line2); background: var(--ink); }
+  .fav .chip.cream { background: var(--cream); }
+
+  .next { margin-top: 80px; padding-top: 32px; border-top: 1px solid var(--line); display: grid; grid-template-columns: 1fr 1fr; gap: 40px; }
+  .next h3 { font-family: var(--display); font-style: italic; font-weight: 400; font-size: 28px; margin: 0 0 12px; letter-spacing: -0.02em; }
+  .next p { color: var(--mute); line-height: 1.6; margin: 0; font-size: 14px; }
+  .next a { color: var(--red); text-decoration: none; border-bottom: 1px solid currentColor; }
+</style>
+</head>
+<body>
+<main class="page">
+  <header class="top">
+    <h1><em>Apollo</em>, the mark.</h1>
+    <span class="meta">six directions · cinematic system · 10/05/2026</span>
+  </header>
+  <p class="lede">Apollo is the Greek god of music, light and prophecy. Six different ways to wear his name — from a quiet wordmark to a sun-disc emblem. Pick one (or one for app, one for video covers).</p>
+
+  <section class="grid">
+    <!-- 01 wordmark -->
+    <article class="card">
+      <div class="canvas">
+        <span class="badge">01 · wordmark</span>
+        <svg viewBox="0 0 600 200" width="100%" style="max-width:520px">
+          <text x="300" y="135" text-anchor="middle"
+                font-family="Instrument Serif, serif" font-style="italic"
+                font-size="160" fill="#fbf3e6" letter-spacing="-6">Apollo<tspan fill="#e8553a">.</tspan></text>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">01</span>
+        <span class="name">Wordmark</span>
+        <span class="sub">italic + ember dot · the default</span>
+      </div>
+    </article>
+
+    <!-- 02 monogram disc -->
+    <article class="card">
+      <div class="canvas">
+        <span class="badge">02 · monogram disc</span>
+        <svg viewBox="0 0 220 220" width="220" height="220">
+          <circle cx="110" cy="110" r="100" fill="none" stroke="#fbf3e6" stroke-width="1.5"/>
+          <circle cx="110" cy="110" r="76"  fill="none" stroke="#e8553a" stroke-width="1"/>
+          <text x="110" y="148" text-anchor="middle"
+                font-family="Instrument Serif, serif" font-style="italic"
+                font-size="140" fill="#fbf3e6" letter-spacing="-4">A</text>
+          <circle cx="172" cy="48" r="3" fill="#e8553a"/>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">02</span>
+        <span class="name">Disc</span>
+        <span class="sub">A · enclosed · works as avatar</span>
+      </div>
+    </article>
+
+    <!-- 03 sun + strings -->
+    <article class="card">
+      <div class="canvas">
+        <span class="badge">03 · sun &amp; strings</span>
+        <svg viewBox="0 0 260 220" width="260" height="220">
+          <!-- sun -->
+          <circle cx="130" cy="92" r="48" fill="#e8553a"/>
+          <!-- rays as 8 lyre strings descending -->
+          <g stroke="#fbf3e6" stroke-width="1.4">
+            <line x1="74"  y1="170" x2="74"  y2="200"/>
+            <line x1="90"  y1="170" x2="90"  y2="200"/>
+            <line x1="106" y1="170" x2="106" y2="200"/>
+            <line x1="122" y1="170" x2="122" y2="200"/>
+            <line x1="138" y1="170" x2="138" y2="200"/>
+            <line x1="154" y1="170" x2="154" y2="200"/>
+            <line x1="170" y1="170" x2="170" y2="200"/>
+            <line x1="186" y1="170" x2="186" y2="200"/>
+          </g>
+          <line x1="60" y1="170" x2="200" y2="170" stroke="#fbf3e6" stroke-width="1.4"/>
+          <text x="130" y="170" text-anchor="middle"
+                font-family="Instrument Serif, serif" font-style="italic"
+                font-size="20" fill="#0a0807" letter-spacing="3">APOLLO</text>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">03</span>
+        <span class="name">Sun &amp; strings</span>
+        <span class="sub">myth as emblem · for video covers</span>
+      </div>
+    </article>
+
+    <!-- 04 sun rays "A" -->
+    <article class="card">
+      <div class="canvas">
+        <span class="badge">04 · ray A</span>
+        <svg viewBox="0 0 260 220" width="260" height="220">
+          <!-- horizon line -->
+          <line x1="20" y1="160" x2="240" y2="160" stroke="#e8553a" stroke-width="1"/>
+          <!-- triangular A made of three rays -->
+          <g fill="none" stroke="#fbf3e6" stroke-width="3" stroke-linecap="square">
+            <path d="M70 160 L130 50 L190 160"/>
+            <path d="M95 110 L165 110"/>
+          </g>
+          <!-- sun glow under -->
+          <circle cx="130" cy="160" r="42" fill="#e8553a" opacity="0.18"/>
+          <text x="130" y="200" text-anchor="middle"
+                font-family="DM Sans, sans-serif" font-weight="500"
+                font-size="14" fill="#fbf3e6" letter-spacing="6">APOLLO</text>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">04</span>
+        <span class="name">Ray A</span>
+        <span class="sub">A as rising sun · sharper, modern</span>
+      </div>
+    </article>
+
+    <!-- 05 vinyl sun -->
+    <article class="card">
+      <div class="canvas cream">
+        <span class="badge">05 · vinyl sun</span>
+        <svg viewBox="0 0 260 220" width="260" height="220">
+          <g fill="none" stroke="#0a0807">
+            <circle cx="130" cy="110" r="92" stroke-width="0.8"/>
+            <circle cx="130" cy="110" r="80" stroke-width="0.5"/>
+            <circle cx="130" cy="110" r="68" stroke-width="0.5"/>
+            <circle cx="130" cy="110" r="56" stroke-width="0.5"/>
+            <circle cx="130" cy="110" r="44" stroke-width="0.5"/>
+          </g>
+          <circle cx="130" cy="110" r="22" fill="#e8553a"/>
+          <circle cx="130" cy="110" r="3" fill="#0a0807"/>
+          <text x="130" y="115" text-anchor="middle"
+                font-family="Instrument Serif, serif" font-style="italic"
+                font-size="16" fill="#0a0807">apollo</text>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">05</span>
+        <span class="name">Vinyl sun</span>
+        <span class="sub">record + sun · best for the YouTube cover</span>
+      </div>
+    </article>
+
+    <!-- 06 brackets -->
+    <article class="card">
+      <div class="canvas">
+        <span class="badge">06 · console brackets</span>
+        <svg viewBox="0 0 600 200" width="100%" style="max-width:520px">
+          <text x="300" y="138" text-anchor="middle"
+                font-family="JetBrains Mono, monospace" font-weight="500"
+                font-size="40" fill="#e8553a" letter-spacing="2">[</text>
+          <text x="300" y="138" text-anchor="middle"
+                font-family="Instrument Serif, serif" font-style="italic"
+                font-size="120" fill="#fbf3e6" letter-spacing="-3"
+                dx="-10" dy="-4">apollo</text>
+          <text x="510" y="138"
+                font-family="JetBrains Mono, monospace" font-weight="500"
+                font-size="40" fill="#e8553a" letter-spacing="2">]</text>
+        </svg>
+      </div>
+      <div class="meta">
+        <span class="num">06</span>
+        <span class="name">Bracketed</span>
+        <span class="sub">italic inside mono brackets · agent flavor</span>
+      </div>
+    </article>
+  </section>
+
+  <!-- applied -->
+  <section class="applied">
+    <h2>Applied</h2>
+    <div class="approw">
+      <div>
+        <span class="label">app header</span>
+        <svg viewBox="0 0 360 80" width="100%">
+          <text x="0" y="56" font-family="Instrument Serif, serif" font-style="italic" font-size="56" fill="#fbf3e6" letter-spacing="-2">Apollo<tspan fill="#e8553a">.</tspan></text>
+          <text x="200" y="50" font-family="JetBrains Mono, monospace" font-size="10" fill="rgba(251,243,230,0.36)" letter-spacing="2">LIVE · 03/05</text>
+        </svg>
+        <span class="label">on ink</span>
+      </div>
+      <div class="swatch">
+        <span class="label" style="color:rgba(10,8,7,0.5)">on cream</span>
+        <svg viewBox="0 0 360 80" width="100%">
+          <text x="0" y="56" font-family="Instrument Serif, serif" font-style="italic" font-size="56" fill="#0a0807" letter-spacing="-2">Apollo<tspan fill="#e8553a">.</tspan></text>
+        </svg>
+        <span class="label" style="color:rgba(10,8,7,0.5)">poster · light</span>
+      </div>
+      <div class="red">
+        <span class="label" style="color:rgba(255,255,255,0.65)">on ember</span>
+        <svg viewBox="0 0 360 80" width="100%">
+          <text x="0" y="56" font-family="Instrument Serif, serif" font-style="italic" font-size="56" fill="#0a0807" letter-spacing="-2">Apollo<tspan fill="#fbf3e6">.</tspan></text>
+        </svg>
+        <span class="label" style="color:rgba(255,255,255,0.65)">live banner</span>
+      </div>
+    </div>
+
+    <h2 style="margin-top:56px">Favicon scale</h2>
+    <div class="fav">
+      <div class="chip">
+        <svg viewBox="0 0 40 40" width="40" height="40">
+          <text x="20" y="32" text-anchor="middle" font-family="Instrument Serif, serif" font-style="italic" font-size="36" fill="#fbf3e6">A</text>
+          <circle cx="33" cy="32" r="2.4" fill="#e8553a"/>
+        </svg>
+      </div>
+      <div class="chip">
+        <svg viewBox="0 0 40 40" width="40" height="40">
+          <circle cx="20" cy="20" r="18" fill="none" stroke="#e8553a" stroke-width="1"/>
+          <text x="20" y="30" text-anchor="middle" font-family="Instrument Serif, serif" font-style="italic" font-size="26" fill="#fbf3e6">A</text>
+        </svg>
+      </div>
+      <div class="chip cream">
+        <svg viewBox="0 0 40 40" width="40" height="40">
+          <text x="20" y="32" text-anchor="middle" font-family="Instrument Serif, serif" font-style="italic" font-size="36" fill="#0a0807">A</text>
+          <circle cx="33" cy="32" r="2.4" fill="#e8553a"/>
+        </svg>
+      </div>
+      <div class="chip">
+        <svg viewBox="0 0 40 40" width="40" height="40">
+          <circle cx="20" cy="14" r="9" fill="#e8553a"/>
+          <line x1="6"  y1="30" x2="6"  y2="36" stroke="#fbf3e6" stroke-width="1"/>
+          <line x1="13" y1="30" x2="13" y2="36" stroke="#fbf3e6" stroke-width="1"/>
+          <line x1="20" y1="30" x2="20" y2="36" stroke="#fbf3e6" stroke-width="1"/>
+          <line x1="27" y1="30" x2="27" y2="36" stroke="#fbf3e6" stroke-width="1"/>
+          <line x1="34" y1="30" x2="34" y2="36" stroke="#fbf3e6" stroke-width="1"/>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <section class="next">
+    <div>
+      <h3>Recommendation</h3>
+      <p>Use <strong>01 (wordmark with ember dot)</strong> as the primary in-app mark — it's quiet, sets the typographic tone for the whole product. Pair it with <strong>03 (sun &amp; strings)</strong> as the emblem on YouTube covers and merch. The other four stay on the bench for now.</p>
+    </div>
+    <div>
+      <h3>Next moves</h3>
+      <p>Once you pick: I'll lock the SVG, build a full lockup sheet (clear-space, min sizes, dark/light variants), and replace the ASCII <em>APOLLO</em> in the prototype.</p>
+    </div>
+  </section>
+</main>
+</body>
+</html>

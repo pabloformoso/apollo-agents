@@ -307,8 +307,52 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     if (!Ctor) return null;
     const ctx = new Ctor();
     audioCtxRef.current = ctx;
+    // Diagnostic — Chromium suspends the AudioContext silently when the
+    // tab is backgrounded/idle. The HTMLAudioElement keeps advancing
+    // currentTime (so the playback_pos pings + crossfade timer keep
+    // ticking) but the gain nodes stop passing samples to the speakers
+    // — exactly the "music gone, everything else fine" symptom. Log the
+    // state changes and try to auto-resume so the user gets sound back
+    // without having to refresh. Guarded for jsdom test envs whose
+    // AudioContext mock omits ``addEventListener``.
+    if (typeof ctx.addEventListener === "function") {
+      ctx.addEventListener("statechange", () => {
+        appendLog({
+          role: "assistant",
+          text: `[audioctx] state=${ctx.state}`,
+          ts: Date.now(),
+        });
+        if (ctx.state === "suspended") {
+          try {
+            const p = ctx.resume();
+            if (p && typeof p.then === "function") {
+              p.then(
+                () => {
+                  appendLog({
+                    role: "assistant",
+                    text: "[audioctx] auto-resume ok",
+                    ts: Date.now(),
+                  });
+                },
+                (err) => {
+                  appendLog({
+                    role: "assistant",
+                    text: `[audioctx] auto-resume failed: ${
+                      (err as { name?: string })?.name ?? "Error"
+                    }`,
+                    ts: Date.now(),
+                  });
+                },
+              );
+            }
+          } catch {
+            /* ignore — best effort */
+          }
+        }
+      });
+    }
     return ctx;
-  }, []);
+  }, [appendLog]);
 
   const ensureDeck = useCallback(
     (which: "a" | "b") => {
@@ -346,6 +390,52 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         }
       });
 
+      // Diagnostic listeners — surface buffer / pause / error / mute /
+      // device events into the LiveStage log so silent stalls (HTTP
+      // stream socket dropping mid-track, OS audio output disconnecting,
+      // tab muted via Chrome's tab-mute icon) are visible. Only the
+      // *active* deck's events are logged to keep the panel readable.
+      const DIAG_EVENTS = [
+        "stalled",
+        "waiting",
+        "suspend",
+        "pause",
+        "playing",
+        "error",
+        "volumechange",
+        "ratechange",
+        "emptied",
+      ] as const;
+      for (const evt of DIAG_EVENTS) {
+        el.addEventListener(evt, () => {
+          if (activeDeckRef.current !== which) return;
+          const ct = Number.isFinite(el.currentTime) ? el.currentTime : 0;
+          const ns = el.networkState;
+          const rs = el.readyState;
+          const buffered =
+            el.buffered && el.buffered.length > 0
+              ? el.buffered.end(el.buffered.length - 1)
+              : 0;
+          const errCode = el.error ? el.error.code : null;
+          const extras: string[] = [];
+          if (evt === "volumechange") {
+            extras.push(`vol=${el.volume}`, `muted=${el.muted}`);
+          } else if (evt === "ratechange") {
+            extras.push(`rate=${el.playbackRate}`);
+          }
+          appendLog({
+            role: "assistant",
+            text:
+              `[deck ${which}] ${evt} @ ${ct.toFixed(1)}s ` +
+              `(net=${ns} ready=${rs} buf=${buffered.toFixed(1)}s` +
+              (errCode !== null ? ` errCode=${errCode}` : "") +
+              (extras.length ? ` ${extras.join(" ")}` : "") +
+              ")",
+            ts: Date.now(),
+          });
+        });
+      }
+
       const ctx = ensureAudioContext();
       if (ctx) {
         try {
@@ -362,7 +452,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       }
       return el;
     },
-    [ensureAudioContext],
+    [ensureAudioContext, appendLog],
   );
 
   const loadIntoActiveDeck = useCallback(
@@ -646,8 +736,11 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     const token = getToken();
     if (!token) return;
 
+    // v2.6.0 canonical path. The backend keeps `/ws/live/{id}` as a
+    // deprecated alias on the same handler for one release; once every
+    // page hits the new endpoint that alias can come out.
     const ws = new WebSocket(
-      `${WS_BASE}/ws/live/${sessionId}?token=${token}`,
+      `${WS_BASE}/api/sessions/${sessionId}/live/stream?token=${token}`,
     );
     wsRef.current = ws;
     let opened = false;
@@ -687,6 +780,26 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       } else if (ws.readyState === WebSocket.CONNECTING) {
         ws.addEventListener("open", () => ws.close(), { once: true });
       }
+      // Intentionally NOT closing the AudioContext or stopping the decks
+      // here. Next.js Fast Refresh re-runs this effect every time the
+      // hook source is edited, and the previous destructive cleanup
+      // tore down audio mid-session — the user heard the music cut and
+      // the track restart from 0. The audio cleanup now lives in a
+      // dedicated unmount-only effect below; the browser GCs the
+      // ``<audio>`` elements + ``AudioContext`` when the page truly
+      // unloads.
+    };
+    // ``onServerEvent`` / ``onConnected`` etc. are useEffectEvent wrappers —
+    // by the rules of React they MUST NOT appear in the dep array.
+  }, [sessionId]);
+
+  // True-unmount audio cleanup. ``[]`` deps means the cleanup runs only
+  // when the hook is unmounted (component truly disposed), not on every
+  // WS effect re-run. Strict Mode in dev still mount/unmount/mounts on
+  // first render, but at that point no audio is playing so the close()
+  // is harmless. Mid-session HMR no longer kills the audio.
+  useEffect(() => {
+    return () => {
       stopAllDecks();
       if (audioCtxRef.current) {
         try {
@@ -697,9 +810,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         audioCtxRef.current = null;
       }
     };
-    // ``onServerEvent`` / ``onConnected`` etc. are useEffectEvent wrappers —
-    // by the rules of React they MUST NOT appear in the dep array.
-  }, [sessionId, stopAllDecks]);
+  }, [stopAllDecks]);
 
   // ── Throttled playback_pos ping to the backend + UI time tick ─────────
   // Set up an interval that both pings the backend with the current playback
@@ -739,6 +850,259 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     return () => window.clearInterval(id);
   }, [sessionId]);
 
+  // Resume the AudioContext when the tab becomes visible again, and log
+  // every "outside the DOM" event we can hook into so silent stops are
+  // attributable. Covered:
+  //   - visibilitychange (tab in/out of focus)
+  //   - Page Lifecycle freeze/resume (Chrome may freeze backgrounded tabs)
+  //   - mediaDevices.devicechange (Bluetooth/USB audio disconnect)
+  // ``ctx.resume()`` requires no user gesture once the context has been
+  // unlocked at least once — and the LiveStage flow always unlocks via
+  // the autoplay overlay or the initial play() call.
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    const tryResume = (reason: string) => {
+      const ctx = audioCtxRef.current;
+      if (!ctx) return;
+      // Aggressive recovery — call resume() unconditionally (not only on
+      // ``suspended``). Chrome has a class of bugs where the renderer
+      // goes silent while ``state === "running"`` after visibility
+      // toggles or media-server interruptions; resume() is a no-op when
+      // already running but kicks the renderer back to life when stuck.
+      try {
+        const p = ctx.resume();
+        if (p && typeof p.then === "function") {
+          p.then(
+            () =>
+              appendLog({
+                role: "assistant",
+                text: `[audioctx] kicked on ${reason} (state=${ctx.state})`,
+                ts: Date.now(),
+              }),
+            (err) =>
+              appendLog({
+                role: "assistant",
+                text: `[audioctx] kick on ${reason} failed: ${
+                  (err as { name?: string })?.name ?? "Error"
+                }`,
+                ts: Date.now(),
+              }),
+          );
+        }
+      } catch {
+        /* ignore — best effort */
+      }
+      // Also kick the active deck — if play() returns silently it's a
+      // no-op, but if the element was paused without firing ``pause``
+      // (rare Chrome corner case) it'll resume audibly.
+      const which = activeDeckRef.current;
+      const el = which === "a" ? deckARef.current : deckBRef.current;
+      if (el && el.paused) {
+        try {
+          const p = el.play();
+          if (p && typeof p.then === "function") {
+            p.catch(() => {
+              /* ignore — autoplay overlay handles user-gesture cases */
+            });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    const onVisible = () => {
+      appendLog({
+        role: "assistant",
+        text: `[lifecycle] visibilitychange → ${document.visibilityState}`,
+        ts: Date.now(),
+      });
+      if (document.visibilityState === "visible") tryResume("visibilitychange");
+    };
+    const onFreeze = () => {
+      appendLog({
+        role: "assistant",
+        text: "[lifecycle] page frozen (Chrome tab freezing)",
+        ts: Date.now(),
+      });
+    };
+    const onResume = () => {
+      appendLog({
+        role: "assistant",
+        text: "[lifecycle] page resumed from freeze",
+        ts: Date.now(),
+      });
+      tryResume("page resume");
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    document.addEventListener("freeze", onFreeze);
+    document.addEventListener("resume", onResume);
+
+    let unsubDevice: (() => void) | null = null;
+    const md = navigator?.mediaDevices;
+    if (md && typeof md.addEventListener === "function") {
+      const onDeviceChange = () => {
+        appendLog({
+          role: "assistant",
+          text: "[mediaDevices] devicechange (audio output may have switched)",
+          ts: Date.now(),
+        });
+      };
+      md.addEventListener("devicechange", onDeviceChange);
+      unsubDevice = () => md.removeEventListener("devicechange", onDeviceChange);
+    }
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      document.removeEventListener("freeze", onFreeze);
+      document.removeEventListener("resume", onResume);
+      if (unsubDevice) unsubDevice();
+    };
+  }, [appendLog]);
+
+  // Heartbeat — every 2 s, take a snapshot of (audioctx.state, gainA,
+  // gainB, active deck paused/muted/volume/networkState/readyState).
+  // Only log when something differs from the last snapshot, so the panel
+  // stays readable but any silent state flip surfaces.
+  //
+  // Critically, also detect "STUCK": ``ctx === running`` and
+  // ``el.paused === false`` but ``currentTime`` hasn't advanced for
+  // ≥4 s. That's the Chrome silent-renderer bug — every flag looks
+  // healthy but no samples reach the speakers. When detected we log a
+  // STUCK marker and auto-kick (``ctx.resume()`` + ``el.play()``), which
+  // resuscitates the renderer in practice.
+  useEffect(() => {
+    if (!sessionId) return;
+    if (typeof window === "undefined") return;
+    let last = "";
+    let lastCt = -1;
+    let lastCtChangeMs = Date.now();
+    let kickedStuck = false;
+    let reloadedStuck = false;
+    const id = window.setInterval(() => {
+      const ctx = audioCtxRef.current;
+      const gA = gainARef.current;
+      const gB = gainBRef.current;
+      const which = activeDeckRef.current;
+      const el = which === "a" ? deckARef.current : deckBRef.current;
+      if (!el && !ctx) return;
+      const ct = el && Number.isFinite(el.currentTime) ? el.currentTime : 0;
+      const snapshot =
+        `ctx=${ctx?.state ?? "?"} ` +
+        `gA=${gA ? gA.gain.value.toFixed(2) : "?"} ` +
+        `gB=${gB ? gB.gain.value.toFixed(2) : "?"} ` +
+        `active=${which} ` +
+        `paused=${el?.paused ?? "?"} ` +
+        `muted=${el?.muted ?? "?"} ` +
+        `vol=${el?.volume ?? "?"} ` +
+        `net=${el?.networkState ?? "?"} ` +
+        `ready=${el?.readyState ?? "?"}`;
+      if (snapshot !== last) {
+        last = snapshot;
+        appendLog({
+          role: "assistant",
+          text: `[heartbeat] ${snapshot}`,
+          ts: Date.now(),
+        });
+      }
+
+      // currentTime advancement check
+      if (Math.abs(ct - lastCt) > 0.05) {
+        lastCt = ct;
+        lastCtChangeMs = Date.now();
+        kickedStuck = false;
+        reloadedStuck = false;
+        return;
+      }
+      const stuckMs = Date.now() - lastCtChangeMs;
+      const looksHealthy =
+        ctx?.state === "running" &&
+        el !== null &&
+        el !== undefined &&
+        !el.paused &&
+        !el.muted &&
+        (el.readyState ?? 0) >= 2;
+      // Tier 1 — 4 s stuck: gentle kick. Helps when the renderer is in a
+      // running-but-silent state (Chrome bug after visibility toggles).
+      if (stuckMs >= 4000 && looksHealthy && !kickedStuck) {
+        kickedStuck = true;
+        appendLog({
+          role: "assistant",
+          text:
+            `[heartbeat] STUCK ct=${ct.toFixed(1)}s for ${(stuckMs / 1000).toFixed(1)}s ` +
+            `— auto-kicking ctx.resume() + el.play()`,
+          ts: Date.now(),
+        });
+        try {
+          const rp = ctx?.resume();
+          if (rp && typeof rp.then === "function") rp.catch(() => {});
+        } catch {
+          /* ignore */
+        }
+        try {
+          const pp = el?.play();
+          if (pp && typeof pp.then === "function") pp.catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }
+      // Tier 2 — 8 s stuck and tier-1 didn't unstick it. The Tier-1 kick
+      // doesn't help when the audio is waiting for HTTP data that never
+      // arrives (server stream socket dropped mid-Range). Force the
+      // ``<audio>`` to re-fetch by calling ``load()`` and reseeking to
+      // where it stalled. The ``loadeddata`` listener restores the
+      // playhead and resumes — net=2/ready=2 should flip back to
+      // net=1/ready=4 once the new connection delivers the rest.
+      if (
+        stuckMs >= 8000 &&
+        looksHealthy &&
+        kickedStuck &&
+        !reloadedStuck &&
+        el
+      ) {
+        reloadedStuck = true;
+        const stalledAt = ct;
+        const src = el.src;
+        appendLog({
+          role: "assistant",
+          text:
+            `[heartbeat] STILL STUCK after ${(stuckMs / 1000).toFixed(1)}s ` +
+            `— forcing src reload from ${stalledAt.toFixed(1)}s`,
+          ts: Date.now(),
+        });
+        const onLoaded = () => {
+          el.removeEventListener("loadeddata", onLoaded);
+          try {
+            el.currentTime = stalledAt;
+          } catch {
+            /* ignore — element may not allow seek yet */
+          }
+          try {
+            const p = el.play();
+            if (p && typeof p.then === "function") p.catch(() => {});
+          } catch {
+            /* ignore */
+          }
+          appendLog({
+            role: "assistant",
+            text: `[heartbeat] reload ok — resumed @ ${stalledAt.toFixed(1)}s`,
+            ts: Date.now(),
+          });
+        };
+        try {
+          el.addEventListener("loadeddata", onLoaded, { once: true });
+          // Re-assigning src forces a fresh HTTP request. Same URL so
+          // backend ``stream_track`` serves the same file from byte 0;
+          // we seek to ``stalledAt`` once the metadata is back.
+          el.src = src;
+          el.load();
+        } catch {
+          /* ignore — next heartbeat will retry */
+        }
+      }
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, [sessionId, appendLog]);
+
   // ── Public command callbacks ────────────────────────────────────────────
   const sendCommand = useCallback(
     (cmd: LiveCommand) => {
@@ -774,7 +1138,13 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   }, []);
 
   const resumePlayback = useCallback(() => {
-    const ctx = audioCtxRef.current;
+    // Ensure the AudioContext exists AND is resumed inside the gesture —
+    // without this, a click during state==='idle' (no deck loaded yet)
+    // wouldn't unlock anything, and the engine's later play() would
+    // still trip Chrome's autoplay policy. Creating + resuming during
+    // the user gesture marks the document as user-activated for the
+    // rest of the session.
+    const ctx = ensureAudioContext();
     if (ctx && typeof ctx.resume === "function") {
       try {
         const maybe = ctx.resume();
@@ -789,7 +1159,14 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     }
     const which = activeDeckRef.current;
     const el = which === "a" ? deckARef.current : deckBRef.current;
-    if (!el) return;
+    if (!el) {
+      // Cold start — engine hasn't sent a `load` command yet. The
+      // gesture unlocked the context; the next loadIntoActiveDeck call
+      // will be able to play() without bouncing off the autoplay
+      // policy. Clear the blocked flag so the UI overlay dismisses.
+      setAutoplayBlocked(false);
+      return;
+    }
     try {
       const p = el.play();
       if (p && typeof p.then === "function") {
@@ -809,7 +1186,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       console.warn("[live] resumePlayback threw:", err);
       setAutoplayBlocked(true);
     }
-  }, []);
+  }, [ensureAudioContext]);
 
   const quit = useCallback(() => {
     const ws = wsRef.current;

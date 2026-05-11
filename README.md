@@ -5,11 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Roadmap](https://img.shields.io/badge/roadmap-public-blueviolet)](ROADMAP.md)
 
-![ApolloAgents Logo](apollo_agents_logo.png)
+![ApolloAgents — assemble. critique. perform.](apollo_banner.svg)
 
-> An AI-powered DJ set builder — from track catalog to rendered YouTube video, guided by a team of specialized agents.
+> An AI-powered DJ set builder — from a single-sentence brief to a rendered YouTube video or a real-time live performance, guided by a team of specialized agents.
 
-ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. You describe the vibe. The agents handle harmonic mixing, BPM matching, energy arc planning, and audio quality validation. You stay in control at every checkpoint.
+ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. You describe the vibe. The agents handle harmonic mixing, BPM matching, energy arc planning, and audio quality validation. You stay in control at every checkpoint — through a CLI, a conversational agent, or the new **Ember web UI**.
 
 ---
 
@@ -66,6 +66,41 @@ uv run python agent/run.py
 ```
 
 → [Full Live Mode docs, thread architecture & cycle diagram](#live-mode-1)
+
+---
+
+## 🪶 Web UI — v2.6.0 *Ember*
+
+The Ember redesign is Apollo's cinematic, single-screen web client. It collapses the entire flow — brief → curate → editor → render or live — into five flat routes with a shared italic-serif vocabulary and an ember-red accent. No 9-phase ladder, no checkpoints to grind through: the agents drive themselves and you intervene where it matters.
+
+```
+/dashboard   → tonight's set + last-performed poster
+/brief       → one sentence in, a parsed brief out
+/curate      → arc, playlist, critic notes (apply / ignore inline)
+/editor      → drag-reorder, swap, insert bridge tracks
+/render      → backend ffmpeg → 1080p MP4 with progress SSE
+/live        → real-time playback, Audience / Booth / Immersive modes
+```
+
+**Highlights:**
+
+- **Brief flow** — Claude Haiku parses your sentence into `{genre, duration, mood, venue, energy, tempo}` in <300 ms. If anything is ambiguous, Apollo asks inline — same screen, no detour — and resumes planning the second you confirm.
+- **Curate** — server-mapped critic notes with deterministic IDs; `Apply` triggers a bounded editor turn, `Ignore` marks handled. Arc strip on top, set-health score, and three routes out (Live · Render · Edit by hand).
+- **Editor** — drag tracks horizontally with `@dnd-kit`, command line drives a bounded SSE editor turn, set-health bar reacts to every change.
+- **Render** — async backend job, SSE progress stream, token-gated download URLs for MP4 / WAV / transitions / `youtube.md`.
+- **Live** — three modes (poster for the audience, control panel for the DJ, fullscreen visualizer for OBS), animated waveform that ticks to the deck's `currentTime`, prominent **transition incoming** warning before each crossfade, and an inline mic / audience-request panel.
+- **OBS broadcast** — one click in the Live header copies a `/live` URL with a hand-off token; paste into an OBS Browser Source and the page signs itself in (the token is stripped from the URL the moment it lands in localStorage). System-audio capture handles the sound.
+- **Single-viewport splash** — Dashboard + Login fit a 1366×768 laptop screen with no scroll; tipografía with `clamp()` so the wordmark scales down cleanly on narrower windows.
+
+**Stack:** Next.js 16 (App Router · React 19) · FastAPI · WebSockets for planning · SSE for editor/render · token-gated static streams for live audio · Tailwind with the `ember.*` token palette.
+
+```bash
+# Start it locally (two terminals)
+uv run uvicorn backend.app:app --reload --port 4020 --app-dir web   # backend
+npm --prefix web/frontend run dev                                    # frontend on :4010
+```
+
+Open `http://localhost:4010` and sign in. The agents wire themselves up the first time you submit a brief.
 
 ---
 
@@ -192,6 +227,7 @@ flowchart TD
 - **Multi-provider** — Claude (Anthropic), GPT-4o (OpenAI), or any local model via Ollama; auto-detected from `.env`
 - **1080p video output** — spectral waveform visualizer, beat-reactive particles, DALL-E 3 artwork, retro pixel titles
 - **YouTube Short** — auto-generated 20s teaser alongside the full mix
+- **Web UI (v2.6 *Ember*)** — flat-routed Next.js client: Brief → Curate → Editor → Render / Live. Single-viewport splash, animated waveform, transition-incoming countdown, OBS-friendly broadcast feed with one-click auth hand-off
 
 ---
 
@@ -548,11 +584,27 @@ agent/
   memory.json        # Persistent session history (auto-created)
 tracks/
   tracks.json        # Unified catalog (auto-generated)
-  <genre>/           # WAV files per genre
+  <genre>/           # WAV / MP3 files per genre
 output/              # Generated mixes and videos (gitignored)
 artwork/             # DALL-E 3 backgrounds (cached, gitignored)
 fonts/
   PressStart2P-Regular.ttf
+
+# v2.6.0 Ember web UI
+web/
+  backend/           # FastAPI: brief_parser, notes, arc, render, session_store
+    app.py           # routes + WS dispatch
+    arc.py           # energy-arc derivation from playlist
+    brief_parser.py  # Haiku one-shot brief → ParsedBrief
+    notes.py         # critic problems → CriticNote[] with stable ids
+    render.py        # async MP4 build + SSE progress
+  frontend/
+    app/             # Next 16 App Router: brief, curate, editor, render, live
+    components/ember/  # Shell · primitives · TrackPicker · feedback · motion
+    lib/             # api, auth, ws, live engine, auto-session, auth-bootstrap
+    e2e/             # Playwright suite (36 specs, full flow coverage)
+tests/web/           # Backend integration tests (brief, notes, editor SSE)
+web/tests/           # Backend unit tests (arc, notes, session_store v260)
 ```
 
 ---

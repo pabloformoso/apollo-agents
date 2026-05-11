@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -26,6 +26,7 @@ test.describe("v2.3.0 — user context", () => {
     request,
   }) => {
     const user = await signedInOnDashboard(page, request);
+    const e2eUser = user;
 
     // ── Rate three mock-catalog tracks via the REST API. The catalog is
     // populated by `mock_pipeline._build_mock_catalog`, so these IDs are
@@ -59,8 +60,7 @@ test.describe("v2.3.0 — user context", () => {
     // which produces a hard-coded playlist; the assertion is that the path
     // does not crash when ctx contains a real user_id whose user has rated
     // tracks (and that the session reaches ckpt1).
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
     await expect(genreInput).toBeEnabled();

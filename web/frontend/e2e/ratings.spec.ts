@@ -44,7 +44,7 @@ test.describe("v2.2.2 — ratings", () => {
 
     // Find the card for "Mock Silence" and click its 5th star.
     const card = page
-      .locator(".group.bg-surface")
+      .locator('[data-testid="track-card"]')
       .filter({ hasText: "Mock Silence" })
       .first();
     await expect(card).toBeVisible();
@@ -60,7 +60,7 @@ test.describe("v2.2.2 — ratings", () => {
     await page.reload();
     await expect(page.locator("text=Mock Silence").first()).toBeVisible();
     const cardAfter = page
-      .locator(".group.bg-surface")
+      .locator('[data-testid="track-card"]')
       .filter({ hasText: "Mock Silence" })
       .first();
     await expect(cardAfter.locator('[data-testid="star-5"]')).toHaveAttribute(
@@ -100,7 +100,7 @@ test.describe("v2.2.2 — ratings", () => {
     // rating === 5, clicking the same star fires onClear and the track
     // drops below the favorites threshold.
     const silenceCard = page
-      .locator(".group.bg-surface")
+      .locator('[data-testid="track-card"]')
       .filter({ hasText: "Mock Silence" })
       .first();
     await silenceCard.locator('[data-testid="star-5"]').click();

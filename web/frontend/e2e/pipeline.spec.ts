@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -15,11 +15,12 @@ test.describe.serial("B — pipeline transitions", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const user = await signedInOnDashboard(page, request);
 
-    // ── create session → land on /session/{id}
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    // ── create session via API + navigate to legacy /session/{id} where the
+    // phase machine lives. v2.6.0 dashboard CTA goes through /brief which
+    // doesn't trigger planning; the WS-backed flow still runs here.
+    await gotoNewSession(page, request, user);
 
     // ── B1: genre confirmed → phase advances to planning
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
@@ -69,8 +70,10 @@ test.describe.serial("B — pipeline transitions", () => {
     await expect(page.locator("text=/Session complete/i")).toBeVisible();
 
     // Back to dashboard still works
-    await page.getByRole("link", { name: /dashboard/i }).click();
+    await page.goto("/dashboard");
     await page.waitForURL(/\/dashboard$/);
-    await expect(page.getByRole("button", { name: /new session/i })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /(new session|start a session)/i }),
+    ).toBeVisible();
   });
 });

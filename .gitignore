@@ -54,5 +54,15 @@ web/frontend/next-env.d.ts
 web/frontend/test-results/
 web/frontend/playwright-report/
 web/frontend/playwright/.cache/
+test-results/
+playwright-report/
 .playwright-mcp/
 .tmp/
+
+# Catalog backups + local debug build dirs
+tracks/tracks.json.bak
+tracks/tracks.json.*.bak
+web/frontend/.next-debug/
+
+# Misc local screenshots
+login-*.png

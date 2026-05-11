@@ -9,7 +9,14 @@ export type Phase =
   | "building"
   | "validating"
   | "rating"
-  | "complete";
+  | "complete"
+  // v2.6.0 — render lifecycle. `rendering` while the SSE stream is open;
+  // `failed` on subprocess non-zero exit. `complete` still marks success.
+  | "rendering"
+  | "failed"
+  // v2.6.0 — live broadcast state. Editor endpoints reject during this
+  // phase to prevent mutating a playlist mid-set.
+  | "performing";
 
 export interface Suno {
   title?: string;
@@ -50,6 +57,32 @@ export interface StructuredProblem {
   text: string;
 }
 
+// v2.6.0 — server-mapped CriticNote produced by `web/backend/notes.py`.
+// Replaces the client-side `adaptProblem` that used to live in
+// `app/curate/page.tsx`.
+export type NoteSeverity = "fix" | "tip" | "ok";
+export type NoteStatus = "pending" | "applied" | "ignored";
+
+export interface CriticNote {
+  id: string;
+  severity: NoteSeverity;
+  /** Track position or range, e.g. "3" or "2–5". */
+  target: string;
+  headline: string;
+  body: string;
+  suggestion: string | null;
+  status: NoteStatus;
+}
+
+// v2.6.0 — energy arc emitted alongside the playlist by
+// `web/backend/arc.py`. `points` are aligned with `playlist[i]`.
+export interface SessionArc {
+  flat: boolean;
+  max: number;
+  peak_pos: number;
+  points: number[];
+}
+
 export interface SessionState {
   id: string;
   user_id: number;
@@ -67,6 +100,16 @@ export interface SessionState {
   critic_verdict: string | null;
   critic_problems: string[];
   structured_problems: StructuredProblem[];
+  // v2.6.0 — server-mapped CriticNotes with stable ids + apply/ignore
+  // status. Empty until the critique phase has run.
+  notes?: CriticNote[];
+  // v2.6.0 — list of note ids the user has acted on (applied or ignored).
+  handled?: string[];
+  // v2.6.0 — energy arc points + flat/peak metadata.
+  arc?: SessionArc | null;
+  // v2.6.0 — 0–100 set-health score recomputed after every critique +
+  // editor mutation. `null` until first critique runs.
+  set_health?: number | null;
   validator_status: string | null;
   validator_issues: string[];
   created_at: string;

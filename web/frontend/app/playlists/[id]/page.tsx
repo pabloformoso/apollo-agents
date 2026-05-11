@@ -1,4 +1,10 @@
 "use client";
+/**
+ * Apollo v2.6.0 — Playlist detail.
+ * Ember design-system port. Same DnD reorder logic, optimistic updates,
+ * rename + delete actions, "Play all" — only the visual layer is new.
+ * `data-testid` hooks preserved verbatim for E2E.
+ */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import {
@@ -28,6 +34,8 @@ import {
 import { useAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import type { PlaylistDetail, PlaylistTrack, Track } from "@/lib/types";
+import { Shell } from "@/components/ember/Shell";
+import { Btn, Crumb } from "@/components/ember/primitives";
 
 import { computeDragReorder } from "./dragLogic";
 
@@ -68,47 +76,52 @@ function TrackRow({ rowId, position, track, onRemove }: RowProps) {
       ref={setNodeRef}
       style={style}
       data-testid="playlist-row"
-      className={`flex items-center gap-3 py-2 px-3 rounded group ${
-        missing ? "opacity-50" : "hover:bg-[#1e1e2e]/50"
-      }`}
+      className={
+        "flex items-center gap-4 py-3 px-4 group border-b border-line " +
+        (missing ? "opacity-50" : "hover:bg-surf2")
+      }
     >
       <span
         {...attributes}
         {...listeners}
-        className="text-muted cursor-grab active:cursor-grabbing select-none"
+        className="text-faint cursor-grab active:cursor-grabbing select-none text-base"
         title="Drag to reorder"
         data-testid="playlist-row-handle"
       >
         ⠿
       </span>
 
-      <span className="text-muted text-xs w-5 text-right flex-shrink-0">
-        {position}
+      <span className="font-display italic text-2xl text-faint w-7 text-right flex-shrink-0">
+        {String(position).padStart(2, "0")}
       </span>
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-[#e2e2ff] truncate">
+        <p className="font-display italic text-lg text-ember-text leading-[1.15] truncate">
           {track.display_name}
           {missing && (
-            <span className="ml-2 text-[10px] text-danger uppercase tracking-widest">
+            <span className="ml-2 font-mono text-[10px] text-ember uppercase tracking-mono not-italic">
               missing
             </span>
           )}
         </p>
-        <p className="text-xs text-muted">{track.genre ?? ""}</p>
+        <p className="text-xs text-mute mt-0.5">{track.genre ?? ""}</p>
       </div>
 
-      <div className="flex items-center gap-2 flex-shrink-0 text-xs">
+      <div className="flex items-center gap-3 flex-shrink-0 font-mono text-[11px]">
         {track.camelot_key && (
-          <span className="text-neon font-bold">{track.camelot_key}</span>
+          <span className="text-ember px-2 py-0.5 border border-line2">
+            {track.camelot_key}
+          </span>
         )}
         {track.bpm && (
-          <span className="text-muted">{Math.round(track.bpm)} BPM</span>
+          <span className="text-mute">{Math.round(track.bpm)} BPM</span>
         )}
-        <span className="text-muted">{formatDuration(track.duration_sec)}</span>
+        <span className="text-faint">
+          {formatDuration(track.duration_sec)}
+        </span>
         <button
           onClick={onRemove}
-          className="text-muted hover:text-danger opacity-0 group-hover:opacity-100 transition-opacity ml-2"
+          className="text-faint hover:text-ember opacity-0 group-hover:opacity-100 transition-opacity ml-2"
           aria-label="Remove from playlist"
         >
           ✕
@@ -123,9 +136,6 @@ export default function PlaylistDetailPage() {
   const params = useParams<{ id: string }>();
   const playlistId = Number(params?.id);
 
-  // `useAuth` returns `{ user, hydrated }`. The fetch effect waits for
-  // `hydrated === true` so a logged-in user isn't bounced to /login on the
-  // first SSR-matching render.
   const { user, hydrated } = useAuth();
   const [pl, setPl] = useState<PlaylistDetail | null>(null);
   const [loading, setLoading] = useState(true);
@@ -150,11 +160,6 @@ export default function PlaylistDetailPage() {
     }
   }, [playlistId]);
 
-  // Auth gate + initial fetch. Waits for hydration before redirecting and
-  // dispatches all `setState` calls inside promise callbacks (microtasks),
-  // satisfying `react-hooks/set-state-in-effect`. The shared `load()`
-  // helper above is still used by reorder/remove recovery handlers, which
-  // are event-driven (not effect bodies).
   useEffect(() => {
     if (!hydrated) return;
     if (!user) {
@@ -190,8 +195,6 @@ export default function PlaylistDetailPage() {
     }),
   );
 
-  // Position-aware row id — duplicates are allowed, so the track id alone
-  // isn't unique across rows.
   const rowIds = useMemo(
     () => (pl?.tracks ?? []).map((t, i) => `${t.id}-pos${i}`),
     [pl?.tracks],
@@ -207,13 +210,11 @@ export default function PlaylistDetailPage() {
       rowIds,
     );
     if (!result) return;
-    // Optimistic update.
     setPl({ ...pl, tracks: result.nextTracks });
     try {
       await reorderTracks(pl.id, result.reorderArgs);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Reorder failed");
-      // Refresh from server to discard the failed local change.
       load();
     }
   }
@@ -251,7 +252,6 @@ export default function PlaylistDetailPage() {
     const t = pl.tracks[index];
     try {
       await removeTrack(pl.id, t.id);
-      // Refresh — the backend compacted positions and we need the new order.
       load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Remove failed");
@@ -268,123 +268,136 @@ export default function PlaylistDetailPage() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen p-6 max-w-4xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
-        <div className="min-w-0 flex-1 mr-4">
-          <button
-            onClick={() => router.push("/playlists")}
-            className="text-muted text-xs hover:text-[#e2e2ff] mb-2"
-          >
-            ← All playlists
-          </button>
-          {editingName ? (
-            <form onSubmit={handleRename} className="flex items-center gap-2">
-              <input
-                autoFocus
-                type="text"
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                maxLength={100}
-                data-testid="playlist-name-input"
-                className="flex-1 bg-[#0a0a0f] border border-border rounded px-2 py-1 text-base text-[#e2e2ff] focus:border-neon focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="text-neon text-xs px-2 py-1 hover:underline"
-              >
-                Save
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setEditingName(false);
-                  setNameDraft(pl?.name ?? "");
-                }}
-                className="text-muted text-xs px-2 py-1 hover:text-[#e2e2ff]"
-              >
-                Cancel
-              </button>
-            </form>
-          ) : (
-            <h1
-              onClick={() => setEditingName(true)}
-              className="font-pixel text-neon text-base glow tracking-widest cursor-text"
-              data-testid="playlist-name"
-            >
-              {pl?.name ?? "…"}
-            </h1>
-          )}
-          <p className="text-muted text-xs mt-1">
-            {pl ? `${pl.tracks.length} tracks` : ""}
-          </p>
-        </div>
+    <Shell username={user.username}>
+      <section className="px-[60px] pt-10 pb-6 border-b border-line">
+        <button
+          onClick={() => router.push("/playlists")}
+          className="font-mono text-[11px] text-faint uppercase tracking-mono hover:text-ember transition-colors"
+        >
+          ← all playlists
+        </button>
 
-        <div className="flex items-center gap-3 flex-shrink-0">
-          <button
-            onClick={handlePlayAll}
-            disabled={!pl || pl.tracks.length === 0}
-            data-testid="playlist-play-all"
-            className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim disabled:opacity-50 transition-colors"
-          >
-            ▶ Play all
-          </button>
-          <button
-            onClick={handleDelete}
-            data-testid="playlist-delete"
-            className="text-muted text-xs hover:text-danger transition-colors"
-          >
-            Delete
-          </button>
+        <div className="mt-3 flex items-end justify-between gap-6">
+          <div className="min-w-0 flex-1">
+            <Crumb>playlist · {pl?.tracks.length ?? "…"} tracks</Crumb>
+            {editingName ? (
+              <form
+                onSubmit={handleRename}
+                className="mt-2 flex items-center gap-3"
+              >
+                <input
+                  autoFocus
+                  type="text"
+                  value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  maxLength={100}
+                  data-testid="playlist-name-input"
+                  className="flex-1 bg-transparent border-0 border-b border-line2 px-0 py-1
+                    font-display italic text-[64px] leading-[0.95] tracking-display-tight text-cream
+                    outline-none focus:border-ember transition-colors"
+                />
+                <button
+                  type="submit"
+                  className="font-mono text-[11px] text-ember uppercase tracking-mono hover:text-ember-dark transition-colors"
+                >
+                  save
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingName(false);
+                    setNameDraft(pl?.name ?? "");
+                  }}
+                  className="font-mono text-[11px] text-faint uppercase tracking-mono hover:text-ember-text transition-colors"
+                >
+                  cancel
+                </button>
+              </form>
+            ) : (
+              <h1
+                onClick={() => setEditingName(true)}
+                className="font-display italic font-normal text-[64px] leading-[0.95] tracking-display-tight m-0 mt-2 cursor-text"
+                data-testid="playlist-name"
+              >
+                {pl?.name ?? "…"}
+                <span className="text-ember">.</span>
+              </h1>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3 flex-shrink-0">
+            <Btn
+              onClick={handlePlayAll}
+              disabled={!pl || pl.tracks.length === 0}
+              data-testid="playlist-play-all"
+            >
+              ▶ Play all
+            </Btn>
+            <Btn
+              kind="quiet"
+              onClick={handleDelete}
+              data-testid="playlist-delete"
+              className="hover:text-ember"
+            >
+              Delete
+            </Btn>
+          </div>
         </div>
-      </div>
+      </section>
 
       {error && (
-        <div className="border border-danger rounded p-3 text-xs text-danger mb-4">
+        <div className="mx-[60px] mt-4 border border-ember p-4 font-mono text-xs text-ember">
           {error}
         </div>
       )}
 
-      {loading ? (
-        <p className="text-muted text-xs animate-pulse">Loading…</p>
-      ) : !pl ? (
-        <p className="text-muted text-xs">Playlist not found.</p>
-      ) : pl.tracks.length === 0 ? (
-        <div className="border border-dashed border-border rounded p-12 text-center">
-          <p className="text-muted text-sm">
-            No tracks yet. Add some from the{" "}
-            <button
-              onClick={() => router.push("/catalog")}
-              className="text-neon hover:underline"
-            >
-              catalog
-            </button>
-            .
+      <section className="px-[60px] py-8 flex-1">
+        {loading ? (
+          <p className="font-mono text-xs text-faint uppercase tracking-mono">
+            loading…
           </p>
-        </div>
-      ) : (
-        <div className="bg-surface border border-border rounded">
-          <DndContext
-            sensors={sensors}
-            collisionDetection={closestCenter}
-            onDragEnd={handleDragEnd}
-          >
-            <SortableContext
-              items={rowIds}
-              strategy={verticalListSortingStrategy}
+        ) : !pl ? (
+          <p className="font-mono text-xs text-faint uppercase tracking-mono">
+            playlist not found.
+          </p>
+        ) : pl.tracks.length === 0 ? (
+          <div className="border border-dashed border-line2 p-12 text-center">
+            <p className="text-mute text-sm">
+              No tracks yet. Add some from the{" "}
+              <button
+                onClick={() => router.push("/catalog")}
+                className="text-ember hover:text-ember-dark hover:underline transition-colors"
+              >
+                catalog
+              </button>
+              .
+            </p>
+          </div>
+        ) : (
+          <div className="bg-surf border border-line">
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
             >
-              {pl.tracks.map((t, i) => (
-                <TrackRow
-                  key={rowIds[i]}
-                  rowId={rowIds[i]}
-                  position={i + 1}
-                  track={t}
-                  onRemove={() => handleRemove(i)}
-                />
-              ))}
-            </SortableContext>
-          </DndContext>
-        </div>
-      )}
-    </div>
+              <SortableContext
+                items={rowIds}
+                strategy={verticalListSortingStrategy}
+              >
+                {pl.tracks.map((t, i) => (
+                  <TrackRow
+                    key={rowIds[i]}
+                    rowId={rowIds[i]}
+                    position={i + 1}
+                    track={t}
+                    onRemove={() => handleRemove(i)}
+                  />
+                ))}
+              </SortableContext>
+            </DndContext>
+          </div>
+        )}
+      </section>
+    </Shell>
   );
 }

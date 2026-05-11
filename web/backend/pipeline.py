@@ -811,6 +811,113 @@ async def load_memory(genre: str, ctx: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# v2.6.0 — set-health + REST→async bridge
+# ---------------------------------------------------------------------------
+
+# Coefficient for set-health: each structured problem subtracts this many
+# points. Calibrated so a perfect set scores 100, a typical critique with
+# 3-4 issues lands ~75-80, and only catastrophic playlists drop below 60.
+_SET_HEALTH_PROBLEM_PENALTY = 6
+
+
+def compute_set_health(structured_problems: list[dict] | None) -> int:
+    """Derive a 0–100 score from the critic's structured problem count.
+
+    Called after `phase_critique` and after every editor mutation that
+    might fix or introduce a problem.
+    """
+    n = len(structured_problems or [])
+    return max(0, min(100, 100 - _SET_HEALTH_PROBLEM_PENALTY * n))
+
+
+async def run_planning_from_brief(s, emit: Callable) -> None:
+    """Drive genre → plan → critique after the Brief parser seeded ``ctx``.
+
+    Called from ``POST /api/sessions { brief }`` as a background task. Mutates
+    the Session in place (phase, structured_problems, set_health, etc.) and
+    emits ``phase_start``/``phase_complete`` events the same way the WS
+    dispatcher does — so the frontend's `/curate` page can subscribe via
+    ``/ws/sessions/{id}`` and pick up the stream transparently.
+
+    The legacy WS flow requires a manual ``checkpoint1`` approval between
+    plan and critique. v2.6.0 collapses that into one continuous "Apollo is
+    curating" step: the user reviews + acts on the result at ``/curate``,
+    which implicitly approves by clicking Materialize.
+
+    Falls back to the conversational ``phase_genre_guard`` whenever the
+    cheap brief parser couldn't pin a genre OR returned a genre that isn't
+    in the catalog. The user's reply on /curate via the existing WS
+    handler will resume the chain (``genre_intent`` path).
+    """
+    if "user_id" not in s.context_variables:
+        s.context_variables["user_id"] = s.user_id
+
+    brief_text = s.context_variables.get("brief_text", "")
+
+    # Catalog pre-flight — surfaces "no tracks at all" as a banner rather
+    # than as a vague LLM response.
+    try:
+        await asyncio.to_thread(check_catalog)
+    except CatalogUnavailable as exc:
+        await emit({"type": "error", "message": str(exc)})
+        s.phase = "init"
+        return
+
+    # ── Genre confirmation (only when parser couldn't pin a usable one) ─
+    genre = s.context_variables.get("genre")
+    needs_guard = not genre
+    if genre:
+        try:
+            await asyncio.to_thread(check_catalog, genre)
+        except CatalogUnavailable:
+            # Parser hallucinated a genre that isn't in catalog. Drop it
+            # and fall back to the guard with the brief text as input.
+            s.context_variables.pop("genre", None)
+            needs_guard = True
+
+    if needs_guard:
+        s.phase = "genre"
+        history = s.messages.setdefault("genre", [])
+        confirmed = await phase_genre_guard(
+            brief_text or "I'd like to build a set.",
+            history, s.context_variables, emit,
+        )
+        if not confirmed:
+            # Guard is still asking. Stay in "genre" so the WS dispatcher
+            # picks up the user's next reply and resumes from there.
+            return
+        s.context_variables.update(confirmed)
+        await emit({"type": "phase_complete", "phase": "genre", "data": s.to_dict()})
+        # Re-validate after the guard pinned a genre.
+        try:
+            await asyncio.to_thread(check_catalog, confirmed["genre"])
+        except CatalogUnavailable as exc:
+            await emit({"type": "error", "message": str(exc)})
+            s.phase = "init"
+            return
+
+    # ── Planner ───────────────────────────────────────────────────
+    s.phase = "planning"
+    await emit({"type": "phase_start", "phase": "planning"})
+    memory = await load_memory(s.context_variables.get("genre", ""), s.context_variables)
+    await phase_plan(s.context_variables, emit, memory)
+    await emit({"type": "phase_complete", "phase": "planning", "data": s.to_dict()})
+
+    # ── Critic (auto-chained) ─────────────────────────────────────
+    s.phase = "critique"
+    await emit({"type": "phase_start", "phase": "critique"})
+    verdict, problems, structured = await phase_critique(
+        s.context_variables, emit, memory
+    )
+    s.critic_verdict = verdict
+    s.critic_problems = problems
+    s.structured_problems = structured
+    s.set_health = compute_set_health(structured)
+    s.phase = "checkpoint2"
+    await emit({"type": "phase_complete", "phase": "critique", "data": s.to_dict()})
+
+
+# ---------------------------------------------------------------------------
 # v2.5.1 — Live phase. The planning pipeline ends at the rating step; the
 # live phase is its own loop driven by ``agent.live_dj.run_live_session_async``
 # and a ``LiveEngineBrowser`` that publishes events through the WS handler.

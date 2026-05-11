@@ -1,12 +1,23 @@
 "use client";
+/**
+ * Apollo v2.6.0 — Catalog (Library of tracks).
+ *
+ * Ember design-system port of the legacy catalog. Same data + behaviour
+ * (genre filter, favorites toggle, free-text search, optimistic rating
+ * patch, detail drawer, add-to-playlist menu, in-page player) — only the
+ * visual layer changes. ``data-testid`` hooks are preserved verbatim so
+ * the existing E2E suite keeps working without spec edits.
+ */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { clearRating, getCatalog, setRating } from "@/lib/api";
-import { clearAuth, useAuth } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
 import { usePlayer } from "@/lib/player";
 import StarRating from "@/components/StarRating";
-import type { Track } from "@/lib/types";
 import AddToPlaylistMenu from "@/components/AddToPlaylistMenu";
+import { Shell } from "@/components/ember/Shell";
+import { Crumb, Stripe } from "@/components/ember/primitives";
+import type { Track } from "@/lib/types";
 
 function formatDuration(sec: number | null | undefined) {
   if (!sec) return "—";
@@ -17,10 +28,6 @@ function formatDuration(sec: number | null | undefined) {
 
 export default function CatalogPage() {
   const router = useRouter();
-  // `useAuth` returns `{ user, hydrated }`. The redirect / fetch effects
-  // only fire once `hydrated === true`, avoiding a pre-hydration bounce to
-  // /login. The `setState`-in-effect inside `useAuth` itself is the single
-  // canonical hydration-sync exception (per-line disabled there).
   const { user, hydrated } = useAuth();
   const [tracks, setTracks] = useState<Track[]>([]);
   const [genres, setGenres] = useState<string[]>([]);
@@ -31,21 +38,11 @@ export default function CatalogPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // Auth gate — only redirects after hydration so a logged-in user isn't
-  // bounced to /login on the first SSR-matching render. Side effect is
-  // navigation only, satisfying `react-hooks/set-state-in-effect`.
   useEffect(() => {
     if (!hydrated) return;
     if (!user) router.push("/login");
   }, [hydrated, user, router]);
 
-  // Fetch catalog whenever the genre filter (or first user load) changes.
-  // All `setState` calls are dispatched from promise callbacks (microtasks),
-  // not synchronously inside the effect body, which is the canonical pattern
-  // recommended by `react-hooks/set-state-in-effect`. Loading state is
-  // toggled in the genre-change event handler (`handleGenreChange` below)
-  // for subsequent fetches; the initial render already starts with
-  // `loading = true`.
   useEffect(() => {
     if (!hydrated || !user) return;
     let cancelled = false;
@@ -69,9 +66,6 @@ export default function CatalogPage() {
     };
   }, [hydrated, user, genre]);
 
-  // Genre filter change — flip loading immediately so the UI reflects the
-  // pending fetch without waiting for the effect to finish. Keeps the
-  // setState out of the effect body.
   const handleGenreChange = useCallback(
     (next: string) => {
       if (next === genre) return;
@@ -81,9 +75,6 @@ export default function CatalogPage() {
     [genre],
   );
 
-  // Optimistic rating updates — patch the in-memory list immediately so the
-  // card re-renders without waiting for the network round trip. The selected
-  // detail panel reads from the same state via `tracks`/derived lookup.
   const updateLocalRating = useCallback(
     (trackId: string, next: number | null) => {
       setTracks((prev) =>
@@ -102,7 +93,6 @@ export default function CatalogPage() {
       try {
         await setRating(trackId, rating);
       } catch (e) {
-        // Roll back on error — refetch the catalog to stay in sync.
         getCatalog(genre || undefined)
           .then((c) => setTracks(c.tracks))
           .catch(() => {});
@@ -154,115 +144,92 @@ export default function CatalogPage() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen p-6 max-w-7xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-6">
-        <div>
-          <h1 className="font-pixel text-neon text-base glow tracking-widest">
-            APOLLO / CATALOG
-          </h1>
-          <p className="text-muted text-xs mt-1">
-            {loading ? "Loading…" : `${filtered.length} tracks`}
-          </p>
+    <Shell username={user.username}>
+      <section className="px-[60px] pt-10 pb-6 border-b border-line">
+        <div className="flex items-end justify-between gap-6">
+          <div>
+            <Crumb>library · {loading ? "loading…" : `${filtered.length} tracks`}</Crumb>
+            <h1 className="font-display italic font-normal text-[64px] leading-[0.95] tracking-display-tight m-0 mt-2">
+              The catalog<span className="text-ember">.</span>
+            </h1>
+          </div>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="search name · tag · key…"
+            className="w-72 bg-transparent border-0 border-b border-line2 px-0 py-2
+              font-display italic text-xl text-cream
+              outline-none focus:border-ember transition-colors
+              placeholder:text-faint"
+          />
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => router.push("/dashboard")}
-            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
-          >
-            ← Dashboard
-          </button>
-          <button
-            onClick={() => router.push("/playlists")}
-            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
-          >
-            Playlists
-          </button>
-          <button
-            onClick={() => {
-              clearAuth();
-              router.push("/login");
-            }}
-            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
-          >
-            Sign Out
-          </button>
-        </div>
-      </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <button
-          onClick={() => handleGenreChange("")}
-          className={`text-xs px-3 py-1 rounded border transition-colors ${
-            genre === ""
-              ? "border-neon text-neon bg-neon/10"
-              : "border-border text-muted hover:border-neon hover:text-neon"
-          }`}
-        >
-          All
-        </button>
-        {genres.map((g) => (
-          <button
-            key={g}
-            onClick={() => handleGenreChange(g)}
-            className={`text-xs px-3 py-1 rounded border transition-colors ${
-              genre === g
-                ? "border-neon text-neon bg-neon/10"
-                : "border-border text-muted hover:border-neon hover:text-neon"
-            }`}
+        {/* Genre + favorites pills */}
+        <div className="flex flex-wrap items-center gap-2 mt-6">
+          <FilterPill
+            active={genre === ""}
+            onClick={() => handleGenreChange("")}
           >
-            {g}
+            all
+          </FilterPill>
+          {genres.map((g) => (
+            <FilterPill
+              key={g}
+              active={genre === g}
+              onClick={() => handleGenreChange(g)}
+            >
+              {g}
+            </FilterPill>
+          ))}
+          <button
+            onClick={() => setFavoritesOnly((v) => !v)}
+            aria-pressed={favoritesOnly}
+            data-testid="favorites-filter"
+            className={
+              "font-mono text-[11px] uppercase tracking-mono px-3 py-1 border transition-colors " +
+              (favoritesOnly
+                ? "border-ember text-ember bg-ember/10"
+                : "border-line2 text-mute hover:border-line2 hover:text-ember-text")
+            }
+          >
+            ★ favoritos
           </button>
-        ))}
-        <button
-          onClick={() => setFavoritesOnly((v) => !v)}
-          aria-pressed={favoritesOnly}
-          data-testid="favorites-filter"
-          className={`text-xs px-3 py-1 rounded border transition-colors ${
-            favoritesOnly
-              ? "border-neon text-neon bg-neon/10"
-              : "border-border text-muted hover:border-neon hover:text-neon"
-          }`}
-        >
-          ★ Favoritos
-        </button>
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search name / tag / key…"
-          className="ml-auto bg-surface border border-border rounded px-3 py-1 text-xs text-[#e2e2ff] placeholder-muted focus:border-neon focus:outline-none w-64"
-        />
-      </div>
+        </div>
+      </section>
 
       {error && (
-        <div className="border border-danger rounded p-4 text-xs text-danger mb-4">
+        <div className="mx-[60px] mt-4 border border-ember p-4 font-mono text-xs text-ember">
           {error}
         </div>
       )}
 
       {/* Grid */}
-      {loading ? (
-        <p className="text-muted text-xs animate-pulse">Loading catalog…</p>
-      ) : filtered.length === 0 ? (
-        <p className="text-muted text-xs">No tracks match.</p>
-      ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
-          {filtered.map((t) => (
-            <TrackCard
-              key={t.id}
-              track={t}
-              list={filtered}
-              onClick={() => setSelected(t)}
-              onRate={handleRate}
-              onClearRating={handleClearRating}
-            />
-          ))}
-        </div>
-      )}
+      <section className="px-[60px] py-8 flex-1">
+        {loading ? (
+          <p className="font-mono text-xs text-faint uppercase tracking-mono">
+            loading catalog…
+          </p>
+        ) : filtered.length === 0 ? (
+          <p className="font-mono text-xs text-faint uppercase tracking-mono">
+            no tracks match.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+            {filtered.map((t) => (
+              <TrackCard
+                key={t.id}
+                track={t}
+                list={filtered}
+                onClick={() => setSelected(t)}
+                onRate={handleRate}
+                onClearRating={handleClearRating}
+              />
+            ))}
+          </div>
+        )}
+      </section>
 
-      {/* Detail drawer */}
       {selected && (
         <TrackDetail
           track={selected}
@@ -272,10 +239,36 @@ export default function CatalogPage() {
           onClearRating={handleClearRating}
         />
       )}
-    </div>
+    </Shell>
   );
 }
 
+// ── Filter pill ──────────────────────────────────────────────────────────
+function FilterPill({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={
+        "font-mono text-[11px] uppercase tracking-mono px-3 py-1 border transition-colors " +
+        (active
+          ? "border-ember text-ember bg-ember/10"
+          : "border-line2 text-mute hover:text-ember-text")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+// ── Track card ──────────────────────────────────────────────────────────
 function TrackCard({
   track,
   list,
@@ -297,15 +290,16 @@ function TrackCard({
       onClick={onClick}
       role="button"
       tabIndex={0}
+      data-testid="track-card"
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onClick();
         }
       }}
-      className="group bg-surface border border-border rounded text-left hover:border-neon transition-colors cursor-pointer focus:outline-none focus:border-neon relative"
+      className="group bg-surf border border-line text-left hover:border-ember transition-colors cursor-pointer focus:outline-none focus:border-ember relative"
     >
-      <div className="aspect-square bg-[#0a0a0f] relative overflow-hidden rounded-t">
+      <div className="aspect-square relative overflow-hidden">
         {cover ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
@@ -315,17 +309,17 @@ function TrackCard({
             className="w-full h-full object-cover group-hover:scale-105 transition-transform"
           />
         ) : (
-          <div className="w-full h-full flex items-center justify-center text-muted text-[10px] font-pixel">
-            NO ART
-          </div>
+          <Stripe alpha={0.18} className="w-full h-full flex items-center justify-center">
+            <span className="font-mono text-[10px] text-faint uppercase tracking-mono">
+              no art
+            </span>
+          </Stripe>
         )}
         {track.camelot_key && (
-          <span className="absolute top-1 left-1 bg-[#0a0a0f]/80 text-neon text-[10px] px-1.5 py-0.5 rounded font-mono">
+          <span className="absolute top-1.5 left-1.5 bg-ink/80 text-ember text-[10px] px-1.5 py-0.5 font-mono">
             {track.camelot_key}
           </span>
         )}
-        {/* Add-to-playlist "+" — hover-visible, top-right so it doesn't
-            collide with the bottom-right play overlay. */}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -333,12 +327,10 @@ function TrackCard({
           }}
           aria-label={`Add ${track.display_name} to a playlist`}
           data-testid="track-card-add"
-          className="absolute top-1 right-1 w-7 h-7 rounded-full bg-[#0a0a0f]/80 text-neon text-sm flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-neon hover:text-[#0a0a0f] transition-all"
+          className="absolute top-1.5 right-1.5 w-7 h-7 rounded-full bg-ink/80 text-ember text-sm flex items-center justify-center opacity-0 group-hover:opacity-100 hover:bg-ember hover:text-cream transition-all"
         >
           +
         </button>
-        {/* Play overlay — hover-visible. Stop propagation so clicking play
-            doesn't also open the detail drawer. */}
         <button
           onClick={(e) => {
             e.stopPropagation();
@@ -346,7 +338,7 @@ function TrackCard({
           }}
           aria-label={`Play ${track.display_name}`}
           data-testid="track-card-play"
-          className="absolute bottom-1 right-1 w-8 h-8 rounded-full bg-neon text-[#0a0a0f] text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 hover:scale-110 transition-all shadow"
+          className="absolute bottom-1.5 right-1.5 w-8 h-8 rounded-full bg-ember text-cream text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 hover:scale-110 transition-all shadow"
         >
           ▶
         </button>
@@ -357,21 +349,21 @@ function TrackCard({
           onClose={() => setMenuOpen(false)}
         />
       )}
-      <div className="p-2">
-        <p className="text-xs text-[#e2e2ff] truncate font-bold">
+      <div className="p-3">
+        <p className="font-display italic text-[17px] leading-[1.15] text-ember-text truncate">
           {track.display_name}
         </p>
         {track.suno?.disambiguated && track.suno?.title && (
-          <p className="text-[10px] text-muted truncate">
+          <p className="text-[10px] text-mute truncate mt-0.5">
             orig: {track.suno.title}
           </p>
         )}
-        <p className="text-[10px] text-muted mt-0.5">
+        <p className="font-mono text-[10px] text-faint uppercase tracking-mono mt-1">
           {track.bpm ? `${track.bpm} BPM` : "—"} ·{" "}
           {formatDuration(track.duration_sec)}
         </p>
         <div
-          className="mt-1"
+          className="mt-1.5"
           onClick={(e) => e.stopPropagation()}
           onKeyDown={(e) => e.stopPropagation()}
         >
@@ -388,6 +380,7 @@ function TrackCard({
   );
 }
 
+// ── Detail drawer ───────────────────────────────────────────────────────
 function TrackDetail({
   track,
   list,
@@ -410,51 +403,55 @@ function TrackDetail({
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl bg-surface border-l border-border overflow-y-auto p-6 animate-slide-up"
+        className="w-full max-w-xl bg-surf border-l border-line overflow-y-auto p-9 animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between mb-4">
+        <div className="flex items-start justify-between mb-6">
           <div>
-            <h2 className="text-lg text-[#e2e2ff] font-bold">
+            <Crumb>track detail</Crumb>
+            <h2 className="font-display italic font-normal text-3xl tracking-display-snug mt-1">
               {track.display_name}
             </h2>
             {suno.disambiguated && suno.title && (
-              <p className="text-xs text-muted mt-1">
-                Original Suno title: <span className="text-purple">{suno.title}</span>
+              <p className="text-xs text-mute mt-2">
+                Original Suno title:{" "}
+                <span className="text-ember-text">{suno.title}</span>
               </p>
             )}
           </div>
           <button
             onClick={onClose}
-            className="text-muted hover:text-danger text-sm"
+            className="text-faint hover:text-ember text-base"
           >
             ✕
           </button>
         </div>
 
-        {suno.cover_url && (
+        {suno.cover_url ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
             src={suno.cover_url}
             alt={track.display_name}
-            className="w-full rounded border border-border mb-4"
+            className="w-full border border-line2 mb-6"
           />
+        ) : (
+          <Stripe alpha={0.18} className="w-full aspect-square mb-6 border-line2" />
         )}
 
-        <div className="flex gap-2 mb-4 relative">
+        <div className="flex gap-2 mb-6 relative">
           <button
             onClick={() => play(track, list)}
             data-testid="track-detail-play"
-            className="flex-1 bg-neon text-[#0a0a0f] text-xs font-pixel tracking-widest py-2 rounded hover:bg-neon-dim transition-colors"
+            className="flex-1 bg-ember text-cream font-sans text-sm font-medium py-3 hover:brightness-110 transition-all"
           >
-            ▶ PLAY
+            ▶ Play
           </button>
           <button
             onClick={() => setAddOpen((v) => !v)}
             data-testid="track-detail-add"
-            className="px-4 bg-surface border border-border text-[#e2e2ff] text-xs font-pixel tracking-widest py-2 rounded hover:border-neon hover:text-neon transition-colors"
+            className="px-5 bg-transparent border border-line2 text-ember-text font-sans text-sm py-3 hover:border-ember hover:text-ember transition-colors"
           >
-            + PLAYLIST
+            + Playlist
           </button>
           {addOpen && (
             <AddToPlaylistMenu
@@ -464,10 +461,8 @@ function TrackDetail({
           )}
         </div>
 
-        <div className="flex items-center gap-3 mb-4 border border-border rounded p-3">
-          <span className="text-[10px] text-muted uppercase tracking-wider">
-            Your rating
-          </span>
+        <div className="flex items-center gap-3 mb-6 border border-line p-3">
+          <Crumb>your rating</Crumb>
           <StarRating
             value={track.user_rating ?? null}
             onChange={(n) => onRate(track.id, n)}
@@ -477,7 +472,7 @@ function TrackDetail({
           />
         </div>
 
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs mb-4">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm mb-6">
           <Field label="Genre" value={track.genre_folder ?? track.genre} />
           <Field label="BPM" value={track.bpm?.toString()} />
           <Field label="Key" value={track.camelot_key} />
@@ -488,7 +483,7 @@ function TrackDetail({
 
         {suno.prompt && (
           <Section label="Prompt">
-            <p className="text-xs text-[#e2e2ff] leading-relaxed whitespace-pre-wrap">
+            <p className="text-sm text-ember-text leading-[1.55] whitespace-pre-wrap">
               {suno.prompt}
             </p>
           </Section>
@@ -496,21 +491,21 @@ function TrackDetail({
 
         {suno.tags && suno.tags !== suno.prompt && (
           <Section label="Tags">
-            <p className="text-xs text-muted leading-relaxed">{suno.tags}</p>
+            <p className="text-xs text-mute leading-[1.55]">{suno.tags}</p>
           </Section>
         )}
 
         {suno.lyrics && (
           <Section label="Lyrics">
-            <pre className="text-xs text-[#e2e2ff] whitespace-pre-wrap font-mono">
+            <pre className="text-xs text-ember-text whitespace-pre-wrap font-mono">
               {suno.lyrics}
             </pre>
           </Section>
         )}
 
         {track.file && (
-          <p className="text-[10px] text-muted mt-6 break-all">
-            <span className="text-muted">file: </span>
+          <p className="font-mono text-[10px] text-faint mt-8 break-all">
+            <span className="text-faint">file: </span>
             {track.file}
           </p>
         )}
@@ -527,11 +522,11 @@ function Field({
   value?: string | null;
 }) {
   return (
-    <div className="border-b border-border pb-1">
-      <dt className="text-[10px] text-muted uppercase tracking-wider">
+    <div className="border-b border-line pb-1.5">
+      <dt className="font-mono text-[10px] text-faint uppercase tracking-mono">
         {label}
       </dt>
-      <dd className="text-[#e2e2ff]">{value ?? "—"}</dd>
+      <dd className="text-ember-text mt-0.5">{value ?? "—"}</dd>
     </div>
   );
 }
@@ -544,10 +539,8 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mb-4">
-      <h3 className="text-[10px] text-muted uppercase tracking-wider mb-1">
-        {label}
-      </h3>
+    <section className="mb-6">
+      <Crumb className="mb-1.5 block">{label}</Crumb>
       {children}
     </section>
   );

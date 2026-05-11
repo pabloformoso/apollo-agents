@@ -21,6 +21,7 @@ import { useParams, useRouter } from "next/navigation";
 
 import VisualLayer from "@/components/VisualLayer";
 import { useAuth } from "@/lib/auth";
+import { useAuthQueryBootstrap } from "@/lib/auth-bootstrap";
 import { useLiveSession } from "@/lib/live";
 
 export default function VisualOnlyPage() {
@@ -28,14 +29,20 @@ export default function VisualOnlyPage() {
   const router = useRouter();
   const sessionId = params?.id ?? null;
   const { user, hydrated } = useAuth();
+  // OBS Browser Sources don't share localStorage with the operator's
+  // browser, so the chrome-less stream URL accepts an `?auth=<jwt>`
+  // hand-off. The hook persists the token and reloads with the URL
+  // cleaned up so useAuth picks it up normally.
+  const { bootstrapping } = useAuthQueryBootstrap();
 
-  // Auth gate (mirrors the parent /live page).
+  // Auth gate (mirrors the parent /live page). Wait for the URL-token
+  // bootstrap so we don't bounce to /login before saveAuth lands.
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || bootstrapping) return;
     if (!user) {
       router.replace("/login");
     }
-  }, [hydrated, user, router]);
+  }, [hydrated, bootstrapping, user, router]);
 
   // Defer opening the WS until after hydration to keep SSR markup stable.
   const liveSessionId = hydrated && user ? sessionId : null;

@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from . import db
+from .arc import compute_arc
+from .notes import to_critic_notes
 
 
 class Session:
@@ -28,6 +30,14 @@ class Session:
         self.validator_issues: list[str] = []
         # Set after build_session succeeds
         self.session_name: Optional[str] = None
+        # v2.6.0 — track which critic notes the user has acted on. Values are
+        # "applied" or "ignored" so the frontend can render distinct states
+        # ("applied" greys with a checkmark; "ignored" greys without).
+        self.handled_notes: dict[str, str] = {}
+        # v2.6.0 — set-health score (0–100) computed after critique and
+        # recomputed after every editor mutation. ``None`` until first
+        # critique runs.
+        self.set_health: Optional[int] = None
         self.created_at = datetime.now(timezone.utc).isoformat()
 
     # ------------------------------------------------------------------
@@ -60,6 +70,14 @@ class Session:
             "critic_verdict": self.critic_verdict,
             "critic_problems": self.critic_problems,
             "structured_problems": self.structured_problems,
+            # v2.6.0 — server-mapped CriticNote payloads (with stable ids
+            # + apply/ignore status). The legacy `structured_problems`
+            # field is kept for backward compatibility with the legacy
+            # session route.
+            "notes": to_critic_notes(self.structured_problems, self.handled_notes),
+            "handled": list(self.handled_notes.keys()),
+            "arc": compute_arc(safe_playlist),
+            "set_health": self.set_health,
             "validator_status": self.validator_status,
             "validator_issues": self.validator_issues,
             "created_at": self.created_at,
@@ -90,6 +108,8 @@ class Session:
             "validator_status": self.validator_status,
             "validator_issues": self.validator_issues,
             "session_name": self.session_name,
+            "handled_notes": self.handled_notes,
+            "set_health": self.set_health,
         }
         return json.dumps(payload, default=str)
 
@@ -107,6 +127,14 @@ class Session:
         s.validator_status = data.get("validator_status")
         s.validator_issues = data.get("validator_issues", [])
         s.session_name = data.get("session_name")
+        # v2.6.0 — rehydrate optionally; older session rows won't have these
+        # fields and we want them to load cleanly with the defaults.
+        raw_handled = data.get("handled_notes") or {}
+        s.handled_notes = {
+            k: v for k, v in raw_handled.items() if isinstance(v, str)
+        }
+        sh = data.get("set_health")
+        s.set_health = int(sh) if isinstance(sh, (int, float)) else None
         return s
 
 

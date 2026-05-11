@@ -22,11 +22,13 @@ test.describe("A — auth lifecycle", () => {
 
     await registerViaUi(page, username, password);
     await page.waitForURL(/\/dashboard$/);
-    await expect(page.locator(`text=Welcome, ${username}`)).toBeVisible();
+    // v2.6.0 — username surfaces in the Shell header (top-right) instead
+    // of the legacy "Welcome, {username}" string.
+    await expect(page.getByText(username, { exact: true })).toBeVisible();
 
     // Reload — token must persist via localStorage
     await page.reload();
-    await expect(page.locator(`text=Welcome, ${username}`)).toBeVisible();
+    await expect(page.getByText(username, { exact: true })).toBeVisible();
   });
 
   test("A2: sign out clears localStorage and redirects to /login", async ({ page }) => {
@@ -36,6 +38,8 @@ test.describe("A — auth lifecycle", () => {
     await registerViaUi(page, username, password);
     await page.waitForURL(/\/dashboard$/);
 
+    // v2.6.0 — Sign out lives in the dashboard footer (`Sign out` lower-case);
+    // /(sign out|signout)/i still matches.
     await page.getByRole("button", { name: /sign out/i }).click();
     await page.waitForURL(/\/login$/);
     const token = await page.evaluate(() => localStorage.getItem("apollo_token"));

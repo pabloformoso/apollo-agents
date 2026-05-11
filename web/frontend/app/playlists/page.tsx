@@ -1,4 +1,9 @@
 "use client";
+/**
+ * Apollo v2.6.0 — Playlists list.
+ * Ember design-system port. Same data + behaviour, new visual layer.
+ * `data-testid` hooks preserved verbatim for E2E.
+ */
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -6,14 +11,13 @@ import {
   deletePlaylist as apiDelete,
   listPlaylists,
 } from "@/lib/api";
-import { clearAuth, useAuth } from "@/lib/auth";
+import { useAuth } from "@/lib/auth";
 import type { Playlist } from "@/lib/types";
+import { Shell } from "@/components/ember/Shell";
+import { Btn, Crumb } from "@/components/ember/primitives";
 
 export default function PlaylistsPage() {
   const router = useRouter();
-  // `useAuth` returns `{ user, hydrated }`. The fetch effect waits for
-  // `hydrated === true` so a logged-in user isn't bounced to /login on the
-  // first SSR-matching render.
   const { user, hydrated } = useAuth();
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [loading, setLoading] = useState(true);
@@ -21,9 +25,6 @@ export default function PlaylistsPage() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
 
-  // Auth gate + initial fetch. Waits for hydration before redirecting and
-  // dispatches all `setState` calls inside promise callbacks (microtasks),
-  // satisfying `react-hooks/set-state-in-effect`.
   useEffect(() => {
     if (!hydrated) return;
     if (!user) {
@@ -79,130 +80,119 @@ export default function PlaylistsPage() {
   if (!user) return null;
 
   return (
-    <div className="min-h-screen p-6 max-w-4xl mx-auto">
-      {/* Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="font-pixel text-neon text-base glow tracking-widest">
-            APOLLO / PLAYLISTS
-          </h1>
-          <p className="text-muted text-xs mt-1">
-            {loading ? "Loading…" : `${playlists.length} playlists`}
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => router.push("/dashboard")}
-            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
-          >
-            Dashboard →
-          </button>
-          <button
-            onClick={() => router.push("/catalog")}
-            className="text-muted text-xs hover:text-neon transition-colors"
-          >
-            Catalog →
-          </button>
-          <button
-            onClick={() => setCreating((v) => !v)}
+    <Shell username={user.username}>
+      <section className="px-[60px] pt-10 pb-6 border-b border-line">
+        <div className="flex items-end justify-between gap-6">
+          <div>
+            <Crumb>
+              library · {loading ? "loading…" : `${playlists.length} playlists`}
+            </Crumb>
+            <h1 className="font-display italic font-normal text-[64px] leading-[0.95] tracking-display-tight m-0 mt-2">
+              Playlists<span className="text-ember">.</span>
+            </h1>
+          </div>
+          <Btn
             data-testid="new-playlist-toggle"
-            className="bg-neon text-[#0a0a0f] px-4 py-2 rounded text-xs font-bold tracking-widest uppercase hover:bg-neon-dim transition-colors"
+            onClick={() => setCreating((v) => !v)}
           >
-            + New
-          </button>
-          <button
-            onClick={() => {
-              clearAuth();
-              router.push("/login");
-            }}
-            className="text-muted text-xs hover:text-[#e2e2ff] transition-colors"
-          >
-            Sign Out
-          </button>
+            + New playlist
+          </Btn>
         </div>
-      </div>
+      </section>
 
       {creating && (
-        <form
-          onSubmit={handleCreate}
-          className="mb-4 flex items-center gap-2 bg-surface border border-border rounded p-3"
-        >
-          <input
-            autoFocus
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Playlist name"
-            maxLength={100}
-            data-testid="new-playlist-name"
-            className="flex-1 bg-[#0a0a0f] border border-border rounded px-2 py-1 text-xs text-[#e2e2ff] focus:border-neon focus:outline-none"
-          />
-          <button
-            type="submit"
-            disabled={!name.trim()}
-            data-testid="new-playlist-submit"
-            className="text-neon text-xs px-3 py-1 disabled:opacity-50 hover:underline"
+        <section className="px-[60px] pt-6">
+          <form
+            onSubmit={handleCreate}
+            className="flex items-center gap-3 border border-line2 px-4 py-3 bg-surf"
           >
-            Create
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setCreating(false);
-              setName("");
-            }}
-            className="text-muted text-xs px-2 py-1 hover:text-[#e2e2ff]"
-          >
-            Cancel
-          </button>
-        </form>
+            <Crumb tone="ember">name</Crumb>
+            <input
+              autoFocus
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="A name for the playlist…"
+              maxLength={100}
+              data-testid="new-playlist-name"
+              className="flex-1 bg-transparent border-0 text-cream
+                font-display italic text-xl
+                outline-none placeholder:text-faint"
+            />
+            <Btn
+              type="submit"
+              disabled={!name.trim()}
+              data-testid="new-playlist-submit"
+              className="px-4 py-2 text-xs"
+            >
+              Create
+            </Btn>
+            <button
+              type="button"
+              onClick={() => {
+                setCreating(false);
+                setName("");
+              }}
+              className="font-mono text-[11px] text-faint uppercase tracking-mono hover:text-ember-text transition-colors"
+            >
+              cancel
+            </button>
+          </form>
+        </section>
       )}
 
       {error && (
-        <div className="border border-danger rounded p-3 text-xs text-danger mb-4">
+        <div className="mx-[60px] mt-4 border border-ember p-4 font-mono text-xs text-ember">
           {error}
         </div>
       )}
 
-      {loading ? (
-        <p className="text-muted text-xs animate-pulse">Loading…</p>
-      ) : playlists.length === 0 ? (
-        <div className="border border-dashed border-border rounded p-12 text-center">
-          <p className="text-muted text-sm mb-4">No playlists yet.</p>
-          <button
-            onClick={() => setCreating(true)}
-            className="text-neon text-xs hover:underline"
-          >
-            Create your first playlist →
-          </button>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {playlists.map((p) => (
-            <div
-              key={p.id}
-              onClick={() => router.push(`/playlists/${p.id}`)}
-              className="bg-surface border border-border rounded p-4 cursor-pointer hover:border-neon transition-colors group flex items-center justify-between"
-              data-testid={`playlist-row-${p.id}`}
+      <section className="px-[60px] py-8 flex-1">
+        {loading ? (
+          <p className="font-mono text-xs text-faint uppercase tracking-mono">
+            loading…
+          </p>
+        ) : playlists.length === 0 ? (
+          <div className="border border-dashed border-line2 p-12 text-center">
+            <p className="text-mute text-sm mb-4">No playlists yet.</p>
+            <button
+              onClick={() => setCreating(true)}
+              className="font-display italic text-base text-ember hover:text-ember-dark transition-colors"
             >
-              <div>
-                <p className="text-sm text-[#e2e2ff] font-bold">{p.name}</p>
-                <p className="text-xs text-muted mt-0.5">
-                  {p.track_count} {p.track_count === 1 ? "track" : "tracks"} ·
-                  updated {new Date(p.updated_at).toLocaleDateString()}
-                </p>
-              </div>
-              <button
-                onClick={(e) => handleDelete(p.id, e)}
-                className="text-muted hover:text-danger text-xs opacity-0 group-hover:opacity-100 transition-opacity"
-                aria-label={`Delete ${p.name}`}
+              Create your first playlist →
+            </button>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {playlists.map((p) => (
+              <article
+                key={p.id}
+                onClick={() => router.push(`/playlists/${p.id}`)}
+                className="group bg-surf border border-line p-5 cursor-pointer hover:border-ember transition-colors flex items-start justify-between gap-4"
+                data-testid={`playlist-row-${p.id}`}
               >
-                ✕
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-display italic text-2xl text-ember-text leading-[1.1] truncate">
+                    {p.name}
+                  </h3>
+                  <p className="font-mono text-[11px] text-faint uppercase tracking-mono mt-2">
+                    {p.track_count}{" "}
+                    {p.track_count === 1 ? "track" : "tracks"} · updated{" "}
+                    {new Date(p.updated_at).toLocaleDateString()}
+                  </p>
+                </div>
+                <button
+                  onClick={(e) => handleDelete(p.id, e)}
+                  className="text-faint hover:text-ember text-base opacity-0 group-hover:opacity-100 transition-opacity"
+                  aria-label={`Delete ${p.name}`}
+                >
+                  ✕
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+    </Shell>
   );
 }
