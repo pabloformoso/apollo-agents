@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 480" preserveAspectRatio="xMidYMid slice" role="img" aria-labelledby="title desc">
+  <title id="title">Apollo — AI DJ</title>
+  <desc id="desc">Apollo wordmark with the Ember design palette: italic serif title on a dark ink background with diagonal stripe pattern in ember red-orange. Tagline reads assemble, critique, perform.</desc>
+
+  <defs>
+    <!-- Diagonal stripe pattern — same SVG primitive the Stripe component
+         draws in production. Faint ember strokes at low alpha. -->
+    <pattern id="stripes" patternUnits="userSpaceOnUse" width="10" height="10" patternTransform="rotate(0)">
+      <path d="M-1,1 l2,-2 M0,10 l10,-10 M9,11 l2,-2" stroke="rgba(232,85,58,0.18)" stroke-width="1"/>
+    </pattern>
+
+    <!-- Subtle radial bloom anchored behind the wordmark. -->
+    <radialGradient id="bloom" cx="28%" cy="55%" r="55%">
+      <stop offset="0%" stop-color="#e8553a" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#e8553a" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Cream-tinted gradient on the tagline so the three words have a
+         gentle vertical pulse to them. -->
+    <linearGradient id="creamFade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f0e3c8" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#f0e3c8" stop-opacity="0.62"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Layer 1: ink background -->
+  <rect width="1600" height="480" fill="#0a0807"/>
+
+  <!-- Layer 2: ember radial bloom under the title -->
+  <rect width="1600" height="480" fill="url(#bloom)"/>
+
+  <!-- Layer 3: diagonal stripe overlay (Stripe primitive) -->
+  <rect width="1600" height="480" fill="url(#stripes)"/>
+
+  <!-- Layer 4: top + bottom hairlines for editorial framing -->
+  <line x1="60" y1="58" x2="1540" y2="58" stroke="#2a2520" stroke-width="1"/>
+  <line x1="60" y1="422" x2="1540" y2="422" stroke="#2a2520" stroke-width="1"/>
+
+  <!-- Layer 5: top-left crumb -->
+  <text x="60" y="42" font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', monospace" font-size="13" fill="#7a6e60" letter-spacing="2.5">
+    APOLLO · AI DJ · V2.6 EMBER
+  </text>
+
+  <!-- Layer 6: top-right crumb -->
+  <text x="1540" y="42" text-anchor="end" font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', monospace" font-size="13" fill="#e8553a" letter-spacing="2.5">
+    ● TONIGHT · CURATED
+  </text>
+
+  <!-- Layer 7: the wordmark — italic serif "Apollo." with ember dot -->
+  <g transform="translate(60, 295)">
+    <text font-family="'Instrument Serif', 'PT Serif', 'Source Serif Pro', Georgia, serif"
+          font-style="italic" font-weight="400" font-size="240"
+          fill="#fbf3e6" letter-spacing="-6">
+      Apollo<tspan fill="#e8553a">.</tspan>
+    </text>
+  </g>
+
+  <!-- Layer 8: stacked tagline on the right -->
+  <g transform="translate(900, 175)">
+    <text font-family="'Instrument Serif', 'PT Serif', 'Source Serif Pro', Georgia, serif"
+          font-style="italic" font-weight="400" font-size="92"
+          fill="url(#creamFade)" letter-spacing="-3" line-height="0.9">
+      <tspan x="0" dy="0">assemble<tspan fill="#e8553a">.</tspan></tspan>
+      <tspan x="0" dy="92">critique<tspan fill="#e8553a">.</tspan></tspan>
+      <tspan x="0" dy="92">perform<tspan fill="#e8553a">.</tspan></tspan>
+    </text>
+  </g>
+
+  <!-- Layer 9: bottom mono-crumb subtitle under the wordmark -->
+  <text x="60" y="332" font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', monospace"
+        font-size="14" fill="#9a8d7e" letter-spacing="2.5">
+    ONE SENTENCE IN · A CURATED SET OUT
+  </text>
+
+  <!-- Layer 10: bottom hairline cluster — three little BPM/key crumbs as
+       an Easter-egg nod to the catalog metadata that drives every set. -->
+  <g font-family="ui-monospace, 'JetBrains Mono', 'Fira Code', monospace" font-size="11" fill="#5a4f44" letter-spacing="2">
+    <text x="60"  y="448">76 BPM · 10B · LOFI</text>
+    <text x="800" y="448" text-anchor="middle">120 BPM · 8A · DEEP HOUSE</text>
+    <text x="1540" y="448" text-anchor="end">138 BPM · 11A · TECHNO</text>
+  </g>
+</svg>

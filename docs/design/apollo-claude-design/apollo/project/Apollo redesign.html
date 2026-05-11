@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Apollo · redesign</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;1,400;1,500&family=Geist:wght@400;500;600&family=Space+Grotesk:wght@400;500;600&family=DM+Sans:wght@400;500;600&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<style>
+  html, body { margin: 0; padding: 0; background: #f0eee9; font-family: 'Geist', system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="shared.jsx"></script>
+<script type="text/babel" src="variant-editorial.jsx"></script>
+<script type="text/babel" src="variant-console.jsx"></script>
+<script type="text/babel" src="variant-cinematic.jsx"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const W = 1280, H = 800;
+
+function Frame({ children }) {
+  return (
+    <div style={{ width: W, height: H, overflow: "hidden", borderRadius: 4, background: "#000" }}>
+      {children}
+    </div>
+  );
+}
+
+// Cinematic poster — Live "audience" mode parameterised by accent.
+// Used for the C · accent options section.
+function CiAccentPoster({ accent, accent2, name }) {
+  const ink   = "#0a0807";
+  const cream = "#fbf3e6";
+  const mute  = "rgba(251,243,230,0.6)";
+  const faint = "rgba(251,243,230,0.36)";
+  const display = '"Instrument Serif", Georgia, serif';
+  const sans    = '"DM Sans", system-ui, sans-serif';
+  const mono    = '"JetBrains Mono", ui-monospace, monospace';
+  return (
+    <div style={{ width: "100%", height: "100%", background: ink, color: cream, fontFamily: sans, display: "flex", flexDirection: "column" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 32px", borderBottom: "1px solid rgba(255,238,220,0.10)" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 16 }}>
+          <span style={{ fontFamily: display, fontStyle: "italic", fontSize: 24 }}>Apollo</span>
+          <span style={{ fontFamily: mono, fontSize: 10, color: faint, textTransform: "uppercase", letterSpacing: "0.18em" }}>live · {name.toLowerCase()}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, fontFamily: mono, fontSize: 10, color: accent, textTransform: "uppercase", letterSpacing: "0.22em" }}>
+          <span style={{ width: 8, height: 8, borderRadius: 999, background: accent, boxShadow: `0 0 12px ${accent}` }} />
+          broadcasting
+        </div>
+      </header>
+      <main style={{ flex: 1, position: "relative", overflow: "hidden", display: "grid", placeItems: "center", padding: 40 }}>
+        <div style={{ position: "absolute", inset: 0, background: `radial-gradient(ellipse at 50% 50%, ${accent}33, transparent 70%)` }} />
+        <svg style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} viewBox="0 0 800 600" preserveAspectRatio="xMidYMid slice">
+          {Array.from({ length: 90 }).map((_, k) => (
+            <circle key={k} cx={(k * 173) % 800} cy={(k * 311) % 600} r={(k % 5) * 0.6 + 0.4} fill={cream} opacity={((k * 7) % 10) / 14} />
+          ))}
+        </svg>
+        <div style={{ position: "absolute", top: 28, left: 36, right: 36, display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontFamily: mono, fontSize: 10, color: accent, textTransform: "uppercase", letterSpacing: "0.22em" }}>track 03 / 05</span>
+          <span style={{ fontFamily: mono, fontSize: 10, color: cream, textTransform: "uppercase", letterSpacing: "0.22em" }}>61.1 BPM · 6A</span>
+        </div>
+        <div style={{ textAlign: "center", position: "relative" }}>
+          <div style={{ fontFamily: mono, fontSize: 12, color: faint, textTransform: "uppercase", letterSpacing: "0.32em" }}>now playing</div>
+          <h1 style={{ fontFamily: display, fontStyle: "italic", fontSize: 200, fontWeight: 400, color: cream, letterSpacing: "-0.05em", margin: "8px 0 0", lineHeight: 0.85, textShadow: `0 0 60px ${accent}55` }}>Mesh</h1>
+          <div style={{ fontFamily: display, fontSize: 36, color: accent, marginTop: 12, letterSpacing: "-0.02em" }}>Brian Cid</div>
+          <div style={{ width: 260, height: 1, background: accent, opacity: 0.5, margin: "32px auto" }} />
+          <div style={{ fontFamily: mono, fontSize: 12, color: mute, letterSpacing: "0.22em", textTransform: "uppercase" }}>apollo · garden chill, 2026</div>
+        </div>
+        <div style={{ position: "absolute", bottom: 28, left: 36, right: 36, display: "flex", justifyContent: "space-between" }}>
+          <span style={{ fontFamily: mono, fontSize: 10, color: faint, textTransform: "uppercase", letterSpacing: "0.22em" }}>up next · trikk · vilara</span>
+          <span style={{ fontFamily: mono, fontSize: 10, color: accent2, textTransform: "uppercase", letterSpacing: "0.22em" }}>crossfade in 0:29</span>
+        </div>
+      </main>
+      {/* swatches strip */}
+      <footer style={{ display: "flex", alignItems: "center", gap: 16, padding: "14px 32px", borderTop: "1px solid rgba(255,238,220,0.10)", background: "#13100e" }}>
+        <span style={{ fontFamily: mono, fontSize: 10, color: faint, textTransform: "uppercase", letterSpacing: "0.18em" }}>palette</span>
+        {[["ink", ink], ["cream", cream], ["accent", accent], ["accent₂", accent2]].map(([k, c]) => (
+          <div key={k} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ width: 16, height: 16, background: c, border: "1px solid rgba(255,238,220,0.2)" }} />
+            <span style={{ fontFamily: mono, fontSize: 11, color: mute }}>{k} <span style={{ color: faint }}>{c}</span></span>
+          </div>
+        ))}
+        <span style={{ marginLeft: "auto", fontFamily: mono, fontSize: 10, color: faint, textTransform: "uppercase", letterSpacing: "0.18em" }}>type · Instrument Serif italic / DM Sans / JetBrains Mono</span>
+      </footer>
+    </div>
+  );
+}
+
+function App() {
+  return (
+    <DesignCanvas
+      title="Apollo · redesign"
+      subtitle="Three directions × six screens — pick & mix. Drag artboards to reorder, click to focus."
+    >
+      <DCSection
+        id="brief"
+        title="Context"
+        subtitle="Apollo is an agent that builds music sessions from a one-line brief. Today: terminal log, six dense phases, isolated critic. Goal: simpler, three user-facing stages — Brief → Curate → Play. Each variant explores a different aesthetic register; pick one, mix screens across variants if useful."
+      >
+        <DCArtboard id="brief-system" label="The system" width={780} height={420}>
+          <div style={{ width: "100%", height: "100%", background: "#0d0c0b", color: "#e8e0ce", padding: 32, fontFamily: '"Geist", system-ui, sans-serif', display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 24 }}>
+            <div>
+              <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 11, color: "#e8a755", textTransform: "uppercase", letterSpacing: "0.16em" }}>three stages, one app</div>
+              <h2 style={{ fontFamily: '"Newsreader", serif', fontWeight: 400, fontSize: 28, margin: "10px 0 14px", lineHeight: 1.05 }}><em style={{ color: "#e8a755" }}>Brief.</em> <em>Curate.</em> <em>Play.</em></h2>
+              <p style={{ fontSize: 13, color: "rgba(232,224,206,0.6)", lineHeight: 1.55, margin: 0 }}>The six legacy phases (genre · plan · ckpt1 · critic · edit · render) collapse into three user-facing moments. The critic stops being its own page and lives next to the playlist — fixes are one click. Live DJ becomes a destination with three modes: cabin, immersive, audience.</p>
+            </div>
+            <div>
+              <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 11, color: "rgba(232,224,206,0.5)", textTransform: "uppercase", letterSpacing: "0.16em" }}>variants</div>
+              <ul style={{ listStyle: "none", padding: 0, margin: "10px 0 0", display: "flex", flexDirection: "column", gap: 12 }}>
+                <li><span style={{ fontFamily: '"Newsreader", serif', fontStyle: "italic", fontSize: 18, color: "#e8a755" }}>A · Editorial.</span> <span style={{ fontSize: 13, color: "rgba(232,224,206,0.7)" }}> Newsreader serif + Geist sans + amber. Magazine-quiet.</span></li>
+                <li><span style={{ fontFamily: '"Space Grotesk", sans-serif', fontWeight: 600, fontSize: 18, color: "#5ee2d8" }}>B · Console.</span> <span style={{ fontSize: 13, color: "rgba(232,224,206,0.7)" }}> Space Grotesk + JetBrains Mono + electric cyan. Data-dense, structured.</span></li>
+                <li><span style={{ fontFamily: '"Instrument Serif", serif', fontStyle: "italic", fontSize: 22, color: "#e8553a" }}>C · Cinematic.</span> <span style={{ fontSize: 13, color: "rgba(232,224,206,0.7)" }}> Instrument Serif italic + DM Sans + warm red. Poster-led, big.</span></li>
+              </ul>
+            </div>
+            <div>
+              <div style={{ fontFamily: '"JetBrains Mono", monospace', fontSize: 11, color: "rgba(232,224,206,0.5)", textTransform: "uppercase", letterSpacing: "0.16em" }}>screens · per variant</div>
+              <ol style={{ paddingLeft: 18, margin: "10px 0 0", color: "rgba(232,224,206,0.75)", fontSize: 13, lineHeight: 1.7 }}>
+                <li>Dashboard / library</li>
+                <li>Brief — one-line input</li>
+                <li>Curate — playlist + critic merged</li>
+                <li>Editor — manual control</li>
+                <li>Export — render to YouTube</li>
+                <li>Live DJ — cabin / immersive / audience</li>
+              </ol>
+              <div style={{ marginTop: 16, padding: 10, border: "1px dashed rgba(232,224,206,0.2)", fontFamily: '"JetBrains Mono", monospace', fontSize: 11, color: "rgba(232,224,206,0.55)" }}>
+                placeholder visuals are diagonal-stripe SVGs — drop real cover art / video stills into <code>variant-*.jsx</code>.
+              </div>
+            </div>
+          </div>
+        </DCArtboard>
+      </DCSection>
+
+      {/* ───────────────────────────── EDITORIAL ───────────────────────────── */}
+      <DCSection
+        id="editorial"
+        title="A · Editorial"
+        subtitle="Dark editorial. Newsreader serif headlines, Geist sans body, JetBrains Mono for data. Warm amber accent. Quiet, paper-feel."
+      >
+        <DCArtboard id="ed-dashboard" label="01 · Dashboard" width={W} height={H}><Frame><EditorialDashboard /></Frame></DCArtboard>
+        <DCArtboard id="ed-brief"     label="02 · Brief"     width={W} height={H}><Frame><EditorialBrief /></Frame></DCArtboard>
+        <DCArtboard id="ed-curate"    label="03 · Curate (playlist + critic)" width={W} height={H}><Frame><EditorialCurate /></Frame></DCArtboard>
+        <DCArtboard id="ed-editor"    label="04 · Editor"    width={W} height={H}><Frame><EditorialEditor /></Frame></DCArtboard>
+        <DCArtboard id="ed-export"    label="05 · Render to YouTube" width={W} height={H}><Frame><EditorialExport /></Frame></DCArtboard>
+        <DCArtboard id="ed-live"      label="06 · Live DJ — 3 modes" width={W} height={H}><Frame><EditorialLive /></Frame></DCArtboard>
+      </DCSection>
+
+      {/* ───────────────────────────── CONSOLE ───────────────────────────── */}
+      <DCSection
+        id="console"
+        title="B · Console"
+        subtitle="Modern dark console. Space Grotesk + JetBrains Mono. Electric cyan accent. Visible-but-tamed agent state, structured panels, density-friendly."
+      >
+        <DCArtboard id="cn-dashboard" label="01 · Dashboard" width={W} height={H}><Frame><ConsoleDashboard /></Frame></DCArtboard>
+        <DCArtboard id="cn-brief"     label="02 · Brief"     width={W} height={H}><Frame><ConsoleBrief /></Frame></DCArtboard>
+        <DCArtboard id="cn-curate"    label="03 · Curate (playlist + critic)" width={W} height={H}><Frame><ConsoleCurate /></Frame></DCArtboard>
+        <DCArtboard id="cn-editor"    label="04 · Editor"    width={W} height={H}><Frame><ConsoleEditor /></Frame></DCArtboard>
+        <DCArtboard id="cn-export"    label="05 · Render to YouTube" width={W} height={H}><Frame><ConsoleExport /></Frame></DCArtboard>
+        <DCArtboard id="cn-live"      label="06 · Live DJ — 3 modes" width={W} height={H}><Frame><ConsoleLive /></Frame></DCArtboard>
+      </DCSection>
+
+      {/* ───────────────────────────── CINEMATIC ───────────────────────────── */}
+      <DCSection
+        id="cinematic"
+        title="C · Cinematic"
+        subtitle="Poster-led. Instrument Serif italic display + DM Sans body + JetBrains Mono. Warm red accent. Big imagery, music-magazine moments, dramatic Live mode."
+      >
+        <DCArtboard id="ci-dashboard" label="01 · Dashboard" width={W} height={H}><Frame><CinematicDashboard /></Frame></DCArtboard>
+        <DCArtboard id="ci-brief"     label="02 · Brief"     width={W} height={H}><Frame><CinematicBrief /></Frame></DCArtboard>
+        <DCArtboard id="ci-curate"    label="03 · Curate (playlist + critic)" width={W} height={H}><Frame><CinematicCurate /></Frame></DCArtboard>
+        <DCArtboard id="ci-editor"    label="04 · Editor"    width={W} height={H}><Frame><CinematicEditor /></Frame></DCArtboard>
+        <DCArtboard id="ci-export"    label="05 · Render to YouTube" width={W} height={H}><Frame><CinematicExport /></Frame></DCArtboard>
+        <DCArtboard id="ci-live"      label="06 · Live DJ — 3 modes" width={W} height={H}><Frame><CinematicLive /></Frame></DCArtboard>
+      </DCSection>
+
+      {/* ───────────────────── C · ACCENT EXPLORATION ───────────────────── */}
+      <DCSection
+        id="cinematic-accents"
+        title="C · accent options"
+        subtitle="Same Cinematic system, four accent directions. The poster Live mode shows the personality of each best — the rest of the app inherits the same hue. Pick one (or mix two: a primary for action + a secondary for highlights)."
+      >
+        {[
+          { id: "warm-red",   name: "Ember red",        sub: "the current one — molten, urgent",        accent: "#e8553a", accent2: "#b53d24" },
+          { id: "gold",       name: "Vintage gold",     sub: "warmer, calmer, music-poster classic",     accent: "#d99a2b", accent2: "#a87216" },
+          { id: "magenta",    name: "Neon magenta",     sub: "louder, late-night club, very 2026",       accent: "#d6447a", accent2: "#a02e5b" },
+          { id: "chartreuse", name: "Acid chartreuse",  sub: "avant-garde, contrarian, very Apollo",     accent: "#c8d442", accent2: "#94a02b" },
+          { id: "teal",       name: "Cold teal",        sub: "cool counterpoint to the warm cream base", accent: "#2da89a", accent2: "#1c7268" },
+          { id: "violet",     name: "Electric violet",  sub: "synthwave-adjacent, dreamy",                accent: "#9056e8", accent2: "#6a3cb5" },
+        ].map(p => (
+          <DCArtboard key={p.id} id={`ci-acc-${p.id}`} label={`${p.name} — ${p.sub}`} width={W} height={H}>
+            <Frame>
+              <CiAccentPoster accent={p.accent} accent2={p.accent2} name={p.name} />
+            </Frame>
+          </DCArtboard>
+        ))}
+      </DCSection>
+
+      <DCSection id="next" title="Next" subtitle="Pick an accent (or two). Then we layer in: real cover art / videos, micro-interactions, mobile companion, error states, empty states, and onboarding for first-run.">
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Apollo · prototype</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" />
+<style>
+  html, body { margin: 0; padding: 0; background: #0a0807; color: #fbf3e6; font-family: 'DM Sans', system-ui, sans-serif; }
+  * { box-sizing: border-box; }
+  ::selection { background: #e8553a; color: #fbf3e6; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,238,220,0.12); }
+  button:hover { filter: brightness(1.06); }
+  input, textarea { caret-color: #e8553a; }
+</style>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script type="text/babel" src="prototype-shell.jsx"></script>
+<script type="text/babel" src="prototype-screens.jsx"></script>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useReducer, useState } = React;
+
+const initial = {
+  brief: { text: "A 30-minute lofi ambient set for a rainy garden afternoon. Soft, contemplative, no peaks.", parsed: { genre: "lofi · ambient", duration: "30 min", mood: "contemplative", venue: "garden", energy: "plateau, no peaks", tempo: "58–66 BPM" } },
+  tracks: PROTO_TRACKS,
+  notes: PROTO_CRITIC,
+  handled: [],
+  export: { pct: 0 },
+};
+
+function reducer(state, a) {
+  switch (a.type) {
+    case "new":         return { ...initial, brief: { text: "", parsed: { genre: "—", duration: "—", mood: "—", venue: "—", energy: "—", tempo: "—" } } };
+    case "setBrief":    return { ...state, brief: a.payload };
+    case "planComplete":return state;
+    case "applyNote": {
+      // demo: insert a peak track at position 3 if "fix"
+      if (a.id === "n1") {
+        const peak = { n: 99, artist: "Brian Cid", title: "Errors", remix: null, label: "Original Mix", bpm: 61, key: "6A", energy: 7.4 };
+        const t = [...state.tracks];
+        t.splice(2, 0, peak);
+        return { ...state, tracks: t.map((x, i) => ({ ...x, n: i + 1 })), handled: [...state.handled, a.id] };
+      }
+      return { ...state, handled: [...state.handled, a.id] };
+    }
+    case "ignoreNote": return { ...state, handled: [...state.handled, a.id] };
+    case "removeTrack": return { ...state, tracks: state.tracks.filter(t => t.n !== a.n).map((x, i) => ({ ...x, n: i + 1 })) };
+    case "addTrack":   return { ...state, tracks: [...state.tracks, { n: state.tracks.length + 1, artist: "Ivory", title: "Refuge", remix: null, label: "Original", bpm: 60, key: "11A", energy: 5.2 }] };
+    case "command":    return state; // demo no-op
+    case "setExportPct":return { ...state, export: { pct: a.pct } };
+    default: return state;
+  }
+}
+
+function App() {
+  const [state, dispatch] = useReducer(reducer, initial);
+  const [route, setRoute] = useState(() => {
+    const h = window.location.hash.replace("#", "");
+    return ROUTES.find(r => r.id === h) ? h : "dashboard";
+  });
+  const go = (id) => {
+    setRoute(id);
+    window.location.hash = id;
+    window.scrollTo({ top: 0 });
+  };
+  React.useEffect(() => {
+    const h = () => { const id = window.location.hash.replace("#", ""); if (ROUTES.find(r => r.id === id)) setRoute(id); };
+    window.addEventListener("hashchange", h);
+    return () => window.removeEventListener("hashchange", h);
+  }, []);
+
+  const Screen = PROTO_SCREENS[route.charAt(0).toUpperCase() + route.slice(1)] || PROTO_SCREENS.Dashboard;
+
+  return (
+    <Router.Provider value={{ go, route }}>
+      <Shell route={route} go={go} hideNav={route === "live"}>
+        {route === "live"
+          ? <PROTO_SCREENS.Live state={state} dispatch={dispatch} />
+          : <Screen state={state} dispatch={dispatch} />}
+      </Shell>
+    </Router.Provider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
