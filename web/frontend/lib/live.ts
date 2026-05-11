@@ -103,6 +103,13 @@ export interface UseLiveSessionApi {
   resumePlayback: () => void;
   /** Quit the live session — closes the WS, stops audio, releases mic etc. */
   quit: () => void;
+  // v2.6.0 — endless / improvisation mode (YouTube-streaming use case).
+  /** Server-confirmed endless-mode flag. Mirrors session.context_variables.endless_mode. */
+  endlessMode: boolean;
+  /** True between PLAYLIST_RUNNING_LOW and the next track_started — UI surfaces a banner. */
+  playlistRunningLow: boolean;
+  /** Toggle endless mode. Sends a WS command; the server echoes the new state. */
+  setEndlessMode: (enabled: boolean) => void;
 }
 
 export type LiveCommand =
@@ -151,7 +158,9 @@ interface ServerEngineEvent {
     | "crossfade_triggered"
     | "crossfade_finished"
     | "track_ended"
-    | "session_ended";
+    | "session_ended"
+    | "playlist_running_low"
+    | "endless_warning";
   track?: LiveTrackSummary;
   next_track?: LiveTrackSummary;
   from_track?: LiveTrackSummary;
@@ -166,6 +175,14 @@ interface ServerEngineEvent {
    * hasn't computed a target yet (e.g. last track, or duration unknown).
    */
   cf_point_sec?: number | null;
+  /** v2.6.0 endless-mode warning payload (cap reached, no candidates). */
+  reason?: string;
+  message?: string;
+}
+
+interface ServerEndlessModeMessage {
+  type: "endless_mode";
+  enabled: boolean;
 }
 
 interface ServerLiveMessage {
@@ -190,6 +207,7 @@ type ServerEvent =
   | ServerEngineCommand
   | ServerLiveMessage
   | ServerDjChat
+  | ServerEndlessModeMessage
   | ServerError;
 
 const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
@@ -246,6 +264,12 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   // ``cf_point_sec`` yet (older backend).
   const [cfTargetSec, setCfTargetSec] = useState<number | null>(null);
   const [legacySecsToCf, setLegacySecsToCf] = useState<number | null>(null);
+  // v2.6.0 endless mode mirror state. Defaults to false; server confirms
+  // on every `set_endless_mode` write via an `endless_mode` echo event.
+  const [endlessMode, setEndlessMode] = useState(false);
+  // True from PLAYLIST_RUNNING_LOW until the next track_started — drives
+  // the "picking continuation track…" banner on /live.
+  const [playlistRunningLow, setPlaylistRunningLow] = useState(false);
 
   // Derive next track from the playlist + current track position. This is
   // robust to event-ordering races where ``track_started`` fires before any
@@ -646,6 +670,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
           // Reset legacy fallback so a stale seconds_remaining from the
           // previous track doesn't bleed into the new one's countdown.
           setLegacySecsToCf(null);
+          // v2.6.0 — clear the endless-mode "running low" banner once
+          // we're on the new (appended) track. Engine will re-fire
+          // playlist_running_low when this one approaches its own CF.
+          setPlaylistRunningLow(false);
         }
         break;
       }
@@ -677,6 +705,26 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         break;
       case "track_ended":
         // No state change here — track_started for the new track follows.
+        break;
+      case "playlist_running_low":
+        // v2.6.0 endless mode — surfaces the banner while the agent /
+        // engine decides on a continuation track. Cleared on the next
+        // track_started above (where setPlaylistRunningLow(false) is
+        // wired into the existing handler).
+        setPlaylistRunningLow(true);
+        break;
+      case "endless_warning":
+        // Non-fatal; the engine has either hit the append cap or run
+        // out of in-genre candidates. Surface to the agent via toast
+        // semantics — the page wraps this into its UI banner.
+        setError(evt.message || "Endless mode: no more candidates.");
+        break;
+      case "endless_mode":
+        // Server-confirmed echo from set_endless_mode. We mirror the
+        // boolean exactly so the toggle pill never gets out of sync
+        // with the actual engine state.
+        setEndlessMode(evt.enabled);
+        if (!evt.enabled) setPlaylistRunningLow(false);
         break;
       case "session_ended":
         setState("ended");
@@ -1200,6 +1248,23 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     stopAllDecks();
   }, [stopAllDecks]);
 
+  // v2.6.0 — toggle endless mode. Wire-fires only; the engine's reply
+  // (`endless_mode` event) is the source of truth, mirrored into
+  // `endlessMode` state by the switch handler above. This keeps the
+  // pill from desyncing if the WS write succeeds but the server fails
+  // to update the engine for any reason.
+  const setEndlessModeWS = useCallback((enabled: boolean) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(
+        JSON.stringify({ type: "set_endless_mode", enabled: !!enabled }),
+      );
+    } catch {
+      /* ignore — WS error already handled elsewhere */
+    }
+  }, []);
+
   return useMemo<UseLiveSessionApi>(
     () => ({
       state,
@@ -1222,6 +1287,9 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
+      endlessMode,
+      playlistRunningLow,
+      setEndlessMode: setEndlessModeWS,
     }),
     [
       state,
@@ -1243,6 +1311,9 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
+      endlessMode,
+      playlistRunningLow,
+      setEndlessModeWS,
     ],
   );
 }

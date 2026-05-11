@@ -65,6 +65,20 @@ CROSSFADE_TRIGGERED = "crossfade_triggered"
 CROSSFADE_FINISHED  = "crossfade_finished"
 TRACK_ENDED         = "track_ended"
 SESSION_ENDED       = "session_ended"
+# v2.6.0 — Endless / improvisation mode. Fires when only one track is
+# left in the queue and the next ``approaching_crossfade`` would trip
+# the final SESSION_ENDED. The LLM has ~5 s of grace to call
+# ``extend_set`` before the engine deterministically auto-picks an
+# in-genre continuation from the catalog.
+PLAYLIST_RUNNING_LOW = "playlist_running_low"
+ENDLESS_WARNING      = "endless_warning"
+
+# Grace window the LLM gets to append a successor track before the
+# deterministic in-engine fallback kicks in.
+ENDLESS_GRACE_SEC = 5.0
+# Hard cap on how many tracks a single endless session can add. Prevents
+# runaway behaviour from a misbehaving agent or LLM hallucinated loops.
+ENDLESS_APPEND_CAP = 100
 
 # ---------------------------------------------------------------------------
 # Audio constants
@@ -178,6 +192,18 @@ class LiveEngineLocal:
         self._prestretch_thread: threading.Thread | None = None
         self._prestretch_ready = threading.Event()
 
+        # v2.6.0 — endless / improvisation mode state. Flag flipped by
+        # the agent (live_dj.py) or the web WS handler (app.py). All
+        # other fields are managed internally by the watchdog loop.
+        self._endless_mode: bool = False
+        self._low_water_fired: bool = False
+        self._low_water_at: float | None = None
+        self._endless_appended: int = 0
+        # Cached snapshot of tracks.json populated at play() time so the
+        # deterministic fallback can read it without disk I/O on the
+        # audio-adjacent watchdog thread.
+        self._catalog_cache: list[dict] = []
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -196,6 +222,15 @@ class LiveEngineLocal:
         if not self.playlist:
             self._emit(SESSION_ENDED)
             return
+
+        # v2.6.0 — snapshot the catalog at session start so the
+        # endless-mode deterministic fallback can pick a continuation
+        # track without doing disk I/O on the watchdog thread. Cheap
+        # (~hundreds of KB) and fresh enough for a single set.
+        try:
+            self._catalog_cache = _load_catalog()
+        except Exception:  # noqa: BLE001 — catalog read is non-critical here
+            self._catalog_cache = []
 
         self._audio = self._load_audio(self.playlist[0])
         self._pos = 0
@@ -280,6 +315,131 @@ class LiveEngineLocal:
         with self._lock:
             self.playlist[idx] = track
         return f"Queued '{track['display_name']}' at position {position}."
+
+    def append_track(self, track: dict) -> str:
+        """Append a track to the live playlist mid-flight (v2.6.0 endless mode).
+
+        Thread-safe append. Enforces the session-wide cap. When the
+        newly-appended track becomes the immediate successor of the one
+        currently playing AND no prestretch is in flight, kicks off
+        prestretch so the watchdog's natural crossfade path can pick up
+        the new tail without a hard cut. Idempotent: a second
+        ``append_track`` while prestretch is already running noops on
+        the prestretch side.
+        """
+        if not track or not track.get("id"):
+            return "append_track: track must include an 'id' field."
+        with self._lock:
+            if self._endless_appended >= ENDLESS_APPEND_CAP:
+                msg = (
+                    f"Append cap reached ({ENDLESS_APPEND_CAP}); "
+                    "ending session after current track."
+                )
+                cap_reached = True
+            else:
+                cap_reached = False
+                self.playlist.append(dict(track))
+                # Reset the low-water guard so a subsequent
+                # "running low" can fire when this newly-appended track
+                # is itself the last one.
+                self._low_water_fired = False
+                self._low_water_at = None
+                self._endless_appended += 1
+            position = len(self.playlist)
+            cur_idx = self._idx
+            audio_loaded = self._audio is not None
+            next_audio_loaded = self._next_audio is not None
+            state = self._state
+        if cap_reached:
+            self._emit(ENDLESS_WARNING, reason="cap_reached", message=msg)
+            return msg
+        # If the just-appended track is the immediate successor of the
+        # one currently playing AND nothing has been prestretched yet,
+        # kick off prestretch. Without this, the watchdog's crossfade
+        # trigger spins on `_prestretch_ready.wait` forever.
+        new_tail_idx = position - 1
+        if (
+            new_tail_idx == cur_idx + 1
+            and audio_loaded
+            and not next_audio_loaded
+            and state == "playing"
+        ):
+            self._start_prestretch(cur_idx, new_tail_idx)
+        return (
+            f"Appended '{track.get('display_name', track['id'])}' "
+            f"at position {position}."
+        )
+
+    def _maybe_end_or_extend(self, current_track: dict | None) -> bool:
+        """Gate ``SESSION_ENDED`` on endless-mode + autoplay fallback.
+
+        Returns ``True`` when the caller should stop (session is truly
+        over), ``False`` when the caller should keep looping (a new
+        track was just appended or the grace window hasn't elapsed yet).
+
+        - endless OFF: behave as the legacy engine did — emit and stop.
+        - endless ON + grace window not yet elapsed: don't emit, the
+          watchdog will re-poll on the next tick.
+        - endless ON + grace elapsed + LLM already appended: keep
+          looping; the new tail track is now the current one's
+          successor.
+        - endless ON + grace elapsed + no append: try the deterministic
+          fallback. On success, append and keep looping. On no
+          candidates, emit an ``endless_warning`` and let the legacy
+          ``SESSION_ENDED`` fire.
+        """
+        with self._lock:
+            endless = self._endless_mode
+            idx = self._idx
+            remaining_after = len(self.playlist) - idx - 1
+            low_water_at = self._low_water_at
+
+        if not endless:
+            self._emit(SESSION_ENDED)
+            return True
+
+        # Successor already in the playlist (LLM beat us to it).
+        if remaining_after > 0:
+            return False
+
+        # No grace window yet — first time we hit the end. Start the
+        # clock and let the watchdog re-poll.
+        if low_water_at is None:
+            with self._lock:
+                self._low_water_at = time.monotonic()
+            return False
+
+        if (time.monotonic() - low_water_at) < ENDLESS_GRACE_SEC:
+            return False
+
+        # Grace elapsed without an append → deterministic fallback.
+        with self._lock:
+            catalog = list(self._catalog_cache)
+            exclude = {t.get("id") for t in self.playlist if t.get("id")}
+        # Pull genre from the current track (catalog entries are tagged
+        # with ``genre_folder``); falling back to the loose ``genre``
+        # field keeps the path resilient against legacy entries.
+        genre = (
+            (current_track or {}).get("genre_folder")
+            or (current_track or {}).get("genre")
+        )
+        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        if pick is None:
+            self._emit(
+                ENDLESS_WARNING,
+                reason="no_candidates",
+                message=(
+                    f"No more {genre or 'matching'} tracks left to extend "
+                    "with — set ending."
+                ),
+            )
+            self._emit(SESSION_ENDED)
+            return True
+
+        # Append + keep looping. The watchdog's NEXT tick will see the
+        # new tail track and resume normally.
+        self.append_track(pick)
+        return False
 
     def set_crossfade_point(self, position_sec: float) -> str:
         """Manually set where the crossfade begins in the current track."""
@@ -436,13 +596,16 @@ class LiveEngineLocal:
                     if idx + 1 < len(self.playlist):
                         self._start_prestretch(idx, idx + 1)
                 else:
-                    self._emit(SESSION_ENDED)
-                    return
+                    if self._maybe_end_or_extend(prev_track):
+                        return
+                    # endless mode auto-appended — pick up the new tail
+                    # next tick.
                 continue
 
             if idx >= len(self.playlist):
-                self._emit(SESSION_ENDED)
-                return
+                if self._maybe_end_or_extend(None):
+                    return
+                continue
 
             with self._lock:
                 cf_samples = self._cf_point_samples(self.playlist[idx])
@@ -459,6 +622,25 @@ class LiveEngineLocal:
                     seconds_remaining=round(max(0.0, cf_sec - pos_sec), 1),
                 )
                 approached = True
+                # v2.6.0 — endless mode poke. Fires once per "approaching
+                # the last track" window so the LLM gets a deterministic
+                # deadline (vs. polling len(playlist)) to call extend_set.
+                with self._lock:
+                    remaining = len(self.playlist) - idx - 1
+                    fire_low = (
+                        self._endless_mode
+                        and remaining == 1
+                        and not self._low_water_fired
+                    )
+                    if fire_low:
+                        self._low_water_fired = True
+                        self._low_water_at = time.monotonic()
+                if fire_low:
+                    self._emit(
+                        PLAYLIST_RUNNING_LOW,
+                        track=self.playlist[idx],
+                        seconds_remaining=round(max(0.0, cf_sec - pos_sec), 1),
+                    )
 
             # ── Trigger crossfade ────────────────────────────────────────────
             if not cf_triggered and pos >= cf_samples:
@@ -481,9 +663,20 @@ class LiveEngineLocal:
                 else:
                     # Last track — let it play to the end
                     if pos >= audio_len:
-                        self._emit(TRACK_ENDED, track=self.playlist[idx])
-                        self._emit(SESSION_ENDED)
-                        return
+                        current = self.playlist[idx]
+                        self._emit(TRACK_ENDED, track=current)
+                        if self._maybe_end_or_extend(current):
+                            return
+                        # endless mode auto-appended; the current audio
+                        # buffer is fully drained so we can't crossfade
+                        # — hard-cut to the new tail and reset edges
+                        # so APPROACHING_CF can fire for it.
+                        with self._lock:
+                            has_successor = self._idx + 1 < len(self.playlist)
+                        if has_successor:
+                            self.skip_track()
+                        cf_triggered = False
+                        approached = False
 
     # ------------------------------------------------------------------
     # Pre-stretch thread
@@ -648,6 +841,14 @@ class LiveEngineBrowser:
         self._cf_triggered: bool = False
         self._extend_sec: float = 0.0  # accumulated extend offset in seconds
 
+        # v2.6.0 — endless / improvisation mode state. The web flow
+        # flips ``_endless_mode`` via the WS ``set_endless_mode``
+        # command; everything else is engine-managed.
+        self._endless_mode: bool = False
+        self._low_water_fired: bool = False
+        self._low_water_at: float | None = None
+        self._endless_appended: int = 0
+
     # ------------------------------------------------------------------
     # Public API (matches LiveEngineProtocol)
     # ------------------------------------------------------------------
@@ -743,6 +944,25 @@ class LiveEngineBrowser:
                 # single emit).
                 cf_point_sec=round(cf_sec, 2),
             )
+            # v2.6.0 — endless-mode "running low" poke. Fires once per
+            # "approaching the last track" window so the LLM gets a
+            # deterministic deadline (5 s grace) to call ``extend_set``.
+            with self._lock:
+                remaining = len(self.playlist) - idx - 1
+                fire_low = (
+                    self._endless_mode
+                    and remaining == 1
+                    and not self._low_water_fired
+                )
+                if fire_low:
+                    self._low_water_fired = True
+                    self._low_water_at = time.monotonic()
+            if fire_low:
+                self._emit(
+                    PLAYLIST_RUNNING_LOW,
+                    track=current_track,
+                    seconds_remaining=round(max(0.0, secs_to_cf), 1),
+                )
 
         if not cf_triggered and self._reported_pos_sec >= cf_sec:
             if next_track is not None:
@@ -750,9 +970,17 @@ class LiveEngineBrowser:
             elif duration > 0 and self._reported_pos_sec >= duration:
                 # Last track played to its end — emit final events.
                 self._emit(TRACK_ENDED, track=current_track)
-                self._emit(SESSION_ENDED)
-                with self._lock:
-                    self._state = "idle"
+                if self._maybe_end_or_extend(current_track):
+                    with self._lock:
+                        self._state = "idle"
+                else:
+                    # Endless mode appended a successor — advance to it
+                    # and emit TRACK_STARTED via the existing helper.
+                    with self._lock:
+                        has_successor = self._idx + 1 < len(self.playlist)
+                        new_idx = self._idx + 1 if has_successor else self._idx
+                    if has_successor:
+                        self._emit_next_track(self.playlist[new_idx])
             return
 
         # Endgame safeguard: if we're inside the last 2 s of the track and
@@ -805,9 +1033,19 @@ class LiveEngineBrowser:
         if has_next and next_track is not None:
             self._emit_next_track(next_track)
         else:
-            self._emit(SESSION_ENDED)
+            if self._maybe_end_or_extend(current_track):
+                with self._lock:
+                    self._state = "idle"
+                return
+            # Endless mode appended a successor between TRACK_ENDED and
+            # the SESSION_ENDED gate — advance to it.
             with self._lock:
-                self._state = "idle"
+                if self._idx + 1 < len(self.playlist):
+                    new_track = self.playlist[self._idx + 1]
+                else:
+                    new_track = None
+            if new_track is not None:
+                self._emit_next_track(new_track)
 
     def _emit_next_track(self, next_track: dict) -> None:
         """Advance the cursor and tell the browser to load the next track.
@@ -925,6 +1163,89 @@ class LiveEngineBrowser:
             self.playlist[idx] = new_track
         self._emit_command("queue_swap", position=position, track=new_track)
         return f"Queued '{new_track.get('display_name', '?')}' at position {position}."
+
+    def append_track(self, track: dict) -> str:
+        """Append a track to the live playlist (v2.6.0 endless mode).
+
+        Thread-safe append, mirrors ``LiveEngineLocal.append_track``.
+        For the browser engine there's no pre-stretch — the frontend
+        audio engine handles encoding seamlessly — so the path is
+        simpler: append, reset the low-water guard, and let the next
+        ``report_playback_pos`` ping pick up the new tail naturally.
+        """
+        if not track or not track.get("id"):
+            return "append_track: track must include an 'id' field."
+        with self._lock:
+            if self._endless_appended >= ENDLESS_APPEND_CAP:
+                msg = (
+                    f"Append cap reached ({ENDLESS_APPEND_CAP}); "
+                    "ending session after current track."
+                )
+                cap_reached = True
+            else:
+                cap_reached = False
+                self.playlist.append(dict(track))
+                self._low_water_fired = False
+                self._low_water_at = None
+                self._endless_appended += 1
+            position = len(self.playlist)
+        if cap_reached:
+            self._emit(ENDLESS_WARNING, reason="cap_reached", message=msg)
+            return msg
+        return (
+            f"Appended '{track.get('display_name', track['id'])}' "
+            f"at position {position}."
+        )
+
+    def _maybe_end_or_extend(self, current_track: dict | None) -> bool:
+        """Browser-engine variant of the endless-mode SESSION_ENDED gate.
+
+        Same semantics as ``LiveEngineLocal._maybe_end_or_extend`` but
+        reads the catalog fresh at fallback time — the browser engine
+        runs on the WS loop thread where I/O is fine. Returns True when
+        the caller should stop (let SESSION_ENDED fire), False when it
+        should keep looping (a successor is now present).
+        """
+        with self._lock:
+            endless = self._endless_mode
+            idx = self._idx
+            remaining_after = len(self.playlist) - idx - 1
+            low_water_at = self._low_water_at
+
+        if not endless:
+            self._emit(SESSION_ENDED)
+            return True
+        if remaining_after > 0:
+            return False
+        if low_water_at is None:
+            with self._lock:
+                self._low_water_at = time.monotonic()
+            return False
+        if (time.monotonic() - low_water_at) < ENDLESS_GRACE_SEC:
+            return False
+
+        # Grace elapsed without an append → deterministic fallback.
+        catalog = _load_catalog()
+        with self._lock:
+            exclude = {t.get("id") for t in self.playlist if t.get("id")}
+        genre = (
+            (current_track or {}).get("genre_folder")
+            or (current_track or {}).get("genre")
+        )
+        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        if pick is None:
+            self._emit(
+                ENDLESS_WARNING,
+                reason="no_candidates",
+                message=(
+                    f"No more {genre or 'matching'} tracks left to extend "
+                    "with — set ending."
+                ),
+            )
+            self._emit(SESSION_ENDED)
+            return True
+        self.append_track(pick)
+        return False
 
     def set_crossfade_point(self, position_sec: float) -> str:
         """Manually set where the crossfade begins in the current track."""
@@ -1065,6 +1386,79 @@ def _load_catalog() -> list[dict]:
         return []
     with open(catalog_path, encoding="utf-8") as f:
         return json.load(f).get("tracks", [])
+
+
+# Camelot wheel — adjacency = ±1 number AND same letter (A or B); the
+# "energy boost" relative move (same number, flip letter) costs 0.5 in
+# our metric so it stays preferred over a true clash.
+def _camelot_distance(a: str | None, b: str | None) -> float:
+    """Cyclic distance between two Camelot keys (e.g. ``8A``, ``11B``).
+
+    Returns ``0.0`` for identical keys, low values for adjacent moves on
+    the wheel, and ``6.0+`` for the worst case. Missing or malformed
+    keys score ``6.0`` so unknowns never accidentally rank as good
+    candidates.
+    """
+    if not a or not b:
+        return 6.0
+    try:
+        num_a, letter_a = int(a[:-1]), a[-1].upper()
+        num_b, letter_b = int(b[:-1]), b[-1].upper()
+    except (ValueError, IndexError):
+        return 6.0
+    if not (1 <= num_a <= 12 and 1 <= num_b <= 12):
+        return 6.0
+    if letter_a not in ("A", "B") or letter_b not in ("A", "B"):
+        return 6.0
+    diff = abs(num_a - num_b)
+    cyclic = min(diff, 12 - diff)  # 0..6
+    if letter_a != letter_b:
+        cyclic += 0.5  # A↔B flip at the same number is the "energy boost"
+    return float(cyclic)
+
+
+def _autoplay_pick(
+    current_track: dict | None,
+    catalog: list[dict],
+    genre: str | None,
+    exclude_ids: set[str],
+) -> dict | None:
+    """Choose the best in-genre continuation track.
+
+    Filters ``catalog`` by ``genre_folder`` (or ``genre`` as a fallback)
+    matching ``genre`` case-insensitively, drops ids in ``exclude_ids``
+    (typically the tracks already in the live playlist), and ranks the
+    remaining candidates ascending by ``(|Δbpm|, camelot_distance)``
+    against ``current_track``. Returns the top candidate or ``None`` if
+    nothing matches.
+
+    Pure / module-level so the engine watchdog can call it without
+    touching ``self``, and so tests can exercise it without spinning up
+    an engine instance.
+    """
+    if not catalog:
+        return None
+    target_genre = (genre or "").strip().lower()
+    cur_bpm = float((current_track or {}).get("bpm") or 0.0)
+    cur_key = (current_track or {}).get("camelot_key")
+
+    def in_genre(t: dict) -> bool:
+        gf = (t.get("genre_folder") or t.get("genre") or "").strip().lower()
+        return bool(gf) and (not target_genre or gf == target_genre)
+
+    candidates = [
+        t for t in catalog
+        if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda t: (
+            abs(float(t.get("bpm") or 0.0) - cur_bpm),
+            _camelot_distance(t.get("camelot_key"), cur_key),
+        )
+    )
+    return candidates[0]
 
 
 def _track_summary(track: dict | None) -> dict | None:

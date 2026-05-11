@@ -237,3 +237,48 @@ def test_playlist_summary():
     assert "A" in out
     assert "B" in out
     assert "120.0" in out
+
+
+# ---------------------------------------------------------------------------
+# extend_set  (v2.6.0 endless mode)
+# ---------------------------------------------------------------------------
+from agent.tools import extend_set  # noqa: E402  — colocated with other live tools
+
+
+def test_extend_set_no_engine():
+    result = extend_set("any-id", {})
+    assert "not running" in result.lower()
+
+
+def test_extend_set_invalid_id(monkeypatch):
+    """Unknown ids never touch the engine — they return a clear error
+    so the LLM can re-pick instead of silently no-op'ing the queue."""
+    engine = _make_engine()
+    monkeypatch.setattr(
+        "web.backend.pipeline.load_catalog",
+        lambda _genre=None: ([{"id": "real-track", "display_name": "Real"}], []),
+    )
+    result = extend_set("does-not-exist", _ctx(engine))
+    assert "not in catalog" in result.lower()
+    engine.append_track.assert_not_called()
+
+
+def test_extend_set_valid_id_calls_engine_append(monkeypatch):
+    """Happy path: tool resolves the id from the catalog and forwards
+    the full track dict to ``engine.append_track``."""
+    engine = _make_engine()
+    engine.append_track.return_value = "Appended 'Real' at position 5."
+    track = {
+        "id": "real-track",
+        "display_name": "Real",
+        "bpm": 78.0,
+        "camelot_key": "8A",
+        "genre_folder": "lofi - ambient",
+    }
+    monkeypatch.setattr(
+        "web.backend.pipeline.load_catalog",
+        lambda _genre=None: ([track], []),
+    )
+    result = extend_set("real-track", _ctx(engine))
+    engine.append_track.assert_called_once_with(track)
+    assert "position 5" in result

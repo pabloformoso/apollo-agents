@@ -1163,6 +1163,13 @@ async def phase_live(
         _live_relay(command_queue, inner_queue, ctx)
     )
 
+    # v2.6.0 — flip endless / improvisation mode from session context
+    # before the engine starts so the very first APPROACHING_CF window
+    # already respects the flag. The WS `set_endless_mode` command can
+    # flip it again mid-set; both writes are GIL-atomic single-attribute
+    # assignments — eventual consistency within a watchdog tick is fine.
+    engine._endless_mode = bool(ctx.get("endless_mode", False))
+
     engine.play(playlist)
     try:
         await live_dj.run_live_session_async(

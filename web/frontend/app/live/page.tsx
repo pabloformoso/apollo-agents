@@ -260,6 +260,30 @@ export default function LivePage() {
         </div>
 
         <div className="flex items-center gap-2">
+          {/* v2.6.0 — endless / improvisation mode toggle. When ON,
+              the engine emits playlist_running_low ~30 s before the
+              last crossfade so the agent (and the operator) get a
+              clear deadline to extend the set. Designed for
+              unattended YouTube streaming. */}
+          <button
+            onClick={() => live.setEndlessMode(!live.endlessMode)}
+            disabled={!live.connected}
+            title={
+              live.endlessMode
+                ? "Endless mode ON — Apollo will pick continuation tracks when the queue runs low. Click to disable."
+                : "Endless mode OFF — set ends on the last planned track. Click to enable (for YouTube streams)."
+            }
+            className={
+              "px-3.5 py-2 text-xs font-sans cursor-pointer transition-colors " +
+              "border " +
+              (live.endlessMode
+                ? "bg-ember text-cream border-ember"
+                : "bg-transparent text-mute border-line2 hover:text-ember-text")
+            }
+          >
+            ♾ Endless: {live.endlessMode ? "on" : "off"}
+          </button>
+
           {sessionId && (
             <Btn
               kind="ghost"
@@ -319,6 +343,13 @@ export default function LivePage() {
       {live.error && (
         <Banner tone="error" className="m-3">
           {live.error}
+        </Banner>
+      )}
+      {/* v2.6.0 — endless mode "running low" banner. Cleared on the
+          next track_started (handled inside useLiveSession). */}
+      {live.endlessMode && live.playlistRunningLow && (
+        <Banner tone="info" className="m-3">
+          Last track in the queue — Apollo is picking a continuation…
         </Banner>
       )}
 
