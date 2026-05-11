@@ -14,10 +14,12 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from . import db, auth, pipeline
+from .render import router as render_router
 from .models import (
+    CreateSessionRequest,
     EditorCommandRequest,
     GenreIntentRequest,
     LoginRequest,
@@ -28,6 +30,9 @@ from .models import (
     RatingRequest,
     RatingUpdate,
     RegisterRequest,
+    SessionEditorCommand,
+    SessionTrackInsert,
+    SessionTracksReorder,
     TokenResponse,
 )
 from .session_store import store
@@ -58,6 +63,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# v2.6.0 — async render endpoints + downloads. Lives in its own module
+# because the SSE generator + in-memory _jobs registry are sizeable.
+app.include_router(render_router)
 
 
 # Genre Guard cap: max user turns before we treat the conversation as
@@ -162,17 +171,10 @@ def _is_within(path: Path, root: Path) -> bool:
 
 def _stream_authorize(token: str) -> dict:
     """Decode the JWT from the query string and load the user, or raise 401."""
-    payload = auth.decode_token(token)
-    if not payload or "sub" not in payload:
+    user = auth.user_from_query_token(token)
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid token")
-    try:
-        user_id = int(payload["sub"])
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(status_code=401, detail="Invalid token") from exc
-    user = db.get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-    return dict(user)
+    return user
 
 
 def _resolve_track_path(track_id: str) -> Path:
@@ -201,7 +203,23 @@ def _resolve_track_path(track_id: str) -> Path:
         (project_root / ".tmp").resolve(),
     ]
 
-    raw_path = (project_root / track["file"]).resolve()
+    # Prefer the pre-encoded MP3 sibling when ``--build-catalog`` produced
+    # one. The browser plays a 192 kbps MP3 in a single Range request
+    # instead of paginating an 80 MB WAV — which is what was causing the
+    # mid-track stalls (see ``main._ensure_mp3_for``). Fall back to the
+    # original WAV only when the MP3 is absent or unresolvable.
+    raw_path: Path | None = None
+    mp3_rel = track.get("mp3_file")
+    if mp3_rel:
+        candidate = (project_root / mp3_rel).resolve()
+        if (
+            any(_is_within(candidate, root) for root in allowed_roots)
+            and candidate.exists()
+            and candidate.is_file()
+        ):
+            raw_path = candidate
+    if raw_path is None:
+        raw_path = (project_root / track["file"]).resolve()
 
     if not any(_is_within(raw_path, root) for root in allowed_roots):
         raise HTTPException(status_code=404, detail="Track not found")
@@ -399,9 +417,53 @@ async def clear_track_rating(
 # ---------------------------------------------------------------------------
 
 @app.post("/api/sessions")
-async def create_session(current_user: dict = Depends(auth.get_current_user)):
+async def create_session(
+    req: CreateSessionRequest | None = None,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Create a session. v2.6.0 — when ``brief`` is provided, parse it
+    synchronously (Haiku ~300 ms) and kick off planning + critique as a
+    background task so the frontend can navigate to ``/curate``
+    immediately and watch progress via ``/ws/sessions/{id}``.
+
+    Legacy callers (the v2.5 ``/session/[id]`` route) post no body and
+    still get an empty session back — the brief flow is purely additive.
+    """
     s = store.create(current_user["id"])
-    return s.to_dict()
+    parsed: dict | None = None
+
+    if req and req.brief and req.brief.strip():
+        from . import brief_parser  # local import — keeps the SDK
+        # dependency optional for tests that monkeypatch the function.
+        parsed = await asyncio.to_thread(brief_parser.parse, req.brief)
+        s.context_variables["brief_text"] = req.brief
+        if req.environment and req.environment.strip():
+            s.context_variables["environment"] = req.environment.strip()
+        # Seed only non-null parsed fields — the planner falls back to
+        # phase_genre_guard for anything the parser couldn't extract.
+        s.context_variables.update({k: v for k, v in parsed.items() if v is not None})
+        # Optimistic phase — the background task refines it precisely
+        # ("genre" if guard is needed, "planning" after the planner runs).
+        s.phase = "planning"
+        store.save(s)
+
+        async def _emit(data: dict) -> None:
+            await ws_manager.send(s.id, data)
+
+        async def _drive_planning() -> None:
+            try:
+                await pipeline.run_planning_from_brief(s, _emit)
+            except Exception as exc:  # noqa: BLE001 — surface to the UI
+                await _emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+            finally:
+                store.save(s)
+
+        asyncio.create_task(_drive_planning())
+
+    response = s.to_dict()
+    if parsed is not None:
+        response["parsed"] = parsed
+    return response
 
 
 @app.get("/api/sessions")
@@ -412,6 +474,300 @@ async def list_sessions(current_user: dict = Depends(auth.get_current_user)):
 @app.get("/api/sessions/{session_id}")
 async def get_session(session_id: str, current_user: dict = Depends(auth.get_current_user)):
     return _own(session_id, current_user).to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Critic notes — Apply / Ignore (v2.6.0)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/sessions/{session_id}/notes/{note_id}/apply")
+async def apply_note(
+    session_id: str,
+    note_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Run a bounded editor agent turn that addresses one critic note.
+
+    The agent receives a synthetic prompt naming the note's position and
+    body and is told to fire exactly one editing tool. After it returns
+    we mark the note as ``applied`` and recompute set-health; the note
+    text + position stay in ``structured_problems`` so re-fetching shows
+    it greyed out instead of disappearing.
+    """
+    from .notes import note_id as derive_note_id  # noqa: PLC0415
+
+    s = _own(session_id, current_user)
+    if s.phase == "performing":
+        raise HTTPException(status_code=409, detail="Live session in progress")
+
+    target = None
+    for p in s.structured_problems or []:
+        if derive_note_id(p) == note_id:
+            target = p
+            break
+    if target is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+
+    # Idempotent: a second apply is a no-op (returning current state). The
+    # frontend disables the button while pending, but a stale tab might
+    # still fire — don't penalise it with a 409.
+    if s.handled_notes.get(note_id) == "applied":
+        return s.to_dict()
+
+    # Auto-promote phase to "editing" so phase_editor's history bucket is
+    # populated and the WS dispatcher's editing-phase guards apply. Mirrors
+    # the "checkpoint2 → editing" jump in `_handle_ws_message`.
+    if s.phase in {"critique", "checkpoint2"}:
+        s.phase = "editing"
+        s.messages.setdefault("editor", [])
+
+    pos = target.get("pos_from") or target.get("pos_to") or 1
+    msg = (
+        f"Address only this critic note (and nothing else): "
+        f"{target.get('text', '')}. "
+        f"Position: {pos}. Use exactly one tool call "
+        f"(swap_track / insert_track / remove_track / move_track) and "
+        f"report the result briefly."
+    )
+
+    async def _emit(data: dict) -> None:
+        await ws_manager.send(s.id, data)
+
+    history = s.messages.setdefault("editor", [])
+    try:
+        await pipeline.phase_editor(msg, history, s.context_variables, _emit)
+    except Exception as exc:  # noqa: BLE001 — surface to caller as 422
+        raise HTTPException(
+            status_code=422,
+            detail=f"apply failed: {type(exc).__name__}: {exc}",
+        ) from exc
+
+    s.handled_notes[note_id] = "applied"
+    s.set_health = pipeline.compute_set_health(s.structured_problems)
+    store.save(s)
+    # Tell subscribed tabs to refresh — they listen for phase_complete on
+    # `/ws/sessions/{id}` and merge the payload into local state.
+    await _emit({"type": "phase_complete", "phase": "editor_turn", "data": s.to_dict()})
+    return s.to_dict()
+
+
+@app.post("/api/sessions/{session_id}/notes/{note_id}/ignore")
+async def ignore_note(
+    session_id: str,
+    note_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Mark a critic note as ignored. Idempotent — re-firing is a no-op.
+
+    No agent turn, no playlist mutation; the note text + position stay in
+    ``structured_problems`` so the frontend can render it greyed-out.
+    """
+    s = _own(session_id, current_user)
+    if s.handled_notes.get(note_id) != "ignored":
+        s.handled_notes[note_id] = "ignored"
+        store.save(s)
+        await ws_manager.send(
+            s.id,
+            {"type": "phase_complete", "phase": "editor_turn", "data": s.to_dict()},
+        )
+    return {"handled": list(s.handled_notes.keys())}
+
+
+# ---------------------------------------------------------------------------
+# Session tracks — deterministic UI gestures (v2.6.0)
+#
+# Drag-reorder, trash, and TrackPicker insert call these endpoints. The LLM
+# editor command is exposed below via SSE so the agent can use the same
+# tools the WS dispatcher already does — these are the *deterministic*
+# counterparts that bypass an LLM turn for tiny gestures.
+# ---------------------------------------------------------------------------
+
+def _editor_phase_guard(s) -> None:
+    """Reject during a live broadcast; auto-promote critique→editing.
+
+    Mirrors the WS dispatcher's behaviour (`_handle_ws_message` at
+    ``"editor_command"``): edits during ``critique`` / ``checkpoint2``
+    promote the session phase so subsequent gestures land in the editor
+    history. Live sessions reject with 409.
+    """
+    if s.phase == "performing":
+        raise HTTPException(status_code=409, detail="Live session in progress")
+    if s.phase in {"critique", "checkpoint2"}:
+        s.phase = "editing"
+        s.messages.setdefault("editor", [])
+
+
+async def _broadcast_editor_turn(s) -> None:
+    """Emit a `phase_complete editor_turn` so other tabs sync."""
+    await ws_manager.send(
+        s.id,
+        {"type": "phase_complete", "phase": "editor_turn", "data": s.to_dict()},
+    )
+
+
+@app.post("/api/sessions/{session_id}/tracks/reorder")
+async def reorder_session_tracks(
+    session_id: str,
+    req: SessionTracksReorder,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    s = _own(session_id, current_user)
+    _editor_phase_guard(s)
+    playlist = list(s.context_variables.get("playlist") or [])
+    n = len(playlist)
+    if sorted(req.order) != list(range(n)):
+        raise HTTPException(
+            status_code=422,
+            detail=f"order must be a permutation of [0..{n})",
+        )
+    s.context_variables["playlist"] = [playlist[i] for i in req.order]
+    s.set_health = pipeline.compute_set_health(s.structured_problems)
+    store.save(s)
+    await _broadcast_editor_turn(s)
+    return s.to_dict()
+
+
+@app.delete("/api/sessions/{session_id}/tracks/{position}")
+async def delete_session_track(
+    session_id: str,
+    position: int,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    s = _own(session_id, current_user)
+    _editor_phase_guard(s)
+    playlist = list(s.context_variables.get("playlist") or [])
+    if position < 0 or position >= len(playlist):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Track index {position} out of range",
+        )
+    playlist.pop(position)
+    s.context_variables["playlist"] = playlist
+    s.set_health = pipeline.compute_set_health(s.structured_problems)
+    store.save(s)
+    await _broadcast_editor_turn(s)
+    return s.to_dict()
+
+
+@app.post("/api/sessions/{session_id}/tracks/insert")
+async def insert_session_track(
+    session_id: str,
+    req: SessionTrackInsert,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    s = _own(session_id, current_user)
+    _editor_phase_guard(s)
+    track = pipeline.get_track_by_id(req.track_id)
+    if track is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown track id: {req.track_id}",
+        )
+    playlist = list(s.context_variables.get("playlist") or [])
+    at = max(0, min(req.at, len(playlist)))
+    playlist.insert(at, track)
+    s.context_variables["playlist"] = playlist
+    s.set_health = pipeline.compute_set_health(s.structured_problems)
+    store.save(s)
+    await _broadcast_editor_turn(s)
+    return s.to_dict()
+
+
+@app.post("/api/sessions/{session_id}/editor_command")
+async def editor_command(
+    session_id: str,
+    req: SessionEditorCommand,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """SSE wrapper around ``pipeline.phase_editor``.
+
+    The editor agent emits ``text_delta``/``tool_call``/``tool_progress``
+    events; each becomes an SSE ``data:`` frame. After the turn ends, a
+    terminal ``phase_complete`` frame carries the updated session and the
+    stream closes with an ``event: done`` line.
+    """
+    s = _own(session_id, current_user)
+    _editor_phase_guard(s)
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def _emit(data: dict) -> None:
+        # `phase_editor` calls `await emit(...)`; we just funnel into the
+        # SSE queue and return immediately (no awaiting).
+        queue.put_nowait(data)
+
+    async def _drive_turn() -> None:
+        try:
+            history = s.messages.setdefault("editor", [])
+            await pipeline.phase_editor(req.text, history, s.context_variables, _emit)
+
+            # If the editor's turn produced a build (via `build_session`
+            # tool), chain validate just like the WS dispatcher does. This
+            # keeps the SSE flow feature-parity with the legacy WS path.
+            last_build = s.context_variables.get("last_build")
+            if last_build:
+                s.session_name = last_build
+                s.phase = "validating"
+                await _emit({"type": "phase_start", "phase": "validating"})
+                v_status, v_issues = await pipeline.phase_validate(
+                    last_build, s.context_variables, _emit
+                )
+                s.validator_status = v_status
+                s.validator_issues = v_issues
+                s.phase = "rating"
+                await _emit({
+                    "type": "phase_complete",
+                    "phase": "validating",
+                    "data": s.to_dict(),
+                })
+            else:
+                # Recompute set_health after a non-build editor turn since
+                # the agent may have mutated the playlist (swap/insert/etc).
+                s.set_health = pipeline.compute_set_health(s.structured_problems)
+                await _emit({
+                    "type": "phase_complete",
+                    "phase": "editor_turn",
+                    "data": s.to_dict(),
+                })
+            queue.put_nowait({"_status": "done"})
+        except Exception as exc:  # noqa: BLE001 — surface to caller
+            queue.put_nowait({
+                "_status": "error",
+                "_message": f"{type(exc).__name__}: {exc}",
+            })
+
+    task = asyncio.create_task(_drive_turn())
+
+    async def event_stream():
+        try:
+            while True:
+                data = await queue.get()
+                status = data.get("_status")
+                if status == "done":
+                    yield "event: done\ndata: {}\n\n"
+                    break
+                if status == "error":
+                    payload = json.dumps({"message": data["_message"]})
+                    yield f"event: error\ndata: {payload}\n\n"
+                    break
+                yield f"data: {json.dumps(data)}\n\n"
+        finally:
+            # Persist the session whether the stream finished normally,
+            # erred, or the client closed the EventSource early.
+            if not task.done():
+                task.cancel()
+            store.save(s)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            # Disable Nginx response buffering for SSE — otherwise long
+            # turns sit on the proxy until the first 8 KB or close.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.delete("/api/sessions/{session_id}", status_code=204)
@@ -465,12 +821,8 @@ async def session_ws(
     session_id: str,
     token: str = Query(...),
 ):
-    payload = auth.decode_token(token)
-    if not payload:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-    user = db.get_user_by_id(int(payload.get("sub", 0)))
-    if not user:
+    user = auth.user_from_query_token(token)
+    if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -518,12 +870,17 @@ async def session_ws(
 # ---------------------------------------------------------------------------
 
 @app.websocket("/ws/live/{session_id}")
+@app.websocket("/api/sessions/{session_id}/live/stream")
 async def live_session_ws(
     websocket: WebSocket,
     session_id: str,
     token: str = Query(...),
 ):
     """Bridge between the browser-driven audio player and ``LiveEngineBrowser``.
+
+    Available at two paths during the v2.6.0 cutover:
+      - ``/ws/live/{session_id}`` (v2.5 legacy, kept as a deprecated alias).
+      - ``/api/sessions/{session_id}/live/stream`` (v2.6 canonical).
 
     The live channel is a second websocket over the same ``session_id``,
     distinct from ``/ws/sessions/{id}`` (which carries planning events).
@@ -533,12 +890,8 @@ async def live_session_ws(
     audio playback and pings ``playback_pos`` every ~250 ms so the engine
     can detect crossfade thresholds without a background thread.
     """
-    payload = auth.decode_token(token)
-    if not payload:
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-    user = db.get_user_by_id(int(payload.get("sub", 0)))
-    if not user:
+    user = auth.user_from_query_token(token)
+    if user is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
@@ -616,9 +969,16 @@ async def live_session_ws(
             await pipeline.phase_live(
                 playlist, s.context_variables, engine, emit, command_queue
             )
+            print(f"[live-ws {session_id}] phase_live returned cleanly", flush=True)
         except asyncio.CancelledError:
+            print(f"[live-ws {session_id}] phase_live cancelled", flush=True)
             raise
         except Exception as exc:  # noqa: BLE001 — surface to UI banner
+            print(
+                f"[live-ws {session_id}] phase_live crashed: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
             await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
 
     phase_task = asyncio.create_task(run_phase())
@@ -640,6 +1000,15 @@ async def live_session_ws(
         while True:
             msg = await ws_manager.receive(session_id, channel="live")
             if msg is None:
+                # ws_manager.receive swallows every exception (including
+                # WebSocketDisconnect AND json parse errors) — log so we
+                # can tell a clean disconnect from a malformed frame that
+                # would otherwise silently tear down the session.
+                print(
+                    f"[live-ws {session_id}] receive returned None — "
+                    "loop exiting (disconnect or parse error)",
+                    flush=True,
+                )
                 break
 
             msg_type = msg.get("type")
@@ -717,8 +1086,12 @@ async def live_session_ws(
                 )
 
     except WebSocketDisconnect:
-        pass
+        print(f"[live-ws {session_id}] WebSocketDisconnect raised", flush=True)
     finally:
+        print(
+            f"[live-ws {session_id}] entering finally — calling engine.stop()",
+            flush=True,
+        )
         try:
             engine.stop()
         except Exception:  # noqa: BLE001
@@ -812,6 +1185,9 @@ async def _handle_ws_message(s, msg_type: str | None, content: str, emit) -> Non
         s.critic_verdict = verdict
         s.critic_problems = problems
         s.structured_problems = structured
+        # v2.6.0 — populate set_health so Editor + Curate can render it
+        # without re-running their own client-side formula.
+        s.set_health = pipeline.compute_set_health(structured)
         s.phase = "checkpoint2"
         await emit({"type": "phase_complete", "phase": "critique", "data": s.to_dict()})
 

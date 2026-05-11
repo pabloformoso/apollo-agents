@@ -61,3 +61,27 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return dict(user)
+
+
+def user_from_query_token(token: str) -> dict | None:
+    """Decode a JWT carried as a query-string parameter and return the user.
+
+    Returns ``None`` for any failure (invalid token, missing sub claim, unknown
+    user). Used by transport-level handlers — WebSocket upgrades and SSE
+    streams — that cannot set ``Authorization`` headers from the browser and
+    must respond to failures with their own close/abort semantics rather than
+    a 401 raise.
+    """
+    from . import db
+
+    payload = decode_token(token)
+    if not payload or "sub" not in payload:
+        return None
+    try:
+        user_id = int(payload["sub"])
+    except (TypeError, ValueError):
+        return None
+    row = db.get_user_by_id(user_id)
+    if not row:
+        return None
+    return dict(row)

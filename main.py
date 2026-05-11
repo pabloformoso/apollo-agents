@@ -230,6 +230,7 @@ CATALOG_PATH = "./tracks/tracks.json"
 # BPM ranges per genre folder — used for clamping auto-detected BPM
 BPM_GENRE_RANGES = {
     "lofi - ambient": (60, 110),
+    "lofi": (60, 110),
     "techno": (120, 160),
     "cyberpunk": (120, 160),
     "deep house": (115, 135),
@@ -238,6 +239,16 @@ BPM_GENRE_RANGES = {
 # Default themes per genre folder for smart-generated sessions
 GENRE_THEMES = {
     "lofi - ambient": {
+        "artwork_style": "anime",
+        "title_color": "#E8D5B7",
+        "title_stroke_color": "#5C4A32",
+        "bg_color": [18, 15, 12],
+        "waveform_color": [180, 160, 130],
+        "particle_color": [200, 180, 150],
+        "bg_darken": 0.85,
+        "title_font_size": 36,
+    },
+    "lofi": {
         "artwork_style": "anime",
         "title_color": "#E8D5B7",
         "title_stroke_color": "#5C4A32",
@@ -571,6 +582,99 @@ def _wav_duration_sec(filepath):
 _audio_duration_sec = _wav_duration_sec
 
 
+def _ffmpeg_available():
+    """Check that ``ffmpeg`` is callable. Cached per process."""
+    if hasattr(_ffmpeg_available, "_cached"):
+        return _ffmpeg_available._cached
+    try:
+        subprocess.run(
+            ["ffmpeg", "-version"],
+            check=True,
+            capture_output=True,
+            timeout=5,
+        )
+        _ffmpeg_available._cached = True
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        _ffmpeg_available._cached = False
+    return _ffmpeg_available._cached
+
+
+_STREAM_MP3_BITRATE = "192k"
+
+
+def _ensure_mp3_for(audio_path):
+    """Encode an MP3 streaming sibling alongside ``audio_path`` and return its rel path.
+
+    Why this exists
+    ---------------
+    The web stream endpoint hands the source file to the browser's
+    ``<audio>`` element, which pulls it in chunks via HTTP Range
+    requests. Big sources (60–80 MB WAVs, 14–25 MB 320 kbps MP3s)
+    require many open/close cycles of the keep-alive connection, and
+    one of those handshakes occasionally stalls the live session —
+    the connection is left in a state where the browser is waiting
+    for bytes the server never sends. A 192 kbps MP3 sibling drops a
+    6-min track to ~8 MB, halving (or better) the number of Range
+    cycles needed.
+
+    Convention
+    ----------
+    The sibling lives next to the source as ``<basename>.stream.mp3``
+    so the original 320 kbps WAV/MP3 (used by the offline pipeline for
+    rendering the final mix) stays untouched. The web stream endpoint
+    consults ``mp3_file`` first; if absent or missing on disk, it
+    falls back to the original ``file``.
+
+    Behaviour
+    ---------
+    - Idempotent — if the ``.stream.mp3`` sibling already exists, just
+      return its rel path. Re-runs of ``--build-catalog`` are cheap.
+    - Re-encodes both WAV and MP3 sources (a 320 kbps MP3 → 192 kbps
+      MP3 is the case we actually have today).
+    - Returns ``None`` on failure (ffmpeg missing, bad source,
+      filesystem error). The catalog entry won't get ``mp3_file`` and
+      the stream endpoint will keep serving the original file.
+    """
+    base, ext = os.path.splitext(audio_path)
+    ext_lower = ext.lower()
+    if ext_lower not in {".wav", ".mp3"}:
+        return None  # unknown source format
+    # Sibling path. Use ``.stream.mp3`` to make the intent obvious and
+    # to never collide with an existing ``.mp3`` source.
+    stream_path = base + ".stream.mp3"
+    if os.path.exists(stream_path):
+        return os.path.relpath(stream_path).replace("\\", "/")
+    if not _ffmpeg_available():
+        print("    [warn] ffmpeg not found — skipping MP3 encode")
+        return None
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel", "error",
+                "-i", audio_path,
+                "-codec:a", "libmp3lame",
+                "-b:a", _STREAM_MP3_BITRATE,
+                "-map_metadata", "-1",  # strip embedded artwork / tags
+                stream_path,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        print(f"    [warn] MP3 encode failed for {os.path.basename(audio_path)}: {stderr or exc}")
+        # Don't leave a half-written file behind.
+        if os.path.exists(stream_path):
+            try:
+                os.remove(stream_path)
+            except OSError:
+                pass
+        return None
+    return os.path.relpath(stream_path).replace("\\", "/")
+
+
 def scan_genre_folders():
     """Scan tracks/ genre subfolders and return list of (genre_folder, audio_path) tuples.
 
@@ -585,7 +689,13 @@ def scan_genre_folders():
         if not os.path.isdir(folder_path):
             continue
         for fname in sorted(os.listdir(folder_path)):
-            if fname.lower().endswith(CATALOG_AUDIO_EXTS):
+            fname_lower = fname.lower()
+            # ``.stream.mp3`` is a transcoded sibling produced by
+            # ``_ensure_mp3_for`` for the web stream endpoint — never
+            # treat it as a new catalog source.
+            if fname_lower.endswith(".stream.mp3"):
+                continue
+            if fname_lower.endswith(CATALOG_AUDIO_EXTS):
                 results.append((folder, os.path.join(folder_path, fname)))
     return results
 
@@ -1156,6 +1266,12 @@ def build_catalog():
                 needs_patch = True
             if _attach_suno_metadata(entry, audio_path):
                 needs_patch = True
+            if entry.get("mp3_file") is None:
+                print(f"  [mp3] {os.path.basename(audio_path)}")
+                mp3_rel = _ensure_mp3_for(audio_path)
+                if mp3_rel:
+                    entry["mp3_file"] = mp3_rel
+                    needs_patch = True
             if needs_patch:
                 updated[rel_path] = entry
             continue
@@ -1191,10 +1307,13 @@ def build_catalog():
             print(f"    Camelot key (from session.json): {camelot_key}")
 
         duration_sec = _wav_duration_sec(audio_path)
+        print(f"    Encoding MP3 for streaming…")
+        mp3_rel = _ensure_mp3_for(audio_path)
         new_entry = {
             "id": _make_track_id(genre_folder, base_name, is_variant),
             "display_name": base_name,
             "file": rel_path,
+            "mp3_file": mp3_rel,
             "genre_folder": genre_folder,
             "genre": genre,
             "camelot_key": camelot_key,

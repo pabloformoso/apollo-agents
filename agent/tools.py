@@ -959,34 +959,36 @@ def _parse_build_progress_line(line: str) -> dict | None:
     return None
 
 
-def build_session(session_name: str, context_variables: dict) -> str:
-    """Save the current playlist as a draft and trigger the full mix + video pipeline.
+# v2.6.0 — extracted from build_session so the async render endpoint in
+# `web/backend/render.py` can write the same draft + theme payload without
+# invoking the sync subprocess loop below.
+GENRE_THEMES: dict[str, dict] = {
+    "lofi - ambient": {"artwork_style": "anime", "title_color": "#E8D5B7"},
+    "deep house": {"artwork_style": "deep-house-neon", "title_color": "#6A5AFF"},
+    "techno": {"artwork_style": "dark-techno", "title_color": "#FF1744"},
+    "cyberpunk": {"artwork_style": "dark-techno", "title_color": "#00FF88"},
+}
 
-    Args:
-        session_name: Name for the output folder (e.g. 'midnight-techno')
+
+def _write_draft_session(session_name: str, context_variables: dict) -> Path:
+    """Write the draft ``session.json`` that ``main.py --from-session`` reads.
+
+    Returns the path to the draft file. Raises ``ValueError`` if the
+    context is missing playlist or genre.
     """
-    session_name = _slugify(session_name)
     playlist = context_variables.get("playlist")
     genre = context_variables.get("genre")
-
     if not playlist:
-        return "No playlist in memory. Use propose_playlist first."
+        raise ValueError("No playlist in memory. Use propose_playlist first.")
     if not genre:
-        return "Genre not set in context. Run propose_playlist first."
+        raise ValueError("Genre not set in context. Run propose_playlist first.")
 
-    # Save draft session.json that main.py --from-session will pick up
-    draft_path = _PROJECT_DIR / "output" / f"_draft_{session_name}" / "session.json"
+    slug = _slugify(session_name)
+    draft_path = _PROJECT_DIR / "output" / f"_draft_{slug}" / "session.json"
     draft_path.parent.mkdir(parents=True, exist_ok=True)
 
-    GENRE_THEMES = {
-        "lofi - ambient": {"artwork_style": "anime", "title_color": "#E8D5B7"},
-        "deep house": {"artwork_style": "deep-house-neon", "title_color": "#6A5AFF"},
-        "techno": {"artwork_style": "dark-techno", "title_color": "#FF1744"},
-        "cyberpunk": {"artwork_style": "dark-techno", "title_color": "#00FF88"},
-    }
-
     session_config = {
-        "name": session_name,
+        "name": slug,
         "genre": genre,
         "theme": GENRE_THEMES.get(genre.lower(), {}),
         "playlist": [
@@ -1002,6 +1004,28 @@ def build_session(session_name: str, context_variables: dict) -> str:
 
     with open(draft_path, "w", encoding="utf-8") as f:
         json.dump(session_config, f, indent=2)
+    return draft_path
+
+
+def build_session(session_name: str, context_variables: dict) -> str:
+    """Save the current playlist as a draft and trigger the full mix + video pipeline.
+
+    Args:
+        session_name: Name for the output folder (e.g. 'midnight-techno')
+    """
+    session_name = _slugify(session_name)
+    playlist = context_variables.get("playlist")
+    genre = context_variables.get("genre")
+
+    if not playlist:
+        return "No playlist in memory. Use propose_playlist first."
+    if not genre:
+        return "Genre not set in context. Run propose_playlist first."
+
+    try:
+        draft_path = _write_draft_session(session_name, context_variables)
+    except ValueError as exc:
+        return str(exc)
 
     # Kick off main.py --from-session
     cmd = [
