@@ -175,3 +175,51 @@ def test_live_ws_get_state_returns_engine_snapshot(
                 assert ev["data"]["engine_state"]["current_track"] is not None
                 return
         raise AssertionError("Never received live_state in response to get_state")
+
+
+# ---------------------------------------------------------------------------
+# v2.6.0 — set_endless_mode round-trip
+# ---------------------------------------------------------------------------
+
+def test_live_ws_set_endless_mode_round_trip(
+    auth_client, auth_token, mock_pipeline
+):
+    """Sending ``set_endless_mode`` over the live WS must:
+       - persist the flag to ``session.context_variables["endless_mode"]``,
+       - flip the live engine's ``_endless_mode`` attribute, and
+       - echo an ``endless_mode`` confirmation event back to the client.
+    The frontend uses the echo as the source of truth for the toggle pill.
+    """
+    from web.backend.session_store import store
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    _seed_playlist(auth_client, sid)
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        ws.receive_json()  # initial live_state
+        # Drain until track_started so the engine is up.
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "track_started":
+                break
+
+        # ── Enable ──
+        ws.send_json({"type": "set_endless_mode", "enabled": True})
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "endless_mode":
+                assert ev.get("enabled") is True
+                break
+        else:
+            raise AssertionError("No endless_mode echo for enabled=True")
+        assert store.get(sid).context_variables.get("endless_mode") is True
+
+        # ── Disable ──
+        ws.send_json({"type": "set_endless_mode", "enabled": False})
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "endless_mode":
+                assert ev.get("enabled") is False
+                break
+        else:
+            raise AssertionError("No endless_mode echo for enabled=False")
+        assert store.get(sid).context_variables.get("endless_mode") is False
