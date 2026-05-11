@@ -5,6 +5,53 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-05-11
+
+Precision beat matching. Crossfades are no longer a time-based overlap with
+accidentally-aligned beats; they are sample-accurate, downbeat-locked, and
+placed on musical phrase boundaries.
+
+### Added
+
+- **Phase-locked crossfades.** The first downbeat of the incoming track now
+  lands exactly on a chosen downbeat of the outgoing — the heart of
+  real DJ-style beat matching. Implemented via a sample-accurate equal-power
+  overlay-add (`_phase_locked_crossfade`) that replaces pydub's
+  `AudioSegment.append(crossfade=)`. A 64-sample raised-cosine guard masks
+  any one-sample rounding click at the overlap edges.
+- **Phrase alignment.** Transitions are placed on 16-bar phrase boundaries
+  (with 8/4/1-bar fallbacks logged per transition) instead of arbitrary
+  timestamps near `duration − CROSSFADE_SEC`.
+- **v2 beatgrid schema.** `tracks.json` now stores a full `downbeats_sec`
+  array, `beats_per_bar`, `source` (madmom | librosa), and `version`. The
+  mixer reads this at mix time; no more runtime librosa beat detection.
+- **`madmom` integration.** RNN-based downbeat tracker installed via the
+  new `beatgrid` optional extra (`uv sync --extra beatgrid`). Falls back
+  gracefully to a librosa-extrapolated synthetic grid when madmom is
+  unavailable or returns too few downbeats.
+- **`--regenerate-beatgrid` CLI flag.** Upgrades legacy v1 entries to v2;
+  `--force` re-analyses everything.
+- **`_GridTracker`.** Single source of truth for catalog↔mix time mapping
+  across transitions so cumulative time-stretches don't drift.
+- **Pickup-skip heuristic.** Incoming tracks whose first bar's RMS is
+  < 40% of track-mean RMS advance their anchor to `downbeats[1]` — avoids
+  crossfading into atmospheric sweeps.
+
+### Changed
+
+- `_adjust_outgoing_tail` and `_prepare_incoming` take explicit anchor
+  parameters; both slice from a downbeat so first samples line up by
+  construction post-stretch.
+- `analyze_tracks` reads from the catalog (v2 → v1 → runtime librosa
+  fallback ladder) instead of always running librosa.
+
+### Backward compatibility
+
+Entries without `beatgrid` at all fall back to runtime librosa analysis.
+Entries with v1 beatgrid (`first_beat_sec` + `bpm` only) keep working —
+the mixer synthesises downbeats from BPM. Run `--regenerate-beatgrid` to
+upgrade them for maximum precision.
+
 ## [2.5.1] — 2026-05-09
 
 Patch release fixing two bugs surfaced during real-world testing of

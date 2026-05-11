@@ -242,8 +242,21 @@ cd apollo-agents
 # Install dependencies
 uv sync
 
+# Optional: precision beat-matching (v3.0+). Installs madmom for downbeat
+# detection at --build-catalog time. Skip if you're fine with v1 beatgrids;
+# the mixer auto-synthesises downbeats from BPM in that case.
+uv sync --extra beatgrid
+
 # Copy and fill in your API keys
 cp .env.example .env
+```
+
+After installing the `beatgrid` extra, regenerate your catalog beatgrids so
+the mixer phase-locks transitions on real downbeats:
+
+```bash
+python main.py --regenerate-beatgrid           # upgrade legacy v1 entries
+python main.py --regenerate-beatgrid --force   # re-analyse everything
 ```
 
 **`.env` keys:**
