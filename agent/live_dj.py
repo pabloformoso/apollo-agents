@@ -34,6 +34,8 @@ from agent.live_engine import (
     APPROACHING_CF,
     CROSSFADE_FINISHED,
     CROSSFADE_TRIGGERED,
+    ENDLESS_WARNING,
+    PLAYLIST_RUNNING_LOW,
     SESSION_ENDED,
     TRACK_ENDED,
     TRACK_STARTED,
@@ -62,9 +64,28 @@ Available actions:
     (tweaks within the existing queue)
   - pick_next_track(criteria) → choose any track from the catalog
     matching given criteria (BPM range, key, energy, mood)
+  - extend_set(track_id) → append a track to the END of the playlist
+    (v2.6.0 endless mode — see ENDLESS MODE below)
   - emit_chat(text) → reply to the audience without acting
     (for "noted, but staying course" responses)
   - get_live_state / get_perception_window — read current context
+
+ENDLESS MODE:
+- When the operator has enabled endless mode (a YouTube-streaming
+  use case), the engine will emit a ``playlist_running_low`` event
+  about 30 s before the LAST scheduled crossfade.
+- You have a ~5 s grace window from that event to pick a continuation
+  track via ``pick_next_track`` and append it with
+  ``extend_set(track_id)``. Stay in the current genre + energy unless
+  the room has clearly drifted.
+- If you don't act in time, the engine deterministically auto-picks
+  the closest in-genre track from the catalog — that's a safety net,
+  not the intended path. Your taste should win when you're awake at
+  the wheel.
+- Note: the first crossfade into a freshly-appended track may be a
+  hard cut if you appended very late (no time to pre-stretch). Append
+  early when you see ``playlist_running_low`` to keep transitions
+  smooth.
 
 PERCEPTION SIGNALS:
 - environment_changed events (rms_db_delta, voice_likelihood):
@@ -161,6 +182,7 @@ def set_crossfade_point(position_sec: float, context_variables: dict) -> str:
 # tests, which only need the engine-control subset above.
 from agent.tools import (  # noqa: E402  PLC0415 — module-level intent
     emit_chat,
+    extend_set,
     get_perception_window,
     pick_next_track,
 )
@@ -174,6 +196,7 @@ _LIVE_TOOLS = [
     set_crossfade_point,
     get_perception_window,
     pick_next_track,
+    extend_set,
     emit_chat,
 ]
 
@@ -196,6 +219,10 @@ def run_live_session(playlist: list[dict], context_variables: dict) -> None:
     user_input_queue: Queue = Queue()
 
     engine = LiveEngineLocal(playlist, event_queue)
+    # v2.6.0 — flip endless mode from session context so CLI runs can
+    # opt in by setting context_variables["endless_mode"] = True (mirrors
+    # the web flow's WS set_endless_mode command).
+    engine._endless_mode = bool(context_variables.get("endless_mode", False))
     context_variables["_engine"] = engine
 
     # Daemon thread reads blocking stdin without stalling the event loop
@@ -423,6 +450,8 @@ def _classify(item: dict, events: list[dict], user_inputs: list[str]) -> None:
         CROSSFADE_FINISHED,
         TRACK_ENDED,
         SESSION_ENDED,
+        PLAYLIST_RUNNING_LOW,
+        ENDLESS_WARNING,
         "environment_changed",
         "audience_request_batch",
     }:
@@ -509,6 +538,16 @@ def _format_event(ev: dict) -> str:
         return f"  TRACK_ENDED: '{tr.get('display_name','?')}'"
     if t == SESSION_ENDED:
         return "  SESSION_ENDED"
+    if t == PLAYLIST_RUNNING_LOW:
+        tr = ev.get("track") or {}
+        sec = ev.get("seconds_remaining", "?")
+        return (
+            f"  PLAYLIST_RUNNING_LOW in {sec}s on "
+            f"'{tr.get('display_name','?')}' — pick a continuation track and "
+            "call extend_set(track_id) within 5 s or the engine will auto-pick."
+        )
+    if t == ENDLESS_WARNING:
+        return f"  ENDLESS_WARNING: {ev.get('reason','?')} — {ev.get('message','')}"
     if t == "environment_changed":
         delta = ev.get("rms_db_delta")
         mean = ev.get("rms_db_mean")

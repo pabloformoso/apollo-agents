@@ -2208,6 +2208,42 @@ def pick_next_track(
     return "\n".join(lines)
 
 
+def extend_set(track_id: str, context_variables: dict) -> str:
+    """Append a catalog track to the live playlist (v2.6.0 endless mode).
+
+    Use this AFTER ``pick_next_track`` has surfaced a candidate, when the
+    `playlist_running_low` event fires and you want the set to keep
+    going. The engine then plays the appended track as the new tail.
+    If you don't act within ~5 s of `playlist_running_low`, the engine
+    auto-picks an in-genre continuation deterministically.
+
+    Args:
+        track_id: Catalog track ID to append. Must already exist in the
+            catalog (run ``pick_next_track`` first to find candidates).
+
+    Returns:
+        Confirmation string with the track's new playlist position, or
+        an error if the engine isn't running / track isn't in catalog.
+    """
+    engine = context_variables.get("_engine")
+    if engine is None:
+        return "Engine not running."
+    # Lazy import mirrors pick_next_track to avoid the agent ↔ web cycle.
+    try:
+        from web.backend import pipeline  # noqa: PLC0415
+        catalog, _ = pipeline.load_catalog(None)
+    except Exception:  # noqa: BLE001 — fall back to direct catalog read
+        try:
+            with open(_CATALOG_PATH, "r", encoding="utf-8") as fh:
+                catalog = json.load(fh).get("tracks", [])
+        except Exception:  # noqa: BLE001
+            return "Catalog unavailable."
+    track = next((t for t in catalog if t.get("id") == track_id), None)
+    if track is None:
+        return f"Track ID '{track_id}' not in catalog."
+    return engine.append_track(track)
+
+
 def emit_chat(text: str, context_variables: dict) -> str:
     """Publish a ``dj_chat`` event over the live WebSocket.
 

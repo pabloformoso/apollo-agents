@@ -1084,6 +1084,17 @@ async def live_session_ws(
                         },
                     }
                 )
+            elif msg_type == "set_endless_mode":
+                # v2.6.0 — opt-in endless / improvisation mode. Persists
+                # on the session so reconnects keep the flag, and flips
+                # the live engine so the watchdog (Local) /
+                # report_playback_pos (Browser) gate picks it up on the
+                # next tick. Server echoes confirmation so the frontend
+                # state mirror matches reality.
+                enabled = bool(msg.get("enabled", False))
+                s.context_variables["endless_mode"] = enabled
+                engine._endless_mode = enabled
+                await emit({"type": "endless_mode", "enabled": enabled})
 
     except WebSocketDisconnect:
         print(f"[live-ws {session_id}] WebSocketDisconnect raised", flush=True)
