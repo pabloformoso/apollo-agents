@@ -779,6 +779,13 @@ def detect_bpm(filepath, genre_folder=""):
     return round(bpm, 1)
 
 
+# Beatgrid schema version. v2 adds downbeats_sec + beats_per_bar + source so
+# the mixer can do downbeat-accurate phase locking. v1 entries (legacy
+# librosa-only beatgrid) still load and the mixer synthesises downbeats from
+# first_beat_sec + bpm.
+BEATGRID_SCHEMA_VERSION = 2
+
+
 def detect_beatgrid(filepath: str, bpm: float | None = None) -> dict:
     """Detect beatgrid: first beat position and BPM.
 
@@ -798,6 +805,139 @@ def detect_beatgrid(filepath: str, bpm: float | None = None) -> dict:
         "bpm": round(float(start_bpm), 3),
         "first_beat_sec": round(first_beat, 3),
     }
+
+
+def detect_downbeats(filepath: str, bpm: float | None = None) -> dict:
+    """v2 beatgrid: full downbeat array via madmom's RNN downbeat tracker.
+
+    Falls back to a librosa-extrapolated synthetic grid when madmom is not
+    installed, returns too few downbeats, or fails outright. The returned
+    dict always conforms to the v2 schema:
+
+        {
+          "bpm": float,
+          "first_beat_sec": float,
+          "downbeats_sec": [float, ...],
+          "beats_per_bar": int,             # 3 or 4
+          "source": "madmom" | "librosa",
+          "version": BEATGRID_SCHEMA_VERSION,
+        }
+
+    Mix-time consumers should treat any entry with version < 2 as legacy
+    and synthesise downbeats via _synthesise_downbeats_from_v1().
+    """
+    v1 = detect_beatgrid(filepath, bpm)
+    start_bpm = v1["bpm"]
+    first_beat = v1["first_beat_sec"]
+
+    try:
+        from madmom.features.downbeats import (  # noqa: PLC0415
+            DBNDownBeatTrackingProcessor,
+            RNNDownBeatProcessor,
+        )
+    except Exception:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom not installed")
+
+    try:
+        rnn = RNNDownBeatProcessor()
+        dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], fps=100)
+        activations = rnn(filepath)
+        beats = dbn(activations)  # (N, 2): [time_sec, beat_position_in_bar]
+    except Exception as exc:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason=f"madmom failed: {exc}")
+
+    if beats is None or len(beats) < 2:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom returned <2 beats")
+
+    downbeats = [float(round(t, 3)) for t, pos in beats if int(pos) == 1]
+    if len(downbeats) < 2:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom returned <2 downbeats")
+
+    # Beats per bar = max observed position. DBN locks to a single time
+    # signature per track; tracks that flip mid-piece are rare and 4 is the
+    # right default for our genres anyway.
+    beats_per_bar = int(max(int(pos) for _, pos in beats))
+    if beats_per_bar not in (3, 4):
+        beats_per_bar = 4
+
+    return {
+        "bpm": round(float(start_bpm), 3),
+        "first_beat_sec": round(float(downbeats[0]), 3),
+        "downbeats_sec": downbeats,
+        "beats_per_bar": beats_per_bar,
+        "source": "madmom",
+        "version": BEATGRID_SCHEMA_VERSION,
+    }
+
+
+def _librosa_v2_beatgrid(filepath: str, bpm: float, first_beat: float,
+                         reason: str) -> dict:
+    """Fallback v2 beatgrid built from librosa beats + extrapolated downbeats.
+
+    Used when madmom is unavailable, fails, or yields too few downbeats.
+    Assumes 4/4 (true for the vast majority of this project's electronic
+    catalog). The synthesised downbeats are exact under the assumption of
+    constant tempo, which is fine for sequenced electronic tracks.
+    """
+    print(f"    [v2-fallback] {os.path.basename(filepath)}: {reason} — "
+          f"synthesising downbeats from librosa @ {bpm:.1f} BPM")
+    if bpm <= 0:
+        return {
+            "bpm": round(float(bpm), 3),
+            "first_beat_sec": round(float(first_beat), 3),
+            "downbeats_sec": [round(float(first_beat), 3)],
+            "beats_per_bar": 4,
+            "source": "librosa",
+            "version": BEATGRID_SCHEMA_VERSION,
+        }
+    bar_sec = (60.0 / bpm) * 4.0
+    try:
+        track_dur = _wav_duration_sec(filepath) or 0.0
+    except Exception:
+        track_dur = 0.0
+    if track_dur <= 0:
+        downbeats = [first_beat]
+    else:
+        n_bars = max(1, int((track_dur - first_beat) / bar_sec) + 1)
+        downbeats = [round(first_beat + i * bar_sec, 3) for i in range(n_bars)]
+    return {
+        "bpm": round(float(bpm), 3),
+        "first_beat_sec": round(float(first_beat), 3),
+        "downbeats_sec": downbeats,
+        "beats_per_bar": 4,
+        "source": "librosa",
+        "version": BEATGRID_SCHEMA_VERSION,
+    }
+
+
+def _is_v2_beatgrid(beatgrid: dict | None) -> bool:
+    """True if a stored beatgrid dict has the v2 schema."""
+    if not beatgrid:
+        return False
+    return (
+        beatgrid.get("version", 1) >= BEATGRID_SCHEMA_VERSION
+        and isinstance(beatgrid.get("downbeats_sec"), list)
+        and len(beatgrid["downbeats_sec"]) >= 1
+    )
+
+
+def _synthesise_downbeats_from_v1(beatgrid: dict, track_duration_sec: float) -> list[float]:
+    """Build a v2-style downbeat list from a v1 beatgrid (bpm + first_beat_sec).
+
+    Assumes 4/4. Used to keep mixing functional for un-migrated catalog
+    entries — accurate to within the precision of the original BPM detection.
+    """
+    bpm = float(beatgrid.get("bpm") or 120.0)
+    first_beat = float(beatgrid.get("first_beat_sec") or 0.0)
+    if bpm <= 0 or track_duration_sec <= 0:
+        return [first_beat]
+    bar_sec = (60.0 / bpm) * 4.0
+    n_bars = max(1, int((track_duration_sec - first_beat) / bar_sec) + 1)
+    return [round(first_beat + i * bar_sec, 3) for i in range(n_bars)]
 
 
 def detect_camelot_key(filepath):
@@ -937,8 +1077,11 @@ def fix_incomplete_catalog():
             print(f"    Duration: {dur:.1f}s" if dur else "    Duration: unknown")
 
         if entry.get("beatgrid") is None and entry.get("bpm"):
-            entry["beatgrid"] = detect_beatgrid(abs_file, entry.get("bpm"))
-            print(f"    Beatgrid: first beat at {entry['beatgrid']['first_beat_sec']}s")
+            entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+            n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+            print(f"    Beatgrid v{entry['beatgrid'].get('version', 1)} "
+                  f"({entry['beatgrid'].get('source', '?')}): first beat at "
+                  f"{entry['beatgrid']['first_beat_sec']}s, {n_db} downbeats")
 
         fixed += 1
 
@@ -983,13 +1126,71 @@ def generate_beatgrid_catalog(genre_filter: str | None = None) -> None:
             print(f"  [SKIP] {name} — file not found")
             continue
         print(f"  {name}")
-        entry["beatgrid"] = detect_beatgrid(abs_file, entry.get("bpm"))
-        print(f"    first beat: {entry['beatgrid']['first_beat_sec']}s")
+        entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+        n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+        print(f"    v{entry['beatgrid'].get('version', 1)} "
+              f"({entry['beatgrid'].get('source', '?')}): first beat "
+              f"{entry['beatgrid']['first_beat_sec']}s, {n_db} downbeats")
         updated += 1
 
     with open(CATALOG_PATH, "w", encoding="utf-8") as f:
         json.dump({"tracks": tracks}, f, indent=2, ensure_ascii=False)
     print(f"\nBeatgrid generated for {updated} track(s) → {CATALOG_PATH}")
+
+
+def regenerate_beatgrid_catalog(genre_filter: str | None = None,
+                                force: bool = False) -> None:
+    """Upgrade legacy (v1) beatgrid entries to v2 by running detect_downbeats.
+
+    Without --force, only entries whose stored beatgrid lacks the v2 schema
+    (no downbeats_sec / no version) are re-analysed. With --force, every
+    entry in scope is re-analysed regardless of current schema. New entries
+    (no beatgrid at all) are also picked up.
+    """
+    if not os.path.exists(CATALOG_PATH):
+        print("Error: catalog not found. Run --build-catalog first.")
+        sys.exit(1)
+
+    with open(CATALOG_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+
+    tracks = data["tracks"]
+    scope = tracks
+    if genre_filter:
+        scope = [t for t in tracks if t.get("genre_folder", "").lower() == genre_filter.lower()]
+        print(f"=== Regenerating v{BEATGRID_SCHEMA_VERSION} beatgrid for genre "
+              f"'{genre_filter}'{' (force)' if force else ''} ===\n")
+    else:
+        print(f"=== Regenerating v{BEATGRID_SCHEMA_VERSION} beatgrid for all tracks"
+              f"{' (force)' if force else ''} ===\n")
+
+    if force:
+        pending = [t for t in scope if t.get("bpm")]
+    else:
+        pending = [t for t in scope
+                   if t.get("bpm") and not _is_v2_beatgrid(t.get("beatgrid"))]
+    if not pending:
+        print(f"All tracks already have v{BEATGRID_SCHEMA_VERSION} beatgrid. Nothing to do.")
+        return
+
+    print(f"{len(pending)} track(s) need v{BEATGRID_SCHEMA_VERSION} analysis.\n")
+    updated = 0
+    for entry in pending:
+        abs_file = os.path.join(_SCRIPT_DIR, entry["file"]) if not os.path.isabs(entry["file"]) else entry["file"]
+        name = entry.get("display_name", os.path.basename(entry["file"]))
+        if not os.path.exists(abs_file):
+            print(f"  [SKIP] {name} — file not found")
+            continue
+        print(f"  {name}")
+        entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+        n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+        print(f"    v{entry['beatgrid'].get('version', 1)} "
+              f"({entry['beatgrid'].get('source', '?')}): {n_db} downbeats")
+        updated += 1
+
+    with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"tracks": tracks}, f, indent=2, ensure_ascii=False)
+    print(f"\nUpgraded {updated} track(s) → {CATALOG_PATH}")
 
 
 _UUID_RE = re.compile(
@@ -1261,8 +1462,8 @@ def build_catalog():
                 entry["duration_sec"] = round(_wav_duration_sec(audio_path), 1) or None
                 needs_patch = True
             if entry.get("beatgrid") is None and entry.get("bpm"):
-                print(f"  [beatgrid] {os.path.basename(audio_path)}")
-                entry["beatgrid"] = detect_beatgrid(audio_path, entry.get("bpm"))
+                print(f"  [beatgrid v{BEATGRID_SCHEMA_VERSION}] {os.path.basename(audio_path)}")
+                entry["beatgrid"] = detect_downbeats(audio_path, entry.get("bpm"))
                 needs_patch = True
             if _attach_suno_metadata(entry, audio_path):
                 needs_patch = True
@@ -1297,8 +1498,11 @@ def build_catalog():
 
         bpm = detect_bpm(audio_path, genre_folder)
         print(f"    BPM: {bpm}")
-        beatgrid = detect_beatgrid(audio_path, bpm)
-        print(f"    Beatgrid: first beat at {beatgrid['first_beat_sec']}s")
+        beatgrid = detect_downbeats(audio_path, bpm)
+        n_db = len(beatgrid.get("downbeats_sec", []))
+        print(f"    Beatgrid v{beatgrid.get('version', 1)} "
+              f"({beatgrid.get('source', '?')}): first beat at "
+              f"{beatgrid['first_beat_sec']}s, {n_db} downbeats")
 
         if not camelot_key:
             camelot_key = detect_camelot_key(audio_path)
@@ -3453,6 +3657,11 @@ def _parse_args():
                         help="Re-detect BPM for all catalog entries (use after updating detection logic)")
     parser.add_argument("--generate-beatgrid", action="store_true",
                         help="Generate beatgrid (first beat position) for catalog entries that are missing it")
+    parser.add_argument("--regenerate-beatgrid", action="store_true",
+                        help="Upgrade legacy v1 beatgrid entries to v2 (downbeat-accurate, via madmom)")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-analyse every entry even if it already has the current schema "
+                             "(combine with --regenerate-beatgrid)")
     parser.add_argument("--name", default=None,
                         help="Session name (used as output folder name)")
     parser.add_argument("--genre", default=None,
@@ -3492,6 +3701,11 @@ def main():
     # --generate-beatgrid: compute first_beat_sec for entries missing beatgrid and exit
     if args.generate_beatgrid:
         generate_beatgrid_catalog(genre_filter=args.genre)
+        return
+
+    # --regenerate-beatgrid: upgrade legacy v1 entries (or all with --force) to v2 and exit
+    if args.regenerate_beatgrid:
+        regenerate_beatgrid_catalog(genre_filter=args.genre, force=args.force)
         return
 
     # Validate required args for session generation
