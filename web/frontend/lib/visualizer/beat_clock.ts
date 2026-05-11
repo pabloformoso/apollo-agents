@@ -43,11 +43,19 @@ const ZERO_BEAT: BeatClockResult = {
  *   first beat yet, so beat_index 0 is the natural answer).
  * - ``first_beat_sec`` in the future → handled by the same branch as above.
  *
- * The downbeat detection uses a small tolerance window (5% of the beat) so
- * effects can latch onto it even when the animation frame happens to fall
- * mid-beat. Any phase below the tolerance counts as the downbeat moment;
- * effects requiring a strict edge must dedupe by ``beat_index``.
+ * The downbeat detection uses a tolerance window (~12% of the beat) so
+ * effects can latch onto it even when the animation frame falls a frame or
+ * two after the boundary. The 5% window we shipped originally was too tight
+ * — at 120 BPM that's only 25 ms, less than 2 frames at 60 fps, so rAF
+ * regularly missed it. 12% (~60 ms at 120 BPM) is still tight enough that
+ * the flash feels musical but wide enough that no real downbeat slips
+ * through. Any phase below the tolerance counts as the downbeat moment;
+ * effects requiring a strict edge must dedupe by ``beat_index`` themselves.
+ *
+ * See issue #44 for the regression report.
  */
+export const DOWNBEAT_PHASE_TOLERANCE = 0.12;
+
 export function computeBeatClock(
   bpm: number,
   first_beat_sec: number,
@@ -66,7 +74,8 @@ export function computeBeatClock(
   const beat_index = Math.floor(total_beats);
   const phase_in_beat = total_beats - beat_index;
   const bars = Math.max(1, beats_per_bar);
-  const is_downbeat = beat_index % bars === 0 && phase_in_beat < 0.05;
+  const is_downbeat =
+    beat_index % bars === 0 && phase_in_beat <= DOWNBEAT_PHASE_TOLERANCE;
 
   return { beat_index, phase_in_beat, is_downbeat };
 }

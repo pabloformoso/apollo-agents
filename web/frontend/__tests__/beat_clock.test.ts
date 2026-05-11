@@ -75,12 +75,22 @@ describe("computeBeatClock", () => {
 
   it("does not flag a downbeat when phase_in_beat exceeds the tolerance", () => {
     // beat_index=4 at exactly currentTime=2.0 → downbeat.
-    // currentTime=2.05 (10 % into the next beat) → still index 4 but
-    // phase_in_beat=0.1 > 0.05 → NOT a downbeat.
-    const r = computeBeatClock(120, 0, 2.05);
+    // After the v2.5.2 fix the tolerance is 12% — at 120 BPM (0.5 s/beat)
+    // that's a 60 ms acceptance window. 0.5 s + 0.1 s = phase 0.2, which
+    // is well past 0.12 → NOT a downbeat.
+    const r = computeBeatClock(120, 0, 2.1);
     expect(r.beat_index).toBe(4);
-    expect(r.phase_in_beat).toBeCloseTo(0.1, 5);
+    expect(r.phase_in_beat).toBeCloseTo(0.2, 5);
     expect(r.is_downbeat).toBe(false);
+  });
+
+  it("flags a downbeat when phase is just inside the tolerance window", () => {
+    // 8 % into beat 4 — within the 12% acceptance window post-fix.
+    // Catches the regression where rAF lands a frame after the bar.
+    const r = computeBeatClock(120, 0, 2.04);
+    expect(r.beat_index).toBe(4);
+    expect(r.phase_in_beat).toBeCloseTo(0.08, 5);
+    expect(r.is_downbeat).toBe(true);
   });
 });
 

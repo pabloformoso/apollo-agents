@@ -201,10 +201,22 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
     };
   }, []);
 
-  // When the user switches effect, tear down the strobe overlay if we
-  // leave it.  The other effects keep their state alive — switching back
-  // to particles after fractal should resume seamlessly.
+  // When the user switches effect, dispose every WebGL effect that isn't
+  // currently active. Each Three.js renderer takes exclusive ownership of
+  // the canvas's GL context, so leaving stale renderers alive while a
+  // new one binds the same canvas produces the artifacts reported in
+  // issue #44 (fractal residue persisting under particles, FPS sag).
+  // Strobe lives on a DOM overlay rather than the canvas, but we also
+  // tear it down so its overlay div doesn't pile up.
   const setEffectKind = useCallback((kind: VisualEffectKind) => {
+    if (kind !== "particles" && particlesRef.current) {
+      particlesRef.current.destroy();
+      particlesRef.current = null;
+    }
+    if (kind !== "fractal" && fractalRef.current) {
+      fractalRef.current.destroy();
+      fractalRef.current = null;
+    }
     if (kind !== "strobe" && strobeRef.current) {
       strobeRef.current.destroy();
       strobeRef.current = null;
