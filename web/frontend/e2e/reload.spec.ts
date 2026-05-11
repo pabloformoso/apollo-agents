@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -8,9 +8,8 @@ import { expectPhase } from "./fixtures/phase";
  * state, not a client-side cache.
  */
 test("C3: mid-pipeline reload restores state from /api/sessions/{id}", async ({ page, request }) => {
-  await signedInOnDashboard(page, request);
-  await page.getByRole("button", { name: /new session/i }).click();
-  await page.waitForURL(/\/session\/[0-9a-f-]+/);
+  const e2eUser = await signedInOnDashboard(page, request);
+  await gotoNewSession(page, request, e2eUser);
 
   await page.getByPlaceholder(/60-minute cyberpunk set/i).fill("60-minute techno, peak time");
   await page.getByRole("button", { name: /^send$/i }).click();

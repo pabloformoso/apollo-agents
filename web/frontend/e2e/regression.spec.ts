@@ -1,5 +1,5 @@
 import { test, expect, Request } from "@playwright/test";
-import { signedInOnDashboard, registerViaApi } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard, registerViaApi } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -28,9 +28,8 @@ test.describe("D — regression guards", () => {
     const wsConnects: string[] = [];
     page.on("websocket", (ws) => wsConnects.push(ws.url()));
 
-    await signedInOnDashboard(page, request);
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    const e2eUser = await signedInOnDashboard(page, request);
+    await gotoNewSession(page, request, e2eUser);
 
     // Drive through the pipeline so we accumulate a few state changes. If the
     // old polling bug comes back, we'll see many /api/sessions/{id} calls.

@@ -44,6 +44,27 @@ export const me = () =>
 export const createSession = () =>
   req<SessionState>("/sessions", { method: "POST" });
 
+// v2.6.0 — Brief flow. POSTs the brief + optional environment, the
+// server parses it (Haiku) and kicks off planning as a background task.
+// Returns the empty session shape plus a `parsed` block the Brief page
+// reads once for the "understood as" preview.
+export type ParsedBrief = {
+  genre: string | null;
+  duration_min: number | null;
+  mood: string | null;
+  venue: string | null;
+  energy: string | null;
+  tempo: string | null;
+};
+export const createSessionWithBrief = (
+  brief: string,
+  environment?: string,
+) =>
+  req<SessionState & { parsed: ParsedBrief }>("/sessions", {
+    method: "POST",
+    body: JSON.stringify({ brief, environment }),
+  });
+
 export const listSessions = () =>
   req<SessionState[]>("/sessions");
 
@@ -63,6 +84,149 @@ export const rateSession = (
     method: "POST",
     body: JSON.stringify({ rating, notes, transition_ratings }),
   });
+
+// v2.6.0 — Curate apply/ignore endpoints.
+export const applyNote = (sessionId: string, noteId: string) =>
+  req<SessionState>(`/sessions/${sessionId}/notes/${noteId}/apply`, {
+    method: "POST",
+  });
+
+export const ignoreNote = (sessionId: string, noteId: string) =>
+  req<{ handled: string[] }>(`/sessions/${sessionId}/notes/${noteId}/ignore`, {
+    method: "POST",
+  });
+
+// v2.6.0 — Editor deterministic gestures (drag, trash, picker).
+export const reorderSessionTracks = (sessionId: string, order: number[]) =>
+  req<SessionState>(`/sessions/${sessionId}/tracks/reorder`, {
+    method: "POST",
+    body: JSON.stringify({ order }),
+  });
+
+export const deleteSessionTrack = (sessionId: string, position: number) =>
+  req<SessionState>(`/sessions/${sessionId}/tracks/${position}`, {
+    method: "DELETE",
+  });
+
+export const insertSessionTrack = (
+  sessionId: string,
+  at: number,
+  trackId: string,
+) =>
+  req<SessionState>(`/sessions/${sessionId}/tracks/insert`, {
+    method: "POST",
+    body: JSON.stringify({ at, track_id: trackId }),
+  });
+
+// v2.6.0 — Render kickoff + status (subscribed-to-stream lives in
+// `lib/render-stream.ts` because EventSource is GET-only).
+export type StartRenderResponse = {
+  jobId: string;
+  streamUrl: string;
+  status: "started" | "already_running";
+};
+export const startRender = (sessionId: string) =>
+  req<StartRenderResponse>(`/sessions/${sessionId}/render`, { method: "POST" });
+
+export type RenderStatusResponse = {
+  phase: string;
+  running: boolean;
+  stage?: string | null;
+  pct?: number;
+  etaSeconds?: number | null;
+  assets?: Record<string, string> | null;
+  chapters?: Array<{ tMs: number; title: string; camelot: string | null }> | null;
+  error?: string | null;
+};
+export const getRenderStatus = (sessionId: string) =>
+  req<RenderStatusResponse>(`/sessions/${sessionId}/render/status`);
+
+// v2.6.0 — SSE editor command. EventSource is GET-only and can't carry a
+// body, so we use `fetch` and parse the SSE stream from the response body
+// reader manually. Each `data:` frame is JSON-decoded and forwarded to
+// `onEvent`. The `done` named event closes the stream; `error` does too.
+export type EditorStreamHandlers = {
+  onEvent: (event: Record<string, unknown>) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+};
+
+export async function streamEditorCommand(
+  sessionId: string,
+  text: string,
+  handlers: EditorStreamHandlers,
+): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${BASE}/sessions/${sessionId}/editor_command`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) {
+    handlers.onError(`HTTP ${res.status}`);
+    return;
+  }
+  if (!res.body) {
+    handlers.onError("Empty response");
+    return;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let currentEvent: string | null = null;
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let lineEnd: number;
+      while ((lineEnd = buffer.indexOf("\n")) !== -1) {
+        const rawLine = buffer.slice(0, lineEnd);
+        buffer = buffer.slice(lineEnd + 1);
+        const line = rawLine.replace(/\r$/, "");
+
+        if (line === "") {
+          currentEvent = null;
+          continue;
+        }
+        if (line.startsWith(":")) continue; // SSE comment / heartbeat
+        if (line.startsWith("event: ")) {
+          currentEvent = line.slice(7).trim();
+          continue;
+        }
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (currentEvent === "done") {
+            handlers.onDone();
+            return;
+          }
+          if (currentEvent === "error") {
+            try {
+              const payload = JSON.parse(data) as { message?: string };
+              handlers.onError(payload.message ?? "Error");
+            } catch {
+              handlers.onError(data || "Error");
+            }
+            return;
+          }
+          try {
+            handlers.onEvent(JSON.parse(data));
+          } catch {
+            // skip malformed frames
+          }
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
 
 // Catalog
 export const getCatalog = (genre?: string) => {

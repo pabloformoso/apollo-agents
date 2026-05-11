@@ -1,10 +1,33 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Press+Start+2P&display=swap');
+/* Apollo v2.6.0 — Cinematic / Ember globals.
+ *
+ * Fonts are loaded via next/font (app/layout.tsx) — no @import needed; the
+ * legacy Google Fonts import for Space Mono / Press Start 2P is dropped.
+ * Tokens come from tailwind.config.ts; only document-level reset and a
+ * couple of utilities live here.
+ */
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 :root {
+  /* v2.6.0 Ember tokens — duplicated in tailwind.config.ts so vanilla CSS
+     and inline styles can reach them. Keep in sync. */
+  --ink: #0a0807;
+  --surf: #13100e;
+  --surf2: #1c1814;
+  --line: rgba(255, 238, 220, 0.10);
+  --line2: rgba(255, 238, 220, 0.20);
+  --ember-text: #fbf3e6;
+  --mute: rgba(251, 243, 230, 0.62);
+  --faint: rgba(251, 243, 230, 0.36);
+  --ember: #e8553a;
+  --ember-dark: #b53d24;
+  --cream: #f0e3c8;
+  --warn: #f0b15a;
+  --ok: #9bbf7a;
+
+  /* Legacy v2.5.x — preserved while transitional screens still render. */
   --bg: #0a0a0f;
   --surface: #111118;
   --border: #1e1e2e;
@@ -12,31 +35,62 @@
   --muted: #4a4a6a;
 }
 
-body {
-  background-color: var(--bg);
-  color: #e2e2ff;
-  font-family: 'Space Mono', Consolas, monospace;
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--ink);
+  color: var(--ember-text);
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Neon glow utility */
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: var(--ember);
+  color: var(--ember-text);
+}
+
+input,
+textarea {
+  caret-color: var(--ember);
+}
+
+/* Scrollbar — narrower and warmer than the legacy neon theme. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 238, 220, 0.12);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 238, 220, 0.20);
+}
+
+/* Diagonal stripe placeholder — used as cover art empty state. The colour
+   is parameterised through the --stripe CSS var so each card can tint its
+   own placeholder. Falls back to the ember tone. */
+.stripe-placeholder {
+  --stripe: rgba(232, 85, 58, 0.18);
+  background-color: var(--surf);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='8'><path d='M-1,1 l2,-2 M0,8 l8,-8 M7,9 l2,-2' stroke='rgba(232,85,58,0.18)' stroke-width='1'/></svg>");
+}
+
+/* Legacy utilities — kept so unmigrated v2.5.x screens keep rendering. */
 .glow {
   text-shadow: 0 0 8px var(--neon), 0 0 20px var(--neon);
 }
-
-/* Scrollbar styling */
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: var(--bg); }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-::-webkit-scrollbar-thumb:hover { background: var(--muted); }
-
-/* Terminal cursor blink */
 .cursor::after {
   content: '█';
   animation: blink 1s step-end infinite;
   color: var(--neon);
 }
-
 @keyframes blink {
   0%, 100% { opacity: 1; }
   50% { opacity: 0; }

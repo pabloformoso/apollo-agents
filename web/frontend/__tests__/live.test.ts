@@ -186,7 +186,10 @@ describe("useLiveSession", () => {
     const { result } = renderHook(() => useLiveSession("sid-1"));
     await flushOpen();
     expect(FakeWebSocket.lastInstance).not.toBeNull();
-    expect(FakeWebSocket.lastInstance!.url).toContain("/ws/live/sid-1");
+    // v2.6.0 — canonical path moved under /api/sessions/{id}/live/stream.
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-1/live/stream",
+    );
     expect(result.current.connected).toBe(true);
   });
 

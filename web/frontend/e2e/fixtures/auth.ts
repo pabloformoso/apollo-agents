@@ -35,7 +35,12 @@ export async function installToken(page: Page, user: E2EUser): Promise<void> {
   );
 }
 
-/** Register + install token + navigate to dashboard. One call for the common setup. */
+/** Register + install token + navigate to dashboard. One call for the common setup.
+ *
+ * v2.6.0 — the dashboard CTA renamed from "+ New Session" to "Start a session";
+ * the regex below matches both so this fixture works against the legacy +
+ * redesigned UIs during the transition.
+ */
 export async function signedInOnDashboard(
   page: Page,
   request: APIRequestContext,
@@ -43,6 +48,29 @@ export async function signedInOnDashboard(
   const user = await registerViaApi(request);
   await installToken(page, user);
   await page.goto("/dashboard");
-  await expect(page.getByRole("button", { name: /new session/i })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: /(new session|start a session)/i }),
+  ).toBeVisible();
   return user;
+}
+
+/**
+ * Create a fresh session via the REST API and navigate the browser to its
+ * legacy /session/{id} detail page. Used by E2E specs that need to
+ * exercise the agent's phase machine — the v2.6.0 dashboard CTA goes
+ * through /brief which doesn't trigger planning, so the legacy session
+ * route is still the only entry point that drives the WS-backed flow.
+ */
+export async function gotoNewSession(
+  page: Page,
+  request: APIRequestContext,
+  user: E2EUser,
+): Promise<string> {
+  const res = await request.post(`${API_BASE}/api/sessions`, {
+    headers: { Authorization: `Bearer ${user.token}` },
+  });
+  expect(res.ok(), `create session failed: ${await res.text()}`).toBeTruthy();
+  const body = await res.json();
+  await page.goto(`/session/${body.id}`);
+  return body.id as string;
 }

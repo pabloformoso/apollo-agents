@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -20,11 +20,10 @@ test.describe("v2.5.3 — visual layer", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
     // Walk planning UI to ckpt1 → live route.
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
     const sid = page.url().split("/session/")[1].split("/")[0];
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
@@ -72,10 +71,9 @@ test.describe("v2.5.3 — visual layer", () => {
   });
 
   test("fullscreen toggle button is reachable", async ({ page, request }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
     const sid = page.url().split("/session/")[1].split("/")[0];
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);

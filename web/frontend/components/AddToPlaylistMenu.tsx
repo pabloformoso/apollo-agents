@@ -88,20 +88,20 @@ export default function AddToPlaylistMenu({
       data-testid="add-to-playlist-menu"
       role="menu"
       aria-label="Add to playlist"
-      className="absolute z-50 right-0 top-full mt-1 w-64 bg-surface border border-border rounded shadow-lg text-xs"
+      className="absolute z-50 right-0 top-full mt-1 w-64 bg-surf border border-line shadow-lg text-xs"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="px-3 py-2 border-b border-border text-muted uppercase tracking-widest text-[10px]">
+      <div className="px-3 py-2 border-b border-line font-mono text-[10px] text-faint uppercase tracking-mono">
         Add to playlist
       </div>
 
       {error && (
-        <div className="px-3 py-2 text-danger text-[11px]">{error}</div>
+        <div className="px-3 py-2 text-ember text-[11px]">{error}</div>
       )}
 
       {confirmation && (
         <div
-          className="px-3 py-2 text-neon text-[11px]"
+          className="px-3 py-2 text-ok text-[11px]"
           data-testid="add-to-playlist-confirmation"
         >
           {confirmation}
@@ -110,9 +110,9 @@ export default function AddToPlaylistMenu({
 
       <div className="max-h-48 overflow-y-auto">
         {playlists === null ? (
-          <p className="px-3 py-2 text-muted">Loading…</p>
+          <p className="px-3 py-2 text-faint">Loading…</p>
         ) : playlists.length === 0 ? (
-          <p className="px-3 py-2 text-muted">No playlists yet.</p>
+          <p className="px-3 py-2 text-faint">No playlists yet.</p>
         ) : (
           playlists.map((p) => (
             <button
@@ -122,10 +122,12 @@ export default function AddToPlaylistMenu({
               onClick={() => handlePick(p)}
               disabled={busyId !== null}
               data-testid={`add-to-playlist-item-${p.id}`}
-              className="w-full text-left px-3 py-2 hover:bg-[#1e1e2e]/50 disabled:opacity-50 flex items-center justify-between"
+              className="w-full text-left px-3 py-2 hover:bg-surf2 disabled:opacity-50 flex items-center justify-between"
             >
-              <span className="truncate text-[#e2e2ff]">{p.name}</span>
-              <span className="text-muted text-[10px] ml-2">
+              <span className="truncate text-ember-text font-display italic text-base">
+                {p.name}
+              </span>
+              <span className="font-mono text-faint text-[10px] ml-2">
                 {p.track_count}
               </span>
             </button>
@@ -133,7 +135,7 @@ export default function AddToPlaylistMenu({
         )}
       </div>
 
-      <div className="border-t border-border p-2">
+      <div className="border-t border-line p-2">
         {showNew ? (
           <form onSubmit={handleCreate} className="flex items-center gap-2">
             <input
@@ -144,13 +146,13 @@ export default function AddToPlaylistMenu({
               placeholder="Playlist name"
               maxLength={100}
               data-testid="add-to-playlist-new-name"
-              className="flex-1 bg-[#0a0a0f] border border-border rounded px-2 py-1 text-[11px] text-[#e2e2ff] focus:border-neon focus:outline-none"
+              className="flex-1 bg-transparent border-0 border-b border-line2 px-0 py-1 font-display italic text-base text-cream focus:border-ember focus:outline-none placeholder:text-faint"
             />
             <button
               type="submit"
               disabled={!newName.trim() || busyId !== null}
               data-testid="add-to-playlist-new-submit"
-              className="text-neon text-[11px] px-2 py-1 disabled:opacity-50 hover:underline"
+              className="text-ember text-[11px] px-2 py-1 disabled:opacity-50 hover:text-ember-dark transition-colors"
             >
               Add
             </button>
@@ -160,7 +162,7 @@ export default function AddToPlaylistMenu({
             type="button"
             onClick={() => setShowNew(true)}
             data-testid="add-to-playlist-new-trigger"
-            className="w-full text-left text-neon hover:underline px-1 py-1"
+            className="w-full text-left text-ember hover:text-ember-dark px-1 py-1 transition-colors"
           >
             + Create new…
           </button>

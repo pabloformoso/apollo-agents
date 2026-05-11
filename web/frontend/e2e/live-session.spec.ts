@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { signedInOnDashboard } from "./fixtures/auth";
+import { gotoNewSession, signedInOnDashboard } from "./fixtures/auth";
 import { expectPhase } from "./fixtures/phase";
 
 /**
@@ -28,13 +28,12 @@ test.describe("v2.5.1 — live performance bridge", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
     // 1. Create a session and walk through the planning flow until ckpt1
     //    so the backend persists ctx.playlist into the session — the live
     //    WS rejects sessions with no playlist.
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
     const url = page.url();
     const sid = url.split("/session/")[1].split("/")[0];
 
@@ -92,11 +91,10 @@ test.describe("v2.5.1 — live performance bridge", () => {
     page,
     request,
   }) => {
-    await signedInOnDashboard(page, request);
+    const e2eUser = await signedInOnDashboard(page, request);
 
     // Create session and walk planning flow to ckpt1 → ckpt2 → editing.
-    await page.getByRole("button", { name: /new session/i }).click();
-    await page.waitForURL(/\/session\/[0-9a-f-]+/);
+    await gotoNewSession(page, request, e2eUser);
     const sid = page.url().split("/session/")[1].split("/")[0];
 
     const genreInput = page.getByPlaceholder(/60-minute cyberpunk set/i);
