@@ -14,9 +14,9 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
-from . import db, auth, pipeline
+from . import db, auth, pipeline, youtube_auth
 from .render import router as render_router
 from .models import (
     CreateSessionRequest,
@@ -124,6 +124,82 @@ async def login(req: LoginRequest):
 @app.get("/api/auth/me")
 async def me(current_user: dict = Depends(auth.get_current_user)):
     return {"id": current_user["id"], "username": current_user["username"], "email": current_user["email"]}
+
+
+# ---------------------------------------------------------------------------
+# YouTube OAuth (v2.7) — read-only access to the operator's own live chat.
+# All four routes 404 cleanly when GOOGLE_CLIENT_ID / SECRET / REDIRECT_URI
+# aren't in the env, so unconfigured installs behave exactly like v2.6.x.
+# ---------------------------------------------------------------------------
+
+
+def _yt_guard() -> None:
+    if not youtube_auth.enabled():
+        raise HTTPException(status_code=404, detail="YouTube integration not configured")
+
+
+@app.get("/api/youtube/oauth/start")
+async def youtube_oauth_start(token: str = Query(...)):
+    """Issue a 302 to Google's consent screen with a signed state token.
+
+    The operator's browser follows the redirect, consents, and Google
+    bounces back to ``/api/youtube/oauth/callback`` with ``?code=&state=``.
+
+    Auth is via a query-string JWT (``?token=``) rather than the usual
+    Authorization header because the frontend opens this URL with
+    ``window.open()``, which can't attach custom headers. Same pattern
+    we already use for WS upgrades and render SSE — see
+    ``auth.user_from_query_token`` and ``test_auth_query_token``.
+    """
+    _yt_guard()
+    user = auth.user_from_query_token(token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    url = youtube_auth.start_oauth_flow(user["id"])
+    return RedirectResponse(url=url, status_code=302)
+
+
+@app.get("/api/youtube/oauth/callback")
+async def youtube_oauth_callback(code: str = Query(...), state: str = Query(...)):
+    """Complete the OAuth flow + redirect the operator back to /live.
+
+    Note: this endpoint is hit by the operator's browser (via the
+    Google redirect) — there's no Authorization header, so we
+    authenticate via the HMAC-signed ``state`` token rather than the
+    usual Bearer JWT.
+    """
+    _yt_guard()
+    try:
+        summary = await youtube_auth.handle_callback(code=code, state=state)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Redirect operator to /live with a hint flag the UI can render.
+    front = os.environ.get("APOLLO_FRONTEND_URL", "http://localhost:4040")
+    return RedirectResponse(
+        url=f"{front}/live?yt_connected={summary['channel_id']}",
+        status_code=302,
+    )
+
+
+@app.get("/api/youtube/status")
+async def youtube_status(current_user: dict = Depends(auth.get_current_user)):
+    """Return whether the current user has linked YouTube + which channel."""
+    _yt_guard()
+    summary = youtube_auth.channel_summary(current_user["id"])
+    if summary is None:
+        return {"connected": False}
+    return {
+        "connected": True,
+        "channel_id": summary["channel_id"],
+        "channel_title": summary["channel_title"],
+    }
+
+
+@app.post("/api/youtube/disconnect")
+async def youtube_disconnect(current_user: dict = Depends(auth.get_current_user)):
+    _yt_guard()
+    removed = youtube_auth.disconnect(current_user["id"])
+    return {"disconnected": removed}
 
 
 # ---------------------------------------------------------------------------
@@ -983,6 +1059,78 @@ async def live_session_ws(
 
     phase_task = asyncio.create_task(run_phase())
 
+    # ── v2.7: YouTube Live Chat ingest ─────────────────────────────────
+    # If the operator linked their YT channel and is currently broadcasting,
+    # spawn a poller that translates incoming live-chat messages into the
+    # same ``user_msg`` shape the browser DJ chat already uses. They flow
+    # through ``_live_relay`` into ``audience_request_batch`` like any
+    # other audience request — the agent doesn't need to know the source.
+    # When YT isn't configured or the user isn't connected, this branch
+    # is a no-op and the rest of the session behaves exactly as before.
+    from . import youtube_auth, youtube_chat  # noqa: PLC0415 — keep optional dep lazy
+
+    yt_stop = asyncio.Event()
+    yt_task: asyncio.Task | None = None
+    try:
+        yt_creds = youtube_auth.get_credentials(user["id"]) if youtube_auth.enabled() else None
+    except Exception as exc:  # noqa: BLE001 — never let YT setup take down the live session
+        print(f"[live-ws {session_id}] youtube_auth.get_credentials failed: {exc}", flush=True)
+        yt_creds = None
+
+    if yt_creds:
+        try:
+            broadcast = await youtube_chat.discover_active_broadcast(yt_creds)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[live-ws {session_id}] yt discover failed: {exc}", flush=True)
+            broadcast = None
+
+        if broadcast:
+            await emit({
+                "type": "youtube_status",
+                "state": "connected",
+                "broadcast": {
+                    "id": broadcast["id"],
+                    "title": broadcast["title"],
+                },
+            })
+
+            async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
+                # Prefix the source so the DJ — and any future analytics —
+                # can tell YT chatters apart from the in-browser DJ chat
+                # box. The agent's system prompt treats the whole batch as
+                # "audience requests" regardless; the prefix is just a
+                # readable handle the LLM can mention in emit_chat replies.
+                payload = {
+                    "type": "user_msg",
+                    "text": f"[YT @{author}] {text}",
+                    "timestamp_ms": ts_ms or None,
+                }
+                try:
+                    await command_queue.put(payload)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[live-ws {session_id}] yt enqueue failed: {exc}",
+                        flush=True,
+                    )
+
+            async def _on_yt_status(status_event: dict) -> None:
+                # Forward poller-level status (quota / disconnect) to the
+                # frontend so the UI pill can reflect reality.
+                await emit({"type": "youtube_status", **status_event})
+
+            yt_task = asyncio.create_task(
+                youtube_chat.poll_live_chat(
+                    yt_creds,
+                    broadcast["live_chat_id"],
+                    _on_yt_message,
+                    yt_stop,
+                    own_channel_id=broadcast.get("channel_id") or None,
+                    on_status=_on_yt_status,
+                )
+            )
+        else:
+            await emit({"type": "youtube_status", "state": "no_broadcast"})
+
     try:
         # Initial state event so the client knows what's loaded before any
         # engine events arrive.
@@ -1111,6 +1259,18 @@ async def live_session_ws(
             phase_task.cancel()
             try:
                 await phase_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        # v2.7: tear down the YouTube poller (if any). Signal stop first so
+        # the loop exits at the next ``_sleep_or_stop`` checkpoint, then
+        # cancel as a belt-and-braces in case it's blocked inside an
+        # asyncio.to_thread call (the cancellation propagates when the
+        # blocked HTTP request returns).
+        yt_stop.set()
+        if yt_task is not None and not yt_task.done():
+            yt_task.cancel()
+            try:
+                await yt_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         ws_manager.disconnect(session_id, channel="live")

@@ -291,3 +291,37 @@ export const clearRating = (trackId: string) =>
   req<void>(`/tracks/${encodeURIComponent(trackId)}/rating`, {
     method: "DELETE",
   });
+
+// ── v2.7: YouTube Live Chat integration ──────────────────────────────────────
+// Status endpoint is plain GET; the OAuth start is a 302 redirect we open in
+// a popup window. Disconnect drops the persisted credentials server-side.
+export type YouTubeStatus =
+  | { connected: false }
+  | { connected: true; channel_id: string; channel_title: string };
+
+export const getYouTubeStatus = () =>
+  req<YouTubeStatus>("/youtube/status").catch((e) => {
+    // The endpoint 404s when GOOGLE_CLIENT_ID/SECRET aren't configured —
+    // that's the "feature disabled" path, not an error. Treat it as
+    // disconnected so the pill stays hidden.
+    if (/not configured/i.test(String((e as Error).message))) {
+      return { connected: false as const };
+    }
+    throw e;
+  });
+
+/** URL the frontend opens in a popup to kick off OAuth. The backend
+ *  redirects to Google with a signed state token, then back here on
+ *  success — the live WS picks up the new credentials on next reconnect. */
+export const youtubeOAuthStartUrl = (): string => {
+  const token = getToken();
+  // The start endpoint requires auth via Bearer; we can't set a header on
+  // a top-level window.open, so we pass the token as a query string. The
+  // backend reads `auth_query_token` (existing helper used by WS upgrades
+  // + render SSE) when the header isn't present.
+  const q = token ? `?token=${encodeURIComponent(token)}` : "";
+  return `${BASE}/youtube/oauth/start${q}`;
+};
+
+export const disconnectYouTube = () =>
+  req<{ disconnected: boolean }>("/youtube/disconnect", { method: "POST" });

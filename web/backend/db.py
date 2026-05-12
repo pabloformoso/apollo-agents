@@ -66,6 +66,26 @@ def init_db() -> None:
                 FOREIGN KEY (user_id) REFERENCES users(id)
             )
         """)
+        # v2.7 — OAuth refresh tokens for third-party providers (YouTube
+        # today, room for more). Refresh tokens are Fernet-encrypted at
+        # rest with a key derived from JWT_SECRET (see
+        # web/backend/youtube_auth._fernet); the access_token cache is
+        # also stored so we avoid a refresh round-trip when it's fresh.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS oauth_tokens (
+                user_id       INTEGER NOT NULL,
+                provider      TEXT    NOT NULL,
+                refresh_token TEXT    NOT NULL,
+                access_token  TEXT,
+                expires_at    TEXT,
+                scope         TEXT,
+                channel_id    TEXT,
+                channel_title TEXT,
+                connected_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (user_id, provider),
+                FOREIGN KEY (user_id) REFERENCES users(id)
+            )
+        """)
         c.commit()
 
 
@@ -359,3 +379,92 @@ def get_user_ratings(user_id: int) -> dict[str, int]:
             (user_id,),
         ).fetchall()
         return {r["track_id"]: r["rating"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# OAuth refresh tokens (v2.7) — Fernet-encrypted at rest. The encryption key
+# is derived from JWT_SECRET by youtube_auth._fernet so we never persist a
+# usable refresh token even if the DB file leaks without the env.
+# Callers pass already-encrypted token strings; this module is intentionally
+# crypto-agnostic so unit tests can exercise the SQL paths without pulling
+# in the cryptography stack.
+# ---------------------------------------------------------------------------
+
+
+def save_oauth_token(
+    user_id: int,
+    provider: str,
+    refresh_token_encrypted: str,
+    *,
+    access_token: str | None = None,
+    expires_at: str | None = None,
+    scope: str | None = None,
+    channel_id: str | None = None,
+    channel_title: str | None = None,
+) -> None:
+    """Upsert an OAuth token row. `refresh_token_encrypted` is opaque to
+    this module; the caller is responsible for encryption."""
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO oauth_tokens
+                (user_id, provider, refresh_token, access_token,
+                 expires_at, scope, channel_id, channel_title)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, provider) DO UPDATE SET
+                refresh_token = excluded.refresh_token,
+                access_token  = excluded.access_token,
+                expires_at    = excluded.expires_at,
+                scope         = excluded.scope,
+                channel_id    = excluded.channel_id,
+                channel_title = excluded.channel_title
+            """,
+            (user_id, provider, refresh_token_encrypted, access_token,
+             expires_at, scope, channel_id, channel_title),
+        )
+        c.commit()
+
+
+def get_oauth_token(user_id: int, provider: str) -> dict | None:
+    with _conn() as c:
+        row = c.execute(
+            """
+            SELECT user_id, provider, refresh_token, access_token,
+                   expires_at, scope, channel_id, channel_title, connected_at
+            FROM oauth_tokens
+            WHERE user_id = ? AND provider = ?
+            """,
+            (user_id, provider),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_oauth_access_token(
+    user_id: int,
+    provider: str,
+    *,
+    access_token: str | None,
+    expires_at: str | None,
+) -> None:
+    """Refresh just the access-token cache after a successful token refresh.
+    The encrypted refresh_token is left untouched."""
+    with _conn() as c:
+        c.execute(
+            """
+            UPDATE oauth_tokens
+            SET access_token = ?, expires_at = ?
+            WHERE user_id = ? AND provider = ?
+            """,
+            (access_token, expires_at, user_id, provider),
+        )
+        c.commit()
+
+
+def delete_oauth_token(user_id: int, provider: str) -> bool:
+    with _conn() as c:
+        cur = c.execute(
+            "DELETE FROM oauth_tokens WHERE user_id = ? AND provider = ?",
+            (user_id, provider),
+        )
+        c.commit()
+        return cur.rowcount > 0

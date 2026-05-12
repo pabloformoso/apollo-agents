@@ -22,7 +22,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { getSession } from "@/lib/api";
+import { getSession, youtubeOAuthStartUrl } from "@/lib/api";
 import { getToken, useAuth } from "@/lib/auth";
 import { useAuthQueryBootstrap } from "@/lib/auth-bootstrap";
 import { useAutoSession } from "@/lib/auto-session";
@@ -283,6 +283,58 @@ export default function LivePage() {
           >
             ♾ Endless: {live.endlessMode ? "on" : "off"}
           </button>
+
+          {/* v2.7 — YouTube Live Chat ingest pill. Only renders when
+              the backend has actually emitted a youtube_status event
+              (state !== "off"), which means YT is configured server-side
+              AND the user has linked their channel. Click behaviour
+              depends on state — see the per-branch handlers below. */}
+          {live.youtube.state !== "off" && (
+            <button
+              onClick={() => {
+                if (live.youtube.state === "no_broadcast") {
+                  window.open("https://studio.youtube.com/", "_blank", "noopener,noreferrer");
+                  return;
+                }
+                if (live.youtube.state === "disconnected") {
+                  window.open(youtubeOAuthStartUrl(), "yt-oauth", "width=500,height=700");
+                }
+                // connected / quota_exceeded / error: noop (informational)
+              }}
+              title={
+                live.youtube.state === "connected"
+                  ? `YouTube Live: chat ingest from "${live.youtube.broadcastTitle ?? "active broadcast"}"`
+                  : live.youtube.state === "no_broadcast"
+                    ? "YouTube linked, but no active broadcast — click to open YouTube Studio"
+                    : live.youtube.state === "quota_exceeded"
+                      ? "YouTube API quota exceeded — polling at reduced cadence (60 s)"
+                      : live.youtube.state === "disconnected"
+                        ? `YouTube disconnected${live.youtube.reason ? ` (${live.youtube.reason})` : ""} — click to reconnect`
+                        : "YouTube error — see console"
+              }
+              className={
+                "px-3.5 py-2 text-xs font-sans transition-colors border " +
+                (live.youtube.state === "connected"
+                  ? "bg-red-600/15 text-red-300 border-red-600/40"
+                  : live.youtube.state === "quota_exceeded"
+                    ? "bg-warn/10 text-warn border-warn/40 cursor-default"
+                    : live.youtube.state === "no_broadcast"
+                      ? "bg-transparent text-mute border-line2 hover:text-ember-text cursor-pointer"
+                      : "bg-transparent text-faint border-line2 hover:text-ember-text cursor-pointer")
+              }
+            >
+              ▶ YT:{" "}
+              {live.youtube.state === "connected"
+                ? (live.youtube.broadcastTitle?.slice(0, 24) ?? "live")
+                : live.youtube.state === "no_broadcast"
+                  ? "no broadcast"
+                  : live.youtube.state === "quota_exceeded"
+                    ? "quota"
+                    : live.youtube.state === "disconnected"
+                      ? "disconnected"
+                      : "error"}
+            </button>
+          )}
 
           {sessionId && (
             <Btn
