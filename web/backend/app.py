@@ -1071,11 +1071,23 @@ async def live_session_ws(
 
     yt_stop = asyncio.Event()
     yt_task: asyncio.Task | None = None
+    yt_enabled = youtube_auth.enabled()
     try:
-        yt_creds = youtube_auth.get_credentials(user["id"]) if youtube_auth.enabled() else None
+        yt_creds = youtube_auth.get_credentials(user["id"]) if yt_enabled else None
     except Exception as exc:  # noqa: BLE001 — never let YT setup take down the live session
         print(f"[live-ws {session_id}] youtube_auth.get_credentials failed: {exc}", flush=True)
         yt_creds = None
+
+    # v2.7.0 UX fix: emit a "disconnected" status so the frontend pill
+    # renders even for brand-new users who haven't OAuthed yet. Without
+    # this, the pill stays hidden (state="off") and the user has no
+    # entry point to start the OAuth flow.
+    if yt_enabled and yt_creds is None:
+        await emit({
+            "type": "youtube_status",
+            "state": "disconnected",
+            "reason": "not_connected",
+        })
 
     if yt_creds:
         try:
@@ -1095,11 +1107,26 @@ async def live_session_ws(
             })
 
             async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
-                # Prefix the source so the DJ — and any future analytics —
-                # can tell YT chatters apart from the in-browser DJ chat
-                # box. The agent's system prompt treats the whole batch as
-                # "audience requests" regardless; the prefix is just a
-                # readable handle the LLM can mention in emit_chat replies.
+                # v2.7.1 — surface every YT message in the Booth dj_chat
+                # panel so the operator can SEE them landing in real time
+                # (not just rely on whether the agent decides to react).
+                # This emit goes to the live channel WS unconditionally;
+                # the LLM enqueue below is the agent-input path and can
+                # be source-filtered separately.
+                try:
+                    await emit({
+                        "type": "dj_chat",
+                        "text": f"[YT @{author}] {text}",
+                    })
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[live-ws {session_id}] yt dj_chat emit failed: {exc}",
+                        flush=True,
+                    )
+                # Then push into the agent's audience-request rail. The
+                # prefix lets the LLM mention the author by handle in
+                # emit_chat replies; the existing 5-s batcher folds
+                # multiple YT + browser messages into one turn.
                 payload = {
                     "type": "user_msg",
                     "text": f"[YT @{author}] {text}",
