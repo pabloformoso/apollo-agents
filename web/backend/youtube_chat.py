@@ -67,41 +67,62 @@ async def discover_active_broadcast(creds) -> dict[str, str] | None:
     return await asyncio.to_thread(_discover_active_broadcast_sync, creds)
 
 
+#: YouTube ``status.lifeCycleStatus`` values that mean the broadcast is
+#: currently chattable. ``live`` is the typical case once "Go Live" is
+#: clicked in Studio; ``testing`` covers preview streams where chat is
+#: already accepting messages; ``liveStarting`` is the transient state
+#: while Studio finalises the switch over. Anything else (created,
+#: ready, complete, revoked) is not a chat we should attach to.
+_ACTIVE_LIFECYCLE_STATUSES = frozenset({"live", "testing", "liveStarting"})
+
+
 def _discover_active_broadcast_sync(creds) -> dict[str, str] | None:
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
 
     yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
+    # NOTE: ``broadcastStatus`` and ``mine=true`` are documented as
+    # incompatible by Google ("Incompatible parameters specified in the
+    # request: mine, broadcastStatus" — HTTP 400). We list with
+    # ``mine=true`` only and filter client-side on
+    # ``status.lifeCycleStatus``. Cap maxResults at 50 (API max) so a
+    # channel with lots of historical broadcasts still surfaces the
+    # current live one.
     try:
         resp = yt.liveBroadcasts().list(
             part="snippet,status,contentDetails",
-            broadcastStatus="active",
             mine=True,
-            maxResults=5,
+            maxResults=50,
         ).execute()
     except HttpError as exc:
         log.warning("liveBroadcasts.list failed: %s", exc)
         return None
 
     items = resp.get("items") or []
-    if not items:
-        return None
-    item = items[0]
-    snip = item.get("snippet") or {}
-    content = item.get("contentDetails") or {}
-    live_chat_id = snip.get("liveChatId") or content.get("liveChatId")
-    if not live_chat_id:
-        # A broadcast can be active without a chat (rare — usually
-        # disabled chat on the broadcast settings). No chat = no
-        # ingest, treat as "no broadcast available".
-        log.info("Active broadcast %s has no liveChatId — chat disabled", item.get("id"))
-        return None
-    return {
-        "id": item["id"],
-        "title": snip.get("title", item["id"]),
-        "live_chat_id": live_chat_id,
-        "channel_id": snip.get("channelId", ""),
-    }
+    # Filter for broadcasts that are currently chattable and pick the
+    # most recent one (the API returns newest-first by default).
+    for item in items:
+        status = item.get("status") or {}
+        lifecycle = status.get("lifeCycleStatus")
+        if lifecycle not in _ACTIVE_LIFECYCLE_STATUSES:
+            continue
+        snip = item.get("snippet") or {}
+        content = item.get("contentDetails") or {}
+        live_chat_id = snip.get("liveChatId") or content.get("liveChatId")
+        if not live_chat_id:
+            # Active broadcast with chat disabled in Studio. Keep
+            # scanning in case the channel has multiple actives — a
+            # rare but real case for streamers running multiple
+            # cameras at once.
+            log.info("Active broadcast %s has no liveChatId — chat disabled", item.get("id"))
+            continue
+        return {
+            "id": item["id"],
+            "title": snip.get("title", item["id"]),
+            "live_chat_id": live_chat_id,
+            "channel_id": snip.get("channelId", ""),
+        }
+    return None
 
 
 # ---------------------------------------------------------------------------

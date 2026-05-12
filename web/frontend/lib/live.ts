@@ -304,6 +304,41 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     reason?: string;
   }>({ state: "off" });
 
+  // v2.7.0 — HTTP probe so the pill renders immediately on /live mount
+  // without waiting for a WS event. The live WS only emits
+  // ``youtube_status`` for sessions that successfully open the live
+  // channel, which can race with the page's first paint. Probing
+  // ``/api/youtube/status`` directly gives a deterministic initial
+  // state: 404 → feature disabled server-side (leave state "off");
+  // 200 + connected:false → "disconnected" (pill renders, clicking
+  // starts OAuth); 200 + connected:true → "connected".
+  // Server-emitted WS events still win — they're the source of truth
+  // for live broadcast attachment — but this seeds the initial render.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let cancelled = false;
+    void import("./api").then(({ getYouTubeStatus }) => {
+      getYouTubeStatus()
+        .then((status) => {
+          if (cancelled) return;
+          if ("connected" in status && status.connected) {
+            setYoutube({
+              state: "connected",
+              broadcastTitle: status.channel_title,
+            });
+          } else if ("connected" in status && !status.connected) {
+            setYoutube({ state: "disconnected" });
+          }
+        })
+        .catch(() => {
+          // Network / 404 — leave as "off" so the pill stays hidden.
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Derive next track from the playlist + current track position. This is
   // robust to event-ordering races where ``track_started`` fires before any
   // ``approaching_crossfade`` (so the explicit next_track payload is null).
