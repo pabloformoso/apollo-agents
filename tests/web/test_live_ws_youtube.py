@@ -126,9 +126,11 @@ def test_youtube_status_no_broadcast_when_creds_but_idle(auth_client, auth_token
 def test_youtube_messages_become_audience_requests(auth_client, auth_token, mock_pipeline, monkeypatch):
     """The integration claim: a message emitted by ``on_message`` inside
     the YT poller must land in ``command_queue`` as a ``user_msg`` with
-    the ``[YT @author]`` prefix. The deterministic fake_phase_live
-    echoes any user_msg back as ``dj_chat: "Heard: <text>. ..."``, so
-    we assert on that echo to confirm round-trip through the queue."""
+    the ``[YT @author]`` prefix AND surface as a ``dj_chat`` event for
+    operator visibility. The deterministic fake_phase_live also echoes
+    any user_msg back as ``dj_chat: "Heard: <text>. ..."``, so we
+    expect TWO dj_chat events per YT message (direct visibility + the
+    agent's echo)."""
     _patch_youtube_pipeline(
         monkeypatch,
         messages=[
@@ -142,19 +144,50 @@ def test_youtube_messages_become_audience_requests(auth_client, auth_token, mock
     _seed_playlist(auth_client, sid)
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
         echoes: list[str] = []
-        # Pump frames generously — track_started + engine_command + the
-        # YT-driven dj_chat echoes all come through.
-        for _ in range(60):
+        # Pump frames generously. Each YT message produces (a) a direct
+        # dj_chat from the v2.7.1 visibility emit and (b) an agent echo
+        # via fake_phase_live's "Heard: ..." reply. Two messages × two
+        # events = up to 4 dj_chat events to collect.
+        for _ in range(80):
             ev = ws.receive_json()
             if ev.get("type") == "dj_chat":
                 echoes.append(ev.get("text", ""))
-                if len(echoes) >= 2:
+                if len(echoes) >= 4:
                     break
 
         assert any("[YT @alice]" in e and "play something deeper" in e for e in echoes), \
-            f"alice's YT message not echoed back as dj_chat — saw {echoes!r}"
+            f"alice's YT message not in dj_chat stream — saw {echoes!r}"
         assert any("[YT @bob]" in e and "more bpm please" in e for e in echoes), \
-            f"bob's YT message not echoed back as dj_chat — saw {echoes!r}"
+            f"bob's YT message not in dj_chat stream — saw {echoes!r}"
+
+
+def test_youtube_visibility_dj_chat_emitted_for_each_message(auth_client, auth_token, mock_pipeline, monkeypatch):
+    """Regression for v2.7.1 visibility fix: every incoming YT message
+    must emit a ``dj_chat`` event (with the ``[YT @author]`` prefix)
+    BEFORE pushing to command_queue. The Booth panel uses this to
+    show messages in real time, independent of whether the agent
+    reacts via the audience_request_batch path."""
+    _patch_youtube_pipeline(
+        monkeypatch,
+        messages=[("carol", "love this track", 1_700_000_000_000)],
+        broadcast={"id": "bc1", "title": "Apollo Live", "live_chat_id": "lcid", "channel_id": "UCowner"},
+    )
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    _seed_playlist(auth_client, sid)
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        direct_dj_chat: str | None = None
+        for _ in range(60):
+            ev = ws.receive_json()
+            if (
+                ev.get("type") == "dj_chat"
+                and ev.get("text", "").startswith("[YT @carol]")
+            ):
+                direct_dj_chat = ev["text"]
+                break
+        assert direct_dj_chat is not None, \
+            "v2.7.1 visibility emit missing — no [YT @carol] dj_chat seen"
+        assert "love this track" in direct_dj_chat
 
 
 def test_youtube_poller_torn_down_on_ws_disconnect(auth_client, auth_token, mock_pipeline, monkeypatch):
@@ -191,10 +224,18 @@ def test_youtube_poller_torn_down_on_ws_disconnect(auth_client, auth_token, mock
     assert poll_stopped.is_set(), "yt poller never tore down on WS disconnect"
 
 
-def test_no_youtube_events_when_user_not_connected(auth_client, auth_token, mock_pipeline, monkeypatch):
-    """``get_credentials`` returning ``None`` (the unconnected case) must
-    short-circuit the YT branch entirely — no youtube_status frame, no
-    poller spawned, live session runs exactly as v2.6.x did."""
+def test_youtube_status_disconnected_when_enabled_but_user_not_connected(
+    auth_client, auth_token, mock_pipeline, monkeypatch
+):
+    """v2.7.1 — when YouTube is enabled server-side (``GOOGLE_*`` env
+    set) but the user hasn't OAuthed, the live WS must emit
+    ``youtube_status: disconnected, reason: not_connected`` so the
+    frontend pill renders and offers the OAuth entry point. Without
+    this, brand-new users had no way to discover the feature: the
+    pill stayed hidden because no event ever fired.
+
+    The poller is NOT spawned (no creds to poll with) — only the
+    one-shot status event."""
     from web.backend import youtube_auth
 
     monkeypatch.setattr(youtube_auth, "enabled", lambda: True)
@@ -203,20 +244,42 @@ def test_no_youtube_events_when_user_not_connected(auth_client, auth_token, mock
     sid = auth_client.post("/api/sessions").json()["id"]
     _seed_playlist(auth_client, sid)
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
-        # Drain whatever the engine startup emits (typically live_state +
-        # track_started + an engine_command). Each receive has a short
-        # timeout so we don't hang past the engine's quiet period — the
-        # claim under test is simply "no youtube_status frame appears".
+        seen: list[dict] = []
+        for _ in range(15):
+            ev = ws.receive_json()
+            seen.append(ev)
+            if ev.get("type") == "track_started":
+                break
+        ws.send_json({"type": "quit"})
+
+    status_events = [e for e in seen if e.get("type") == "youtube_status"]
+    assert len(status_events) == 1, \
+        f"expected exactly one youtube_status frame, got {status_events!r}"
+    assert status_events[0]["state"] == "disconnected"
+    assert status_events[0].get("reason") == "not_connected"
+
+
+def test_no_youtube_events_when_feature_disabled(
+    auth_client, auth_token, mock_pipeline, monkeypatch
+):
+    """When ``youtube_auth.enabled()`` returns False (``GOOGLE_*`` env
+    NOT set), the live WS must skip the YT branch entirely — no
+    status event, no poller, behaviour identical to v2.6.x."""
+    from web.backend import youtube_auth
+
+    monkeypatch.setattr(youtube_auth, "enabled", lambda: False)
+    monkeypatch.setattr(youtube_auth, "get_credentials", lambda user_id: None)
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    _seed_playlist(auth_client, sid)
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
         seen_types: list[str] = []
-        # Wait for the first track_started — that's the signal the engine
-        # is up and we've seen all the synchronous startup frames.
         for _ in range(15):
             ev = ws.receive_json()
             seen_types.append(ev.get("type"))
             if ev.get("type") == "track_started":
                 break
-        # Quit so the handler tears down cleanly rather than hanging on
-        # command_queue.get() in fake_phase_live.
         ws.send_json({"type": "quit"})
-        assert "youtube_status" not in seen_types, \
-            f"youtube_status leaked through despite no creds — saw {seen_types}"
+
+    assert "youtube_status" not in seen_types, \
+        f"youtube_status leaked despite feature disabled — saw {seen_types}"

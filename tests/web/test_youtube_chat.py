@@ -87,20 +87,36 @@ def _msg(text: str, author: str = "alice", author_channel_id: str = "UCalice",
 # ---------------------------------------------------------------------------
 
 
+def _active_broadcast(
+    bcid: str = "bcid-1",
+    title: str = "Apollo Live",
+    live_chat_id: str | None = "lcid-1",
+    channel_id: str = "UCowner",
+    lifecycle: str = "live",
+) -> dict:
+    """Shape a fake broadcast that matches the real YouTube response.
+
+    Production code filters on ``status.lifeCycleStatus`` (per the v2.7.1
+    fix that drops the incompatible ``broadcastStatus`` query param), so
+    every test broadcast needs an explicit lifecycle value.
+    """
+    return {
+        "id": bcid,
+        "snippet": {
+            "title": title,
+            "liveChatId": live_chat_id,
+            "channelId": channel_id,
+        },
+        "status": {"lifeCycleStatus": lifecycle, "privacyStatus": "public"},
+        "contentDetails": {},
+    }
+
+
 @pytest.mark.asyncio
 async def test_discover_active_broadcast_returns_first_active(monkeypatch):
     from web.backend import youtube_chat
 
-    fake = _FakeYouTubeClient(broadcasts_response={
-        "items": [{
-            "id": "bcid-1",
-            "snippet": {
-                "title": "Apollo Live",
-                "liveChatId": "lcid-1",
-                "channelId": "UCowner",
-            },
-        }],
-    })
+    fake = _FakeYouTubeClient(broadcasts_response={"items": [_active_broadcast()]})
     _patch_build(monkeypatch, fake)
     res = await youtube_chat.discover_active_broadcast(creds=object())
     assert res == {
@@ -126,13 +142,55 @@ async def test_discover_active_broadcast_returns_none_when_chat_disabled(monkeyp
     from web.backend import youtube_chat
 
     fake = _FakeYouTubeClient(broadcasts_response={
-        "items": [{
-            "id": "bcid-1",
-            "snippet": {"title": "no chat", "channelId": "UCowner"},  # no liveChatId
-        }],
+        "items": [_active_broadcast(live_chat_id=None)],
     })
     _patch_build(monkeypatch, fake)
     assert await youtube_chat.discover_active_broadcast(object()) is None
+
+
+@pytest.mark.asyncio
+async def test_discover_active_broadcast_skips_completed_and_ready(monkeypatch):
+    """Only ``live`` / ``testing`` / ``liveStarting`` broadcasts qualify
+    as currently-chattable. Completed / ready / created broadcasts must
+    be filtered out (regression for v2.7.0 where status was ignored)."""
+    from web.backend import youtube_chat
+
+    fake = _FakeYouTubeClient(broadcasts_response={"items": [
+        _active_broadcast(bcid="old", lifecycle="complete"),
+        _active_broadcast(bcid="next", lifecycle="ready"),
+        _active_broadcast(bcid="now", lifecycle="live"),
+        _active_broadcast(bcid="other", lifecycle="created"),
+    ]})
+    _patch_build(monkeypatch, fake)
+    res = await youtube_chat.discover_active_broadcast(creds=object())
+    assert res is not None and res["id"] == "now"
+
+
+@pytest.mark.asyncio
+async def test_discover_active_broadcast_does_not_pass_broadcast_status(monkeypatch):
+    """Regression for v2.7.1: YouTube's liveBroadcasts.list rejects the
+    combination of ``broadcastStatus`` + ``mine=true`` with HTTP 400.
+    Production code must list with ``mine=true`` ONLY and filter on
+    ``status.lifeCycleStatus`` client-side. This test fails if a future
+    edit re-introduces the broadcastStatus kwarg."""
+    from web.backend import youtube_chat
+
+    captured_kwargs: dict[str, Any] = {}
+
+    class _CapturingBroadcasts(_FakeLiveBroadcasts):
+        def list(self, **kwargs):
+            captured_kwargs.update(kwargs)
+            return super().list(**kwargs)
+
+    fake = _FakeYouTubeClient()
+    fake._broadcasts = _CapturingBroadcasts({"items": [_active_broadcast()]})
+    _patch_build(monkeypatch, fake)
+    await youtube_chat.discover_active_broadcast(creds=object())
+    assert "broadcastStatus" not in captured_kwargs, (
+        f"discover_active_broadcast must not pass broadcastStatus together "
+        f"with mine=true (YouTube returns 400). Got kwargs: {captured_kwargs!r}"
+    )
+    assert captured_kwargs.get("mine") is True
 
 
 # ---------------------------------------------------------------------------
