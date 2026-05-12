@@ -110,6 +110,15 @@ export interface UseLiveSessionApi {
   playlistRunningLow: boolean;
   /** Toggle endless mode. Sends a WS command; the server echoes the new state. */
   setEndlessMode: (enabled: boolean) => void;
+  // v2.7 — YouTube Live Chat ingest status, surfaced as a pill in the /live header.
+  /** Compact view-model the UI binds to. ``state === "off"`` means no events arrived yet
+   *  (either the operator hasn't linked YT or the backend isn't configured); the UI uses
+   *  that to suppress the pill on plain `/live` sessions. */
+  youtube: {
+    state: "off" | "connected" | "no_broadcast" | "quota_exceeded" | "disconnected" | "error";
+    broadcastTitle?: string;
+    reason?: string;
+  };
 }
 
 export type LiveCommand =
@@ -185,6 +194,21 @@ interface ServerEndlessModeMessage {
   enabled: boolean;
 }
 
+// v2.7 — YouTube Live Chat status updates emitted by the backend. The
+// state machine is intentionally small: the frontend only renders a
+// pill colour + tooltip, so a flat string is enough.
+interface ServerYouTubeStatusMessage {
+  type: "youtube_status";
+  state:
+    | "connected"          // poller running, broadcast attached
+    | "no_broadcast"       // creds OK but no active YT live event
+    | "quota_exceeded"     // backend is backing off; no action needed
+    | "disconnected"       // token revoked / broadcast ended
+    | "error";
+  broadcast?: { id: string; title: string };
+  reason?: string;
+}
+
 interface ServerLiveMessage {
   type: "live_message";
   role: "user" | "assistant";
@@ -208,6 +232,7 @@ type ServerEvent =
   | ServerLiveMessage
   | ServerDjChat
   | ServerEndlessModeMessage
+  | ServerYouTubeStatusMessage
   | ServerError;
 
 const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
@@ -270,6 +295,14 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   // True from PLAYLIST_RUNNING_LOW until the next track_started — drives
   // the "picking continuation track…" banner on /live.
   const [playlistRunningLow, setPlaylistRunningLow] = useState(false);
+  // v2.7 — YouTube Live Chat status pill state. Defaults to "off" so
+  // we don't render the pill at all on plain `/live` sessions where YT
+  // isn't configured server-side.
+  const [youtube, setYoutube] = useState<{
+    state: "off" | "connected" | "no_broadcast" | "quota_exceeded" | "disconnected" | "error";
+    broadcastTitle?: string;
+    reason?: string;
+  }>({ state: "off" });
 
   // Derive next track from the playlist + current track position. This is
   // robust to event-ordering races where ``track_started`` fires before any
@@ -725,6 +758,17 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         // with the actual engine state.
         setEndlessMode(evt.enabled);
         if (!evt.enabled) setPlaylistRunningLow(false);
+        break;
+      case "youtube_status":
+        // v2.7 — YouTube Live Chat poller state. The server emits one
+        // of these on connect (after broadcast discovery) and again on
+        // quota_exceeded / disconnected / error. We mirror straight
+        // into local state so the pill renders without a refresh.
+        setYoutube({
+          state: evt.state,
+          broadcastTitle: evt.broadcast?.title,
+          reason: evt.reason,
+        });
         break;
       case "session_ended":
         setState("ended");
@@ -1290,6 +1334,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       endlessMode,
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
+      youtube,
     }),
     [
       state,
@@ -1314,6 +1359,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       endlessMode,
       playlistRunningLow,
       setEndlessModeWS,
+      youtube,
     ],
   );
 }
