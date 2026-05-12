@@ -103,6 +103,13 @@ export interface UseLiveSessionApi {
   resumePlayback: () => void;
   /** Quit the live session — closes the WS, stops audio, releases mic etc. */
   quit: () => void;
+  /**
+   * v2.7.2 — mute / unmute the audio output. Applies to both decks so
+   * crossfades stay silent. Useful when the operator is running a
+   * separate monitoring tab alongside the OBS Browser Source and
+   * doesn't want overlapping audio.
+   */
+  setMuted: (muted: boolean) => void;
   // v2.6.0 — endless / improvisation mode (YouTube-streaming use case).
   /** Server-confirmed endless-mode flag. Mirrors session.context_variables.endless_mode. */
   endlessMode: boolean;
@@ -262,6 +269,11 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainARef = useRef<GainNode | null>(null);
   const gainBRef = useRef<GainNode | null>(null);
+  // v2.7.2 — sticky mute flag. Stored in a ref so ``ensureDeck``
+  // applies it on creation even when the deck is built before the
+  // caller flips ``setMuted(true)`` (the hook returns synchronously,
+  // the caller can only toggle after mount).
+  const mutedRef = useRef<boolean>(false);
   // Stable handle the visualizer can subscribe to. Always points at the
   // currently active deck, swapping atomically on crossfade.
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -454,6 +466,8 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       const el = new Audio();
       el.preload = "auto";
       el.crossOrigin = "anonymous";
+      // Apply the sticky mute flag (set by ``setMuted``).
+      el.muted = mutedRef.current;
       refObj.current = el;
 
       // v2.5.0.1 — natural end-of-track notification.
@@ -1327,6 +1341,17 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     stopAllDecks();
   }, [stopAllDecks]);
 
+  // v2.7.2 — mute/unmute both decks. The ``mutedRef`` is read by
+  // ``ensureDeck`` so future deck creations inherit the flag; we also
+  // apply it to any already-created decks so a toggle is immediate.
+  const setMuted = useCallback((muted: boolean) => {
+    mutedRef.current = muted;
+    for (const ref of [deckARef, deckBRef]) {
+      const el = ref.current;
+      if (el) el.muted = muted;
+    }
+  }, []);
+
   // v2.6.0 — toggle endless mode. Wire-fires only; the engine's reply
   // (`endless_mode` event) is the source of truth, mirrored into
   // `endlessMode` state by the switch handler above. This keeps the
@@ -1366,6 +1391,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
+      setMuted,
       endlessMode,
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
@@ -1391,6 +1417,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
+      setMuted,
       endlessMode,
       playlistRunningLow,
       setEndlessModeWS,

@@ -71,6 +71,7 @@ class FakeAudioElement {
   currentTime = 0;
   duration = 0;
   volume = 1;
+  muted = false;
   paused = true;
   preload = "auto";
   crossOrigin: string | null = null;
@@ -972,6 +973,53 @@ describe("useLiveSession", () => {
       FakeWebSocket.lastInstance!.pushServerEvent({ type: "session_ended" });
     });
     expect(result.current.secondsToCrossfade).toBe(0);
+  });
+
+  // ── v2.7.2 — passive mode mute (OBS Browser Source ?passive=1) ──────────
+  it("setMuted applies to decks created AFTER the call", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-mute-1"));
+    await flushOpen();
+    // Flip mute on before any deck exists — the flag is sticky and must
+    // be honoured by the next ``new Audio()`` inside ``ensureDeck``.
+    act(() => {
+      result.current.setMuted(true);
+    });
+    expect(FakeAudioElement.lastInstance).toBeNull();
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: { id: "A", display_name: "A" },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    expect(FakeAudioElement.lastInstance).not.toBeNull();
+    expect(FakeAudioElement.lastInstance!.muted).toBe(true);
+  });
+
+  it("setMuted applies to decks created BEFORE the call", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-mute-2"));
+    await flushOpen();
+    // Create a deck first via a ``load`` command, then mute.
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: { id: "A", display_name: "A" },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const deck = FakeAudioElement.lastInstance!;
+    expect(deck.muted).toBe(false);
+    act(() => {
+      result.current.setMuted(true);
+    });
+    expect(deck.muted).toBe(true);
+    // And ``setMuted(false)`` un-mutes — round-trip behaviour.
+    act(() => {
+      result.current.setMuted(false);
+    });
+    expect(deck.muted).toBe(false);
   });
 });
 

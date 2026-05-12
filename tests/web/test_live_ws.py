@@ -83,8 +83,12 @@ def test_live_ws_handshake_emits_initial_state_and_track_started(
     sid = auth_client.post("/api/sessions").json()["id"]
     playlist = _seed_playlist(auth_client, sid)
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
-        # The first message is always the live_state snapshot.
+        # v2.7.1+: when YT integration is configured server-side a
+        # ``youtube_status`` frame can arrive before ``live_state``. Drain
+        # any such preamble so this test stays oblivious to it.
         first = ws.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws.receive_json()
         assert first["type"] == "live_state"
         assert first["data"]["session_id"] == sid
         assert len(first["data"]["playlist"]) == len(playlist)
@@ -151,7 +155,10 @@ def test_live_ws_disconnect_cleans_up(auth_client, auth_token, mock_pipeline):
     # manager freed the slot (channel="live") and the previous phase task
     # got cancelled cleanly. If either leaked we'd hang here.
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws2:
+        # Drain any leading youtube_status frame (see note above).
         first = ws2.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws2.receive_json()
         assert first["type"] == "live_state"
 
 

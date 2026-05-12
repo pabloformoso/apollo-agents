@@ -91,21 +91,37 @@ export default function LivePage() {
   // overlay would keep covering the screen during the cold-start
   // window between WS open and the first track_started event.
   const [hasGestured, setHasGestured] = useState(false);
+  // v2.7.2 — passive mode (OBS Browser Source / public spectator).
+  // When `?passive=1` is in the URL we strip ALL operator chrome
+  // (header, mode picker, YT pill, Quit) and lock the view to the
+  // audience layout. Lets the same /live URL serve both the operator's
+  // booth and OBS without leaking controls onto the broadcast.
+  const [isPassive, setIsPassive] = useState(false);
 
   // Read the active mode from the URL hash on mount + sync future
   // changes back to the hash so reloads / "Show controls" navigation
-  // stick to the user's choice.
+  // stick to the user's choice. Skipped in passive mode — the view is
+  // pinned to "audience" regardless of the hash so OBS Browser Sources
+  // never accidentally land on the Booth or Immersive layouts.
   useEffect(() => {
     if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const passive = params.get("passive") === "1";
+    setIsPassive(passive);
+    if (passive) {
+      setMode("audience");
+      return;
+    }
     const initial = window.location.hash.slice(1);
     if (isMode(initial)) setMode(initial);
   }, []);
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (isPassive) return;
     if (window.location.hash !== `#${mode}`) {
       window.history.replaceState(null, "", `#${mode}`);
     }
-  }, [mode]);
+  }, [mode, isPassive]);
 
   const live = useLiveSession(sessionId);
 
@@ -222,7 +238,10 @@ export default function LivePage() {
 
   return (
     <div className="min-h-screen flex flex-col bg-ink text-ember-text font-sans relative">
-      {/* Live-mode header (replaces the Shell nav per prototype's hideNav) */}
+      {/* Live-mode header (replaces the Shell nav per prototype's hideNav).
+          Hidden entirely in passive mode so OBS Browser Sources show a
+          clean audience view with zero operator chrome. */}
+      {!isPassive && (
       <header className="flex justify-between items-center px-9 py-3.5 border-b border-line bg-surf relative z-30">
         <div className="flex items-center gap-4">
           <Link href="/dashboard" className="flex items-baseline gap-3.5">
@@ -351,11 +370,16 @@ export default function LivePage() {
                 const params = new URLSearchParams();
                 params.set("session", sessionId);
                 if (token) params.set("auth", token);
+                // v2.7.2 — OBS Browser Sources should land on the
+                // passive audience view by default. The operator's
+                // browser keeps using the unflagged URL, so this only
+                // affects the copied OBS link.
+                params.set("passive", "1");
                 const url = `${window.location.origin}/live?${params.toString()}`;
                 try {
                   await navigator.clipboard.writeText(url);
                   toast.ok(
-                    "OBS feed URL copied. Paste into a Browser Source in OBS. For audio, capture the system output (the Live tab in your browser) separately.",
+                    "OBS feed URL copied. Paste into a Browser Source in OBS — it'll play audio and video on its own. Mute this monitoring tab if you're hearing the set twice.",
                     { duration: 10_000 },
                   );
                 } catch {
@@ -365,7 +389,7 @@ export default function LivePage() {
                   );
                 }
               }}
-              title="Copies a /live URL (with a one-time sign-in token + session id) to your clipboard. Paste into an OBS Browser Source; capture system audio separately for the stream's sound."
+              title="Copies a /live URL (with a one-time sign-in token + session id) to your clipboard. Paste into an OBS Browser Source — it plays audio + video on its own; this tab is just for monitoring."
             >
               OBS feed ↗
             </Btn>
@@ -384,22 +408,25 @@ export default function LivePage() {
           </Btn>
         </div>
       </header>
+      )}
 
       {/* WS reconnect / engine error banner — non-blocking, sits below the
-          header. Audio keeps playing during transient disconnects. */}
-      {!live.connected && live.state !== "idle" && (
+          header. Audio keeps playing during transient disconnects.
+          Suppressed in passive mode so OBS overlays never paint
+          operator-facing reconnect chrome over the broadcast. */}
+      {!isPassive && !live.connected && live.state !== "idle" && (
         <Banner tone="warn" className="m-3">
           Reconnecting to the live engine…
         </Banner>
       )}
-      {live.error && (
+      {!isPassive && live.error && (
         <Banner tone="error" className="m-3">
           {live.error}
         </Banner>
       )}
       {/* v2.6.0 — endless mode "running low" banner. Cleared on the
           next track_started (handled inside useLiveSession). */}
-      {live.endlessMode && live.playlistRunningLow && (
+      {!isPassive && live.endlessMode && live.playlistRunningLow && (
         <Banner tone="info" className="m-3">
           Last track in the queue — Apollo is picking a continuation…
         </Banner>
@@ -679,8 +706,12 @@ export default function LivePage() {
           (state==='idle' is the cold-start window between WS open and
           the first track_started) OR the browser explicitly blocked
           autoplay. Either case needs a user gesture; the overlay
-          guarantees there is always an obvious way to begin. */}
-      {(live.autoplayBlocked || (live.state === "idle" && !hasGestured)) && (
+          guarantees there is always an obvious way to begin.
+          Suppressed in passive mode: OBS Browser Source has its own
+          ``--autoplay-policy=no-user-gesture-required`` flag, and even
+          if blocked there's no human to tap — the broadcast tab does
+          the playback. */}
+      {!isPassive && (live.autoplayBlocked || (live.state === "idle" && !hasGestured)) && (
         <div
           className="fixed inset-0 z-40 flex items-center justify-center"
           style={{ backdropFilter: "blur(20px)" }}
