@@ -191,7 +191,8 @@ class TestBuildCatalogBeatgridBackfill:
                  patch("main.detect_camelot_key", return_value="8A"), \
                  patch("main._wav_duration_sec", return_value=240.0), \
                  patch("main.load_existing_session_jsons", return_value={}), \
-                 patch("main._make_track_id", return_value="genre--track"):
+                 patch("main._make_track_id", return_value="genre--track"), \
+                 patch("main.compute_waveform_peaks", return_value=[0.0] * 80):
                 main_module.build_catalog()
 
             with open(cat_file) as f:
@@ -228,7 +229,8 @@ class TestBuildCatalogBeatgridBackfill:
                  patch("main.TRACKS_BASE_DIR", str(cat_file.parent)), \
                  patch("main.scan_genre_folders", return_value=[("techno", "tracks/techno/track.wav")]), \
                  patch("main.detect_beatgrid") as mock_bg, \
-                 patch("main._wav_duration_sec", return_value=240.0):
+                 patch("main._wav_duration_sec", return_value=240.0), \
+                 patch("main.compute_waveform_peaks", return_value=[0.0] * 80):
                 main_module.build_catalog()
                 mock_bg.assert_not_called()
 
