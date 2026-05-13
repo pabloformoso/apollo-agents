@@ -67,12 +67,13 @@ async def test_subscribe_replays_cached_state(fresh_registry):
         received.append(ev)
 
     await fresh_registry.subscribe_viewer(1, "s1", on_event)
-    # Three replays — order matches the cache layout in subscribe_viewer.
-    types = [e["type"] for e in received]
-    assert "live_state" in types
-    assert "engine_command" in types
-    assert "track_started" in types
+    # Three replays in the engine's natural emit order: handshake state
+    # first, then the now-playing track header, then the active deck's
+    # load command. A wrong order causes the late viewer to render the
+    # stale track briefly before the fresher load wins.
     assert len(received) == 3
+    types = [e["type"] for e in received]
+    assert types == ["live_state", "track_started", "engine_command"]
 
 
 @pytest.mark.asyncio

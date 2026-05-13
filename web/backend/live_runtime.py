@@ -164,12 +164,17 @@ class _Registry:
                 self._buses[key] = bus
             bus.viewers.add(sub)
             # Snapshot the cache while we hold the lock; replay outside.
+            # Order matches the engine's natural emit sequence so a late
+            # viewer doesn't see a stale ``track_started`` get overridden
+            # by a fresher ``engine_command load`` mid-render: handshake
+            # state first, then the current track header, then the active
+            # deck's load command.
             replay = [
                 ev
                 for ev in (
                     bus.last_live_state,
-                    bus.last_load_command,
                     bus.last_track_started,
+                    bus.last_load_command,
                 )
                 if ev is not None
             ]

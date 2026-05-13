@@ -981,6 +981,25 @@ async def live_session_ws(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # v2.7.2 — clean displacement of a prior primary on the same slot.
+    # Without this, a refresh (or a second tab landing on /live without
+    # ?viewer=1) silently overwrites the dict entry and the existing
+    # handler keeps reading from the new socket, racing with the new
+    # handler — the failure mode the viewer-WS split was meant to fix
+    # for OBS-flagged URLs but which still affected plain /live.
+    displaced = await ws_manager.displace_existing(
+        session_id,
+        code=4001,
+        reason="replaced by new connection",
+        channel="live",
+    )
+    if displaced:
+        print(
+            f"[live-ws {session_id}] displaced previous primary "
+            f"(close code 4001)",
+            flush=True,
+        )
+
     await ws_manager.connect(session_id, websocket, channel="live")
 
     # Inject session identity into context_variables so the live tools can

@@ -60,5 +60,47 @@ class WSManager:
     def is_connected(self, session_id: str, channel: str = "planning") -> bool:
         return self._key(session_id, channel) in self._connections
 
+    async def displace_existing(
+        self,
+        session_id: str,
+        code: int,
+        reason: str,
+        channel: str = "planning",
+    ) -> bool:
+        """Close any existing WS on this ``(session_id, channel)`` slot.
+
+        Used by the live handler (v2.7.2) so a refresh or "I opened a
+        second tab" scenario takes over the slot cleanly instead of
+        silently overwriting the dict entry and leaving the previous
+        handler reading from a socket that's been replaced under it
+        (the failure mode that motivated viewer-mode in the first place).
+
+        Returns ``True`` if a connection was displaced, ``False`` if the
+        slot was already empty. The caller's next ``connect`` registers
+        the replacement; the displaced handler's ``await
+        ws_manager.receive(...)`` returns ``None`` on the now-closed
+        socket and exits cleanly through its ``finally`` block.
+
+        The frontend distinguishes a displacement from a generic
+        disconnect via the close ``code`` and surfaces an honest message
+        ("Live session moved to another window") instead of the
+        misleading "Reconnecting..." banner.
+        """
+        key = self._key(session_id, channel)
+        existing = self._connections.get(key)
+        if existing is None:
+            return False
+        try:
+            await existing.close(code=code, reason=reason)
+        except Exception:
+            # Already closing / closed; that's fine — the old handler
+            # will still see ``receive_text()`` raise and exit.
+            pass
+        # Pop before the new connect() call so a same-tick race between
+        # the displaced handler's finally and our caller's connect()
+        # can't accidentally re-clear the new entry.
+        self._connections.pop(key, None)
+        return True
+
 
 ws_manager = WSManager()

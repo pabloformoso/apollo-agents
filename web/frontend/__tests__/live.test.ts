@@ -311,6 +311,24 @@ describe("useLiveSession", () => {
     expect(result.current.log).toHaveLength(0);
   });
 
+  it("caps the djChat feed at 200 entries (keeps the tail)", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-djchat-cap"));
+    await flushOpen();
+    act(() => {
+      // Push 250 messages — the first 50 should fall off the head; the
+      // surviving array should start at "msg-50" and end at "msg-249".
+      for (let i = 0; i < 250; i++) {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "dj_chat",
+          text: `msg-${i}`,
+        });
+      }
+    });
+    expect(result.current.djChat).toHaveLength(200);
+    expect(result.current.djChat[0].text).toBe("msg-50");
+    expect(result.current.djChat[199].text).toBe("msg-249");
+  });
+
   it("sendRaw publishes arbitrary JSON over the WS", async () => {
     const { result } = renderHook(() => useLiveSession("sid-raw"));
     await flushOpen();

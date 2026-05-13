@@ -609,20 +609,26 @@ export default function LivePage() {
                 <span>{formatMMSS(dur)}</span>
               </div>
 
-              <div className="flex gap-2 flex-wrap">
-                {INTENT_BUTTONS.map(([type, label]) => (
-                  <button
-                    key={type}
-                    onClick={() => handleIntent(type)}
-                    className={
-                      "px-4 py-2.5 text-[13px] font-sans cursor-pointer capitalize " +
-                      "bg-transparent text-ember-text border border-line2 hover:border-ember-text"
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              {/* Intent buttons drive engine commands (skip / stay /
+                  energy / wind-down). Viewer mode is read-only, so we
+                  hide the strip entirely rather than render disabled
+                  buttons that look broken when clicked. */}
+              {!isViewer && (
+                <div className="flex gap-2 flex-wrap">
+                  {INTENT_BUTTONS.map(([type, label]) => (
+                    <button
+                      key={type}
+                      onClick={() => handleIntent(type)}
+                      className={
+                        "px-4 py-2.5 text-[13px] font-sans cursor-pointer capitalize " +
+                        "bg-transparent text-ember-text border border-line2 hover:border-ember-text"
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {next && (
                 <div className="border-t border-line pt-[18px]">
@@ -637,22 +643,31 @@ export default function LivePage() {
               )}
 
               <div className="mt-auto">
-                <Crumb>talk to apollo</Crumb>
-                <form
-                  onSubmit={sendChat}
-                  className="flex gap-2 items-center border border-line2 px-3.5 py-2.5 mt-2"
-                >
-                  <Mic />
-                  <input
-                    value={cmd}
-                    onChange={(e) => setCmd(e.target.value)}
-                    placeholder='"more groove" · "darker" · "drop the energy"'
-                    className="flex-1 bg-transparent border-0 text-ember-text font-sans text-[13px] outline-none placeholder:text-faint"
-                  />
-                  <Btn type="submit" className="px-4 py-1.5 text-[11px]">
-                    Send
-                  </Btn>
-                </form>
+                {/* "talk to apollo" header + input form are operator-only —
+                    a viewer's send silently no-ops in the hook, so the
+                    form would just confuse anyone trying to type. The
+                    dj_chat feed below stays visible so viewers still see
+                    what the agent is saying. */}
+                {!isViewer && (
+                  <>
+                    <Crumb>talk to apollo</Crumb>
+                    <form
+                      onSubmit={sendChat}
+                      className="flex gap-2 items-center border border-line2 px-3.5 py-2.5 mt-2"
+                    >
+                      <Mic />
+                      <input
+                        value={cmd}
+                        onChange={(e) => setCmd(e.target.value)}
+                        placeholder='"more groove" · "darker" · "drop the energy"'
+                        className="flex-1 bg-transparent border-0 text-ember-text font-sans text-[13px] outline-none placeholder:text-faint"
+                      />
+                      <Btn type="submit" className="px-4 py-1.5 text-[11px]">
+                        Send
+                      </Btn>
+                    </form>
+                  </>
+                )}
 
                 <div className="mt-3 flex flex-col gap-1.5 max-h-[110px] overflow-auto">
                   {live.djChat.slice(-4).map((m, i) => (
