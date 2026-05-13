@@ -31,15 +31,21 @@ def _patch_parser(monkeypatch, **fields):
     monkeypatch.setattr(brief_parser, "parse", lambda _text: default)
 
 
-async def _wait_for_phase(client, sid: str, target: str, timeout: float = 10.0):
+async def _wait_for_phase(client, sid: str, target: str, timeout: float = 30.0):
     """Poll GET /api/sessions/{sid} until phase == target or timeout.
 
-    Bumped from 3 s to 10 s in v2.7.2 because the GitHub Actions
-    backend runner occasionally takes 3-4 s to drive planning →
-    checkpoint2 under load, even with mocked LLM calls. The fast path
-    still completes in <100 ms locally; the higher ceiling only
-    affects flaky-CI cases and keeps a real hang from masking as a
-    timeout false-negative.
+    Bumped 3 s → 30 s in v2.7.2. The slowdown is real but indirect:
+    v2.7.2 adds two new test files (test_live_runtime.py,
+    test_youtube_runtime.py) whose modules transitively pull in
+    google-auth + cryptography at collection time. On a cold pytest
+    run this adds ~10 s of import + asyncio-loop-warmup before the
+    first async test gets scheduled — and the first async test
+    happens to be THIS one (test_app_brief.py is alphabetically
+    first in tests/web/ and ``test_brief_task_drives_planning_to_
+    checkpoint2`` is the only async case in the file). Warm runs
+    (including in-CI rerun) still complete in <1 s; the higher
+    ceiling only guards the cold-start cliff and would still surface
+    a real hang as a timeout.
     """
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
