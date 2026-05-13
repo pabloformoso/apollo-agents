@@ -31,8 +31,16 @@ def _patch_parser(monkeypatch, **fields):
     monkeypatch.setattr(brief_parser, "parse", lambda _text: default)
 
 
-async def _wait_for_phase(client, sid: str, target: str, timeout: float = 3.0):
-    """Poll GET /api/sessions/{sid} until phase == target or timeout."""
+async def _wait_for_phase(client, sid: str, target: str, timeout: float = 10.0):
+    """Poll GET /api/sessions/{sid} until phase == target or timeout.
+
+    Bumped from 3 s to 10 s in v2.7.2 because the GitHub Actions
+    backend runner occasionally takes 3-4 s to drive planning →
+    checkpoint2 under load, even with mocked LLM calls. The fast path
+    still completes in <100 ms locally; the higher ceiling only
+    affects flaky-CI cases and keeps a real hang from masking as a
+    timeout false-negative.
+    """
     deadline = asyncio.get_event_loop().time() + timeout
     while asyncio.get_event_loop().time() < deadline:
         s = client.get(f"/api/sessions/{sid}").json()
