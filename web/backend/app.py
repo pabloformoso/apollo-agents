@@ -993,8 +993,24 @@ async def live_session_ws(
 
     loop = asyncio.get_running_loop()
 
+    from . import live_runtime  # noqa: PLC0415 — module-level import would
+    # create a circular reference during the initial app.py import.
+
     async def emit(data: dict) -> None:
+        # Send to this primary WS …
         await ws_manager.send(session_id, data, channel="live")
+        # … and fan out to any read-only viewers attached to the
+        # session's engine bus (OBS Browser Source via the /viewer
+        # endpoint, debug consoles, etc.). The bus is created lazily
+        # on first publish, so the no-viewer case is essentially a
+        # dict lookup.
+        try:
+            await live_runtime.publish(user["id"], session_id, data)
+        except Exception as exc:  # noqa: BLE001 — never let pub/sub kill the primary
+            print(
+                f"[live-ws {session_id}] live_runtime.publish failed: {exc}",
+                flush=True,
+            )
 
     # Engine events arrive on the engine's emitter (called from arbitrary
     # threads in the local engine, sync in the browser engine). Funnel
@@ -1071,6 +1087,13 @@ async def live_session_ws(
 
     async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
         """Per-WS callback: emit dj_chat visibility + enqueue for agent."""
+        # Diagnostic — surfaces in .tmp/backend.log so we can confirm
+        # the poller is firing when audience messages don't appear in
+        # the UI. Cheap enough to keep in prod for now.
+        print(
+            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}",
+            flush=True,
+        )
         try:
             await emit({"type": "dj_chat", "text": f"[YT @{author}] {text}"})
         except Exception as exc:  # noqa: BLE001
@@ -1247,7 +1270,90 @@ async def live_session_ws(
                 await yt_subscription.detach()
             except Exception as exc:  # noqa: BLE001
                 print(f"[live-ws {session_id}] yt detach failed: {exc}", flush=True)
+        # v2.7.2: drop the engine-event bus so a fresh primary on the
+        # same session starts with no stale cache. Viewers still attached
+        # will see their next publish silently no-op; their handlers
+        # exit when the user navigates away.
+        try:
+            await live_runtime.drop_bus(user["id"], session_id)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[live-ws {session_id}] live_runtime.drop_bus failed: {exc}",
+                flush=True,
+            )
         ws_manager.disconnect(session_id, channel="live")
+
+
+@app.websocket("/api/sessions/{session_id}/live/viewer")
+async def live_viewer_ws(
+    websocket: WebSocket,
+    session_id: str,
+    token: str = Query(...),
+):
+    """Read-only viewer WS for OBS Browser Source / embed pages (v2.7.2).
+
+    Subscribes to the session's engine pub/sub via
+    :mod:`live_runtime`. Receives every event the primary live WS emits
+    (``live_state``, ``engine_command``, ``track_started`` …) and
+    forwards them verbatim. Does NOT instantiate a ``LiveEngineBrowser``
+    and does NOT touch :mod:`ws_manager` — multiple viewers can attach
+    to the same session without contending with the primary or with
+    each other.
+
+    Auth + ownership: same checks as the primary live WS; the viewer is
+    bound to the session's owner so a shared embed URL still requires
+    the operator's JWT (carried as ``?token=`` for OBS Browser Source).
+    """
+    user = auth.user_from_query_token(token)
+    if user is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    s = store.get(session_id)
+    if not s or s.user_id != user["id"]:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+
+    from . import live_runtime  # noqa: PLC0415 — match primary handler.
+
+    async def on_event(event: dict) -> None:
+        try:
+            await websocket.send_json(event)
+        except Exception:
+            # Caller will catch the WS close on the next iteration of
+            # the read loop below; nothing actionable here.
+            pass
+
+    subscription = await live_runtime.subscribe_viewer(
+        user_id=user["id"], session_id=session_id, on_event=on_event,
+    )
+
+    try:
+        # Viewers don't drive the engine, but we still need a read loop
+        # so the handler stays alive (and we notice when the client
+        # disconnects). Any frames the client sends are ignored — they
+        # have no path to the agent in viewer mode by design.
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[live-viewer {session_id}] receive error: {exc}",
+                    flush=True,
+                )
+                break
+    finally:
+        try:
+            await subscription.detach()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[live-viewer {session_id}] detach failed: {exc}",
+                flush=True,
+            )
 
 
 # ---------------------------------------------------------------------------

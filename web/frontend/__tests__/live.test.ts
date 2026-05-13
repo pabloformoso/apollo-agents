@@ -71,7 +71,6 @@ class FakeAudioElement {
   currentTime = 0;
   duration = 0;
   volume = 1;
-  muted = false;
   paused = true;
   preload = "auto";
   crossOrigin: string | null = null;
@@ -975,51 +974,58 @@ describe("useLiveSession", () => {
     expect(result.current.secondsToCrossfade).toBe(0);
   });
 
-  // ── v2.7.2 — passive mode mute (OBS Browser Source ?passive=1) ──────────
-  it("setMuted applies to decks created AFTER the call", async () => {
-    const { result } = renderHook(() => useLiveSession("sid-mute-1"));
+  // ── v2.7.2 — viewer mode (OBS Browser Source / embed) ──────────────────
+  it("viewer mode opens the /viewer WS path (not /stream)", async () => {
+    renderHook(() => useLiveSession("sid-viewer-1", { viewer: true }));
     await flushOpen();
-    // Flip mute on before any deck exists — the flag is sticky and must
-    // be honoured by the next ``new Audio()`` inside ``ensureDeck``.
-    act(() => {
-      result.current.setMuted(true);
-    });
-    expect(FakeAudioElement.lastInstance).toBeNull();
-    await act(async () => {
-      FakeWebSocket.lastInstance!.pushServerEvent({
-        type: "engine_command",
-        command: "load",
-        track: { id: "A", display_name: "A" },
-      });
-      await new Promise((r) => setTimeout(r, 5));
-    });
-    expect(FakeAudioElement.lastInstance).not.toBeNull();
-    expect(FakeAudioElement.lastInstance!.muted).toBe(true);
+    expect(FakeWebSocket.lastInstance).not.toBeNull();
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-viewer-1/live/viewer",
+    );
+    expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
   });
 
-  it("setMuted applies to decks created BEFORE the call", async () => {
-    const { result } = renderHook(() => useLiveSession("sid-mute-2"));
+  it("viewer mode suppresses outbound user_msg / commands / endless", async () => {
+    const { result } = renderHook(() =>
+      useLiveSession("sid-viewer-2", { viewer: true }),
+    );
     await flushOpen();
-    // Create a deck first via a ``load`` command, then mute.
-    await act(async () => {
-      FakeWebSocket.lastInstance!.pushServerEvent({
-        type: "engine_command",
-        command: "load",
-        track: { id: "A", display_name: "A" },
-      });
-      await new Promise((r) => setTimeout(r, 5));
-    });
-    const deck = FakeAudioElement.lastInstance!;
-    expect(deck.muted).toBe(false);
+    const ws = FakeWebSocket.lastInstance!;
+    expect(ws.sent).toEqual([]);
     act(() => {
-      result.current.setMuted(true);
+      result.current.sendCommand({ type: "skip" });
+      result.current.sendUserMessage("hello");
+      result.current.sendRaw({ type: "perception", rms_db: 0 });
+      result.current.setEndlessMode(true);
     });
-    expect(deck.muted).toBe(true);
-    // And ``setMuted(false)`` un-mutes — round-trip behaviour.
+    // Nothing should have left the wire — viewers are read-only.
+    expect(ws.sent).toEqual([]);
+  });
+
+  it("viewer mode quit() does not send a quit frame", async () => {
+    const { result } = renderHook(() =>
+      useLiveSession("sid-viewer-3", { viewer: true }),
+    );
+    await flushOpen();
+    const ws = FakeWebSocket.lastInstance!;
     act(() => {
-      result.current.setMuted(false);
+      result.current.quit();
     });
-    expect(deck.muted).toBe(false);
+    expect(ws.sent).toEqual([]);
+  });
+
+  it("primary mode (default) still sends user_msg as before", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-primary"));
+    await flushOpen();
+    act(() => {
+      result.current.sendUserMessage("hi");
+    });
+    const ws = FakeWebSocket.lastInstance!;
+    const userMsgs = ws.sent
+      .map((s) => JSON.parse(s))
+      .filter((m) => m.type === "user_msg");
+    expect(userMsgs).toHaveLength(1);
+    expect(userMsgs[0].text).toBe("hi");
   });
 });
 

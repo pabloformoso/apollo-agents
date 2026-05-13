@@ -103,13 +103,6 @@ export interface UseLiveSessionApi {
   resumePlayback: () => void;
   /** Quit the live session — closes the WS, stops audio, releases mic etc. */
   quit: () => void;
-  /**
-   * v2.7.2 — mute / unmute the audio output. Applies to both decks so
-   * crossfades stay silent. Useful when the operator is running a
-   * separate monitoring tab alongside the OBS Browser Source and
-   * doesn't want overlapping audio.
-   */
-  setMuted: (muted: boolean) => void;
   // v2.6.0 — endless / improvisation mode (YouTube-streaming use case).
   /** Server-confirmed endless-mode flag. Mirrors session.context_variables.endless_mode. */
   endlessMode: boolean;
@@ -260,7 +253,36 @@ function deriveWsBase(): string {
 const WS_BASE = deriveWsBase();
 const PLAYBACK_POS_INTERVAL_MS = 250;
 
-export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
+/**
+ * v2.7.2 — options object accepted by ``useLiveSession``.
+ *
+ * ``viewer: true`` switches the hook into a read-only consumer of the
+ * session's engine event bus (used by the OBS Browser Source embed
+ * route). Viewer mode:
+ *  - connects to ``/api/sessions/{id}/live/viewer`` instead of the
+ *    primary ``/live/stream`` endpoint,
+ *  - suppresses all outbound messages (``playback_pos``, ``user_msg``,
+ *    ``perception``, ``set_endless_mode``, ``quit``) — the backend
+ *    handler ignores anything a viewer sends anyway, but we save the
+ *    network round-trips,
+ *  - still plays audio locally so OBS captures it from the Browser
+ *    Source, and still derives state from incoming events so the
+ *    visualizer renders correctly.
+ */
+export interface UseLiveSessionOptions {
+  viewer?: boolean;
+}
+
+export function useLiveSession(
+  sessionId: string | null,
+  options: UseLiveSessionOptions = {},
+): UseLiveSessionApi {
+  const viewerMode = options.viewer === true;
+  // ``viewerMode`` is fixed for the lifetime of the hook (an embed
+  // page never flips to operator), but stable closures (ensureDeck,
+  // setEndlessModeWS, …) are created once and need a ref to see it.
+  const viewerModeRef = useRef(viewerMode);
+  viewerModeRef.current = viewerMode;
   // ── Refs (audio + WS plumbing) ──────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
   const deckARef = useRef<HTMLAudioElement | null>(null);
@@ -269,11 +291,6 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainARef = useRef<GainNode | null>(null);
   const gainBRef = useRef<GainNode | null>(null);
-  // v2.7.2 — sticky mute flag. Stored in a ref so ``ensureDeck``
-  // applies it on creation even when the deck is built before the
-  // caller flips ``setMuted(true)`` (the hook returns synchronously,
-  // the caller can only toggle after mount).
-  const mutedRef = useRef<boolean>(false);
   // Stable handle the visualizer can subscribe to. Always points at the
   // currently active deck, swapping atomically on crossfade.
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -466,8 +483,6 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       const el = new Audio();
       el.preload = "auto";
       el.crossOrigin = "anonymous";
-      // Apply the sticky mute flag (set by ``setMuted``).
-      el.muted = mutedRef.current;
       refObj.current = el;
 
       // v2.5.0.1 — natural end-of-track notification.
@@ -486,6 +501,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       // synthetic event tied to the track the user is hearing.
       el.addEventListener("ended", () => {
         if (activeDeckRef.current !== which) return;
+        // Viewers don't drive the engine — the primary's ``track_ended``
+        // already advances the cursor and the viewer will receive the
+        // resulting ``engine_command load`` like any other event.
+        if (viewerModeRef.current) return;
         const ws = wsRef.current;
         const tid = currentTrackIdRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
@@ -877,12 +896,14 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     const token = getToken();
     if (!token) return;
 
-    // v2.6.0 canonical path. The backend keeps `/ws/live/{id}` as a
-    // deprecated alias on the same handler for one release; once every
-    // page hits the new endpoint that alias can come out.
-    const ws = new WebSocket(
-      `${WS_BASE}/api/sessions/${sessionId}/live/stream?token=${token}`,
-    );
+    // v2.6.0 canonical path for the primary; v2.7.2 read-only viewer
+    // path for OBS Browser Source / embed. The backend keeps
+    // ``/ws/live/{id}`` as a deprecated alias for the primary; once
+    // every page hits the new endpoint that alias can come out.
+    const wsPath = viewerMode
+      ? `/api/sessions/${sessionId}/live/viewer`
+      : `/api/sessions/${sessionId}/live/stream`;
+    const ws = new WebSocket(`${WS_BASE}${wsPath}?token=${token}`);
     wsRef.current = ws;
     let opened = false;
     let cancelled = false;
@@ -972,6 +993,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     setCurrentTrackTime((prev) => (Math.abs(prev - ct) > 0.05 ? ct : prev));
     setCurrentTrackDuration((prev) => (Math.abs(prev - dur) > 0.05 ? dur : prev));
     if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
+    // Viewers must NOT send playback_pos — the primary owns the
+    // engine's crossfade timer. If two clients both pinged, the
+    // engine would race their timings and trigger doubles.
+    if (viewerModeRef.current) return;
     try {
       ws.send(
         JSON.stringify({
@@ -1247,6 +1272,8 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   // ── Public command callbacks ────────────────────────────────────────────
   const sendCommand = useCallback(
     (cmd: LiveCommand) => {
+      // Viewers are read-only — silently no-op.
+      if (viewerModeRef.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const text = COMMAND_TEXT[cmd.type];
@@ -1258,6 +1285,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
 
   const sendUserMessage = useCallback(
     (text: string) => {
+      if (viewerModeRef.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const trimmed = text.trim();
@@ -1269,6 +1297,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   );
 
   const sendRaw = useCallback((message: Record<string, unknown>) => {
+    if (viewerModeRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
@@ -1331,7 +1360,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
 
   const quit = useCallback(() => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    // Viewers can't ``quit`` the session — they just close their WS
+    // and the bus continues without them. Still stop the local decks
+    // so an embed page that called quit() actually goes quiet.
+    if (!viewerModeRef.current && ws && ws.readyState === WebSocket.OPEN) {
       try {
         ws.send(JSON.stringify({ type: "quit" }));
       } catch {
@@ -1341,23 +1373,13 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     stopAllDecks();
   }, [stopAllDecks]);
 
-  // v2.7.2 — mute/unmute both decks. The ``mutedRef`` is read by
-  // ``ensureDeck`` so future deck creations inherit the flag; we also
-  // apply it to any already-created decks so a toggle is immediate.
-  const setMuted = useCallback((muted: boolean) => {
-    mutedRef.current = muted;
-    for (const ref of [deckARef, deckBRef]) {
-      const el = ref.current;
-      if (el) el.muted = muted;
-    }
-  }, []);
-
   // v2.6.0 — toggle endless mode. Wire-fires only; the engine's reply
   // (`endless_mode` event) is the source of truth, mirrored into
   // `endlessMode` state by the switch handler above. This keeps the
   // pill from desyncing if the WS write succeeds but the server fails
   // to update the engine for any reason.
   const setEndlessModeWS = useCallback((enabled: boolean) => {
+    if (viewerModeRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
@@ -1391,7 +1413,6 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
-      setMuted,
       endlessMode,
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
@@ -1417,7 +1438,6 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       sendRaw,
       resumePlayback,
       quit,
-      setMuted,
       endlessMode,
       playlistRunningLow,
       setEndlessModeWS,
