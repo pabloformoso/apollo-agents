@@ -253,7 +253,36 @@ function deriveWsBase(): string {
 const WS_BASE = deriveWsBase();
 const PLAYBACK_POS_INTERVAL_MS = 250;
 
-export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
+/**
+ * v2.7.2 — options object accepted by ``useLiveSession``.
+ *
+ * ``viewer: true`` switches the hook into a read-only consumer of the
+ * session's engine event bus (used by the OBS Browser Source embed
+ * route). Viewer mode:
+ *  - connects to ``/api/sessions/{id}/live/viewer`` instead of the
+ *    primary ``/live/stream`` endpoint,
+ *  - suppresses all outbound messages (``playback_pos``, ``user_msg``,
+ *    ``perception``, ``set_endless_mode``, ``quit``) — the backend
+ *    handler ignores anything a viewer sends anyway, but we save the
+ *    network round-trips,
+ *  - still plays audio locally so OBS captures it from the Browser
+ *    Source, and still derives state from incoming events so the
+ *    visualizer renders correctly.
+ */
+export interface UseLiveSessionOptions {
+  viewer?: boolean;
+}
+
+export function useLiveSession(
+  sessionId: string | null,
+  options: UseLiveSessionOptions = {},
+): UseLiveSessionApi {
+  const viewerMode = options.viewer === true;
+  // ``viewerMode`` is fixed for the lifetime of the hook (an embed
+  // page never flips to operator), but stable closures (ensureDeck,
+  // setEndlessModeWS, …) are created once and need a ref to see it.
+  const viewerModeRef = useRef(viewerMode);
+  viewerModeRef.current = viewerMode;
   // ── Refs (audio + WS plumbing) ──────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
   const deckARef = useRef<HTMLAudioElement | null>(null);
@@ -472,6 +501,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       // synthetic event tied to the track the user is hearing.
       el.addEventListener("ended", () => {
         if (activeDeckRef.current !== which) return;
+        // Viewers don't drive the engine — the primary's ``track_ended``
+        // already advances the cursor and the viewer will receive the
+        // resulting ``engine_command load`` like any other event.
+        if (viewerModeRef.current) return;
         const ws = wsRef.current;
         const tid = currentTrackIdRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
@@ -831,10 +864,16 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
         appendLog({ role: evt.role, text: evt.content, ts: Date.now() });
         break;
       case "dj_chat":
-        setDjChat((prev) => [
-          ...prev,
-          { text: evt.text || "", ts: Date.now() },
-        ]);
+        // Cap the feed at the most recent 200 entries so a long
+        // broadcast with active YT chat doesn't accumulate thousands
+        // of stale messages in memory (and force React to reconcile
+        // them every render). 200 is generous: the audience /
+        // immersive overlay shows the last 4, the booth panel shows
+        // the last few — anything older is already off-screen.
+        setDjChat((prev) => {
+          const next = [...prev, { text: evt.text || "", ts: Date.now() }];
+          return next.length > 200 ? next.slice(-200) : next;
+        });
         break;
       case "error":
         setError(evt.message || "Live session error");
@@ -863,12 +902,14 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     const token = getToken();
     if (!token) return;
 
-    // v2.6.0 canonical path. The backend keeps `/ws/live/{id}` as a
-    // deprecated alias on the same handler for one release; once every
-    // page hits the new endpoint that alias can come out.
-    const ws = new WebSocket(
-      `${WS_BASE}/api/sessions/${sessionId}/live/stream?token=${token}`,
-    );
+    // v2.6.0 canonical path for the primary; v2.7.2 read-only viewer
+    // path for OBS Browser Source / embed. The backend keeps
+    // ``/ws/live/{id}`` as a deprecated alias for the primary; once
+    // every page hits the new endpoint that alias can come out.
+    const wsPath = viewerMode
+      ? `/api/sessions/${sessionId}/live/viewer`
+      : `/api/sessions/${sessionId}/live/stream`;
+    const ws = new WebSocket(`${WS_BASE}${wsPath}?token=${token}`);
     wsRef.current = ws;
     let opened = false;
     let cancelled = false;
@@ -895,7 +936,18 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
       if (opened && !cancelled) onErrorCallback("WebSocket error");
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
+      // v2.7.2 — close code 4001 is the backend's "displaced by a
+      // newer primary on the same session" signal (see
+      // ``ws_manager.displace_existing``). Surface an honest message
+      // via the existing ``error`` rail so the user knows the
+      // controls moved instead of staring at a "Reconnecting…" banner
+      // that will never resolve (the hook doesn't auto-retry).
+      if (event && event.code === 4001 && !cancelled) {
+        onErrorCallback(
+          "Live session moved to another window. Refresh this tab to take it back.",
+        );
+      }
       onClosed();
     };
 
@@ -958,6 +1010,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
     setCurrentTrackTime((prev) => (Math.abs(prev - ct) > 0.05 ? ct : prev));
     setCurrentTrackDuration((prev) => (Math.abs(prev - dur) > 0.05 ? dur : prev));
     if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
+    // Viewers must NOT send playback_pos — the primary owns the
+    // engine's crossfade timer. If two clients both pinged, the
+    // engine would race their timings and trigger doubles.
+    if (viewerModeRef.current) return;
     try {
       ws.send(
         JSON.stringify({
@@ -1233,6 +1289,8 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   // ── Public command callbacks ────────────────────────────────────────────
   const sendCommand = useCallback(
     (cmd: LiveCommand) => {
+      // Viewers are read-only — silently no-op.
+      if (viewerModeRef.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const text = COMMAND_TEXT[cmd.type];
@@ -1244,6 +1302,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
 
   const sendUserMessage = useCallback(
     (text: string) => {
+      if (viewerModeRef.current) return;
       const ws = wsRef.current;
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
       const trimmed = text.trim();
@@ -1255,6 +1314,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   );
 
   const sendRaw = useCallback((message: Record<string, unknown>) => {
+    if (viewerModeRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
@@ -1317,7 +1377,10 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
 
   const quit = useCallback(() => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    // Viewers can't ``quit`` the session — they just close their WS
+    // and the bus continues without them. Still stop the local decks
+    // so an embed page that called quit() actually goes quiet.
+    if (!viewerModeRef.current && ws && ws.readyState === WebSocket.OPEN) {
       try {
         ws.send(JSON.stringify({ type: "quit" }));
       } catch {
@@ -1333,6 +1396,7 @@ export function useLiveSession(sessionId: string | null): UseLiveSessionApi {
   // pill from desyncing if the WS write succeeds but the server fails
   // to update the engine for any reason.
   const setEndlessModeWS = useCallback((enabled: boolean) => {
+    if (viewerModeRef.current) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {

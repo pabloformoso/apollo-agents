@@ -80,6 +80,11 @@ def test_build_catalog_picks_up_mp3(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(main, "detect_camelot_key", lambda path: "8A")
     monkeypatch.setattr(main, "_wav_duration_sec", lambda path: 1.0)
+    # v2.7.2 — compute_waveform_peaks calls librosa.load on the audio
+    # path; the silent-MP3 fixture above is too tiny / malformed for
+    # audioread to decode in CI. Stub the analyser, mirroring the
+    # treatment of the other heavy librosa-backed helpers.
+    monkeypatch.setattr(main, "compute_waveform_peaks", lambda path: [0.0] * 80)
 
     # Run from inside tmp_path so relpath() returns clean tracks/lofi/tune.mp3
     cwd = os.getcwd()

@@ -311,6 +311,24 @@ describe("useLiveSession", () => {
     expect(result.current.log).toHaveLength(0);
   });
 
+  it("caps the djChat feed at 200 entries (keeps the tail)", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-djchat-cap"));
+    await flushOpen();
+    act(() => {
+      // Push 250 messages — the first 50 should fall off the head; the
+      // surviving array should start at "msg-50" and end at "msg-249".
+      for (let i = 0; i < 250; i++) {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "dj_chat",
+          text: `msg-${i}`,
+        });
+      }
+    });
+    expect(result.current.djChat).toHaveLength(200);
+    expect(result.current.djChat[0].text).toBe("msg-50");
+    expect(result.current.djChat[199].text).toBe("msg-249");
+  });
+
   it("sendRaw publishes arbitrary JSON over the WS", async () => {
     const { result } = renderHook(() => useLiveSession("sid-raw"));
     await flushOpen();
@@ -972,6 +990,60 @@ describe("useLiveSession", () => {
       FakeWebSocket.lastInstance!.pushServerEvent({ type: "session_ended" });
     });
     expect(result.current.secondsToCrossfade).toBe(0);
+  });
+
+  // ── v2.7.2 — viewer mode (OBS Browser Source / embed) ──────────────────
+  it("viewer mode opens the /viewer WS path (not /stream)", async () => {
+    renderHook(() => useLiveSession("sid-viewer-1", { viewer: true }));
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance).not.toBeNull();
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-viewer-1/live/viewer",
+    );
+    expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
+  });
+
+  it("viewer mode suppresses outbound user_msg / commands / endless", async () => {
+    const { result } = renderHook(() =>
+      useLiveSession("sid-viewer-2", { viewer: true }),
+    );
+    await flushOpen();
+    const ws = FakeWebSocket.lastInstance!;
+    expect(ws.sent).toEqual([]);
+    act(() => {
+      result.current.sendCommand({ type: "skip" });
+      result.current.sendUserMessage("hello");
+      result.current.sendRaw({ type: "perception", rms_db: 0 });
+      result.current.setEndlessMode(true);
+    });
+    // Nothing should have left the wire — viewers are read-only.
+    expect(ws.sent).toEqual([]);
+  });
+
+  it("viewer mode quit() does not send a quit frame", async () => {
+    const { result } = renderHook(() =>
+      useLiveSession("sid-viewer-3", { viewer: true }),
+    );
+    await flushOpen();
+    const ws = FakeWebSocket.lastInstance!;
+    act(() => {
+      result.current.quit();
+    });
+    expect(ws.sent).toEqual([]);
+  });
+
+  it("primary mode (default) still sends user_msg as before", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-primary"));
+    await flushOpen();
+    act(() => {
+      result.current.sendUserMessage("hi");
+    });
+    const ws = FakeWebSocket.lastInstance!;
+    const userMsgs = ws.sent
+      .map((s) => JSON.parse(s))
+      .filter((m) => m.type === "user_msg");
+    expect(userMsgs).toHaveLength(1);
+    expect(userMsgs[0].text).toBe("hi");
   });
 });
 

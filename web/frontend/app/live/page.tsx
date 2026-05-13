@@ -91,6 +91,21 @@ export default function LivePage() {
   // overlay would keep covering the screen during the cold-start
   // window between WS open and the first track_started event.
   const [hasGestured, setHasGestured] = useState(false);
+  // v2.7.2 — viewer mode. When ``?viewer=1`` is in the URL, the page
+  // attaches to the session's engine event bus via the read-only
+  // ``/api/sessions/{id}/live/viewer`` WS. The UI stays identical to
+  // the operator's view (mode switcher, chat panel, banners, YT pill)
+  // so an OBS Browser Source captures the full ``/live`` look. The
+  // outbound rails (chat send, skip, endless toggle, quit) silently
+  // no-op in the underlying hook. We only hide two buttons here:
+  // ``Quit`` (viewers can't end the session) and the OBS feed copy
+  // (would just produce a self-referential URL).
+  const [isViewer, setIsViewer] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    setIsViewer(params.get("viewer") === "1");
+  }, []);
 
   // Read the active mode from the URL hash on mount + sync future
   // changes back to the hash so reloads / "Show controls" navigation
@@ -107,7 +122,7 @@ export default function LivePage() {
     }
   }, [mode]);
 
-  const live = useLiveSession(sessionId);
+  const live = useLiveSession(sessionId, { viewer: isViewer });
 
   useEffect(() => {
     if (!sessionId) return;
@@ -336,26 +351,31 @@ export default function LivePage() {
             </button>
           )}
 
-          {sessionId && (
+          {sessionId && !isViewer && (
             <Btn
               kind="ghost"
               className="px-3.5 py-2 text-xs"
               onClick={async () => {
-                // OBS Browser Sources have their own localStorage —
-                // hand off the JWT via `?auth=` so the page can sign
-                // in on its own. The auth-bootstrap hook on /live
-                // strips the token from the URL immediately after
-                // persisting it so the address bar / window title
-                // don't leak it.
+                // v2.7.2 — OBS Browser Source URL.
+                // The link points at the same ``/live`` route the
+                // operator is using, plus ``viewer=1`` so the page
+                // attaches to the read-only viewer WS instead of the
+                // primary live stream. Two ``/live`` tabs (operator +
+                // OBS) therefore coexist on the same session without
+                // contending in the WS manager — the OBS tab is just
+                // a fan-out subscriber. ``session=<sid>`` makes the
+                // URL deterministic; ``auth=<jwt>`` is consumed and
+                // stripped by the auth-bootstrap hook on first load.
                 const token = getToken() ?? "";
                 const params = new URLSearchParams();
                 params.set("session", sessionId);
                 if (token) params.set("auth", token);
+                params.set("viewer", "1");
                 const url = `${window.location.origin}/live?${params.toString()}`;
                 try {
                   await navigator.clipboard.writeText(url);
                   toast.ok(
-                    "OBS feed URL copied. Paste into a Browser Source in OBS. For audio, capture the system output (the Live tab in your browser) separately.",
+                    "OBS feed URL copied. Paste into a Browser Source in OBS — you'll see the same /live layout (mode switcher, chat, visuals) in read-only mode.",
                     { duration: 10_000 },
                   );
                 } catch {
@@ -365,23 +385,25 @@ export default function LivePage() {
                   );
                 }
               }}
-              title="Copies a /live URL (with a one-time sign-in token + session id) to your clipboard. Paste into an OBS Browser Source; capture system audio separately for the stream's sound."
+              title="Copies the OBS Browser Source URL — same /live page, viewer mode (read-only). Both your operator tab and OBS can stay open at the same time."
             >
               OBS feed ↗
             </Btn>
           )}
-          <Btn
-            kind="ghost"
-            className="px-3.5 py-2 text-xs"
-            onClick={() => {
-              if (confirm("End the live session?")) {
-                live.quit();
-                router.push("/dashboard");
-              }
-            }}
-          >
-            Quit
-          </Btn>
+          {!isViewer && (
+            <Btn
+              kind="ghost"
+              className="px-3.5 py-2 text-xs"
+              onClick={() => {
+                if (confirm("End the live session?")) {
+                  live.quit();
+                  router.push("/dashboard");
+                }
+              }}
+            >
+              Quit
+            </Btn>
+          )}
         </div>
       </header>
 
@@ -403,6 +425,30 @@ export default function LivePage() {
         <Banner tone="info" className="m-3">
           Last track in the queue — Apollo is picking a continuation…
         </Banner>
+      )}
+
+      {/* v2.7.2 — chat overlay visible in Audience + Immersive modes.
+          Booth mode renders its own integrated chat panel as part of
+          the right column (see below), so we suppress this overlay
+          there to avoid showing the feed twice. The feed reflects
+          ``dj_chat`` events from the agent (``emit_chat``) plus
+          YouTube Live Chat messages relayed by ``_on_yt_message`` in
+          the backend — both paths share this rail. */}
+      {mode !== "cabin" && live.djChat.length > 0 && (
+        <aside
+          aria-label="apollo chat"
+          className="fixed bottom-9 left-9 z-20 max-w-[34ch] flex flex-col gap-1.5 pointer-events-none"
+        >
+          {live.djChat.slice(-4).map((m, i) => (
+            <div
+              key={`${m.ts}-${i}`}
+              className="font-display italic text-lg text-cream/85 leading-snug bg-black/35 px-3 py-1.5 backdrop-blur-sm"
+            >
+              <span className="text-ember mr-1.5">‹</span>
+              {m.text}
+            </div>
+          ))}
+        </aside>
       )}
 
       <AnimatePresence mode="wait">
@@ -500,9 +546,18 @@ export default function LivePage() {
                   const BARS = 80;
                   const playIdx = Math.floor(progressFrac * BARS);
                   const cfIdx = Math.floor(crossfadeFrac * BARS);
+                  // v2.7.2 — prefer the real RMS envelope produced by
+                  // ``main.py --build-catalog``. Legacy entries without
+                  // ``waveform_peaks`` fall back to the previous
+                  // synthetic sin pattern so the UI never collapses to
+                  // a flat row of bars.
+                  const peaks = t.waveform_peaks;
+                  const peaksValid =
+                    Array.isArray(peaks) && peaks.length >= BARS;
                   return Array.from({ length: BARS }).map((_, k) => {
-                    const h =
-                      6 + Math.abs(Math.sin(k * 0.4) * 36) + ((k * 17) % 8);
+                    const h = peaksValid
+                      ? 6 + (peaks![k] ?? 0) * 60
+                      : 6 + Math.abs(Math.sin(k * 0.4) * 36) + ((k * 17) % 8);
                     const inCfZone = k >= cfIdx;
                     const passed = k < playIdx;
                     const atPlayhead = k === playIdx;
@@ -554,20 +609,26 @@ export default function LivePage() {
                 <span>{formatMMSS(dur)}</span>
               </div>
 
-              <div className="flex gap-2 flex-wrap">
-                {INTENT_BUTTONS.map(([type, label]) => (
-                  <button
-                    key={type}
-                    onClick={() => handleIntent(type)}
-                    className={
-                      "px-4 py-2.5 text-[13px] font-sans cursor-pointer capitalize " +
-                      "bg-transparent text-ember-text border border-line2 hover:border-ember-text"
-                    }
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              {/* Intent buttons drive engine commands (skip / stay /
+                  energy / wind-down). Viewer mode is read-only, so we
+                  hide the strip entirely rather than render disabled
+                  buttons that look broken when clicked. */}
+              {!isViewer && (
+                <div className="flex gap-2 flex-wrap">
+                  {INTENT_BUTTONS.map(([type, label]) => (
+                    <button
+                      key={type}
+                      onClick={() => handleIntent(type)}
+                      className={
+                        "px-4 py-2.5 text-[13px] font-sans cursor-pointer capitalize " +
+                        "bg-transparent text-ember-text border border-line2 hover:border-ember-text"
+                      }
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              )}
 
               {next && (
                 <div className="border-t border-line pt-[18px]">
@@ -582,22 +643,31 @@ export default function LivePage() {
               )}
 
               <div className="mt-auto">
-                <Crumb>talk to apollo</Crumb>
-                <form
-                  onSubmit={sendChat}
-                  className="flex gap-2 items-center border border-line2 px-3.5 py-2.5 mt-2"
-                >
-                  <Mic />
-                  <input
-                    value={cmd}
-                    onChange={(e) => setCmd(e.target.value)}
-                    placeholder='"more groove" · "darker" · "drop the energy"'
-                    className="flex-1 bg-transparent border-0 text-ember-text font-sans text-[13px] outline-none placeholder:text-faint"
-                  />
-                  <Btn type="submit" className="px-4 py-1.5 text-[11px]">
-                    Send
-                  </Btn>
-                </form>
+                {/* "talk to apollo" header + input form are operator-only —
+                    a viewer's send silently no-ops in the hook, so the
+                    form would just confuse anyone trying to type. The
+                    dj_chat feed below stays visible so viewers still see
+                    what the agent is saying. */}
+                {!isViewer && (
+                  <>
+                    <Crumb>talk to apollo</Crumb>
+                    <form
+                      onSubmit={sendChat}
+                      className="flex gap-2 items-center border border-line2 px-3.5 py-2.5 mt-2"
+                    >
+                      <Mic />
+                      <input
+                        value={cmd}
+                        onChange={(e) => setCmd(e.target.value)}
+                        placeholder='"more groove" · "darker" · "drop the energy"'
+                        className="flex-1 bg-transparent border-0 text-ember-text font-sans text-[13px] outline-none placeholder:text-faint"
+                      />
+                      <Btn type="submit" className="px-4 py-1.5 text-[11px]">
+                        Send
+                      </Btn>
+                    </form>
+                  </>
+                )}
 
                 <div className="mt-3 flex flex-col gap-1.5 max-h-[110px] overflow-auto">
                   {live.djChat.slice(-4).map((m, i) => (

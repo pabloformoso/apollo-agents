@@ -83,8 +83,12 @@ def test_live_ws_handshake_emits_initial_state_and_track_started(
     sid = auth_client.post("/api/sessions").json()["id"]
     playlist = _seed_playlist(auth_client, sid)
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
-        # The first message is always the live_state snapshot.
+        # v2.7.1+: when YT integration is configured server-side a
+        # ``youtube_status`` frame can arrive before ``live_state``. Drain
+        # any such preamble so this test stays oblivious to it.
         first = ws.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws.receive_json()
         assert first["type"] == "live_state"
         assert first["data"]["session_id"] == sid
         assert len(first["data"]["playlist"]) == len(playlist)
@@ -151,8 +155,49 @@ def test_live_ws_disconnect_cleans_up(auth_client, auth_token, mock_pipeline):
     # manager freed the slot (channel="live") and the previous phase task
     # got cancelled cleanly. If either leaked we'd hang here.
     with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws2:
+        # Drain any leading youtube_status frame (see note above).
         first = ws2.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws2.receive_json()
         assert first["type"] == "live_state"
+
+
+def test_second_live_ws_displaces_first_with_code_4001(
+    auth_client, auth_token, mock_pipeline
+):
+    """v2.7.2 — a second primary on the same (session, "live") slot must
+    cleanly displace the first via close code 4001. Otherwise two
+    handlers race in ws_manager (the bug viewer-mode partially fixed —
+    this closes the rest of the gap for plain /live).
+    """
+    from starlette.websockets import WebSocketDisconnect
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    _seed_playlist(auth_client, sid)
+
+    with auth_client.websocket_connect(
+        f"/ws/live/{sid}?token={auth_token}"
+    ) as first:
+        # Drain handshake so we know the first WS is fully attached
+        # before the displacement attempt.
+        first.receive_json()
+
+        # A second connect on the same session — should displace the
+        # first, then receive its own live_state cleanly.
+        with auth_client.websocket_connect(
+            f"/ws/live/{sid}?token={auth_token}"
+        ) as second:
+            first_msg_on_second = second.receive_json()
+            while first_msg_on_second.get("type") == "youtube_status":
+                first_msg_on_second = second.receive_json()
+            assert first_msg_on_second["type"] == "live_state"
+
+            # The first WS must now see a close with code 4001.
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                # Drain any in-flight frames; eventually we hit the close.
+                for _ in range(20):
+                    first.receive_json()
+            assert exc_info.value.code == 4001
 
 
 def test_live_ws_get_state_returns_engine_snapshot(

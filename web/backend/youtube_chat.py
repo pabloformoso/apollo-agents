@@ -39,16 +39,23 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Fallback poll cadence when the API doesn't return ``pollingIntervalMillis``.
-DEFAULT_POLL_INTERVAL_SEC: float = 10.0
+#: Bumped from 10 s to 60 s in v2.7.2 after a multi-instance dev session
+#: burned through the default 10 K daily quota in a few hours. At 60 s
+#: cadence we use ~300 units/hour (5 units per ``liveChatMessages.list``)
+#: → ~7 200 units / 24 h, well under quota with headroom for the
+#: per-attach discover call and retries.
+DEFAULT_POLL_INTERVAL_SEC: float = 60.0
 
-#: Back-off when YouTube returns ``quotaExceeded``. The default quota of
-#: 10 000 units/day permits ~2000 list calls (5 units each). One stuck
-#: client at 60 s polls = 60/day = harmless if accidentally left on.
-QUOTA_BACKOFF_SEC: float = 60.0
+#: Back-off when YouTube returns ``quotaExceeded``. Bumped from 60 s to
+#: 300 s so a throttled poller doesn't keep poking the wall every minute
+#: (which would also count against the daily budget once the quota
+#: resets and starts the clock fresh).
+QUOTA_BACKOFF_SEC: float = 300.0
 
-#: Hard floor on poll cadence — defends against a misbehaving API hint
-#: that asks us to hammer it.
-MIN_POLL_INTERVAL_SEC: float = 1.0
+#: Hard floor on poll cadence. Even if YouTube's ``pollingIntervalMillis``
+#: hint asks us to poll faster, we never go below this — keeps the daily
+#: quota consumption predictable regardless of API guidance.
+MIN_POLL_INTERVAL_SEC: float = 60.0
 
 
 # ---------------------------------------------------------------------------

@@ -981,6 +981,25 @@ async def live_session_ws(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # v2.7.2 — clean displacement of a prior primary on the same slot.
+    # Without this, a refresh (or a second tab landing on /live without
+    # ?viewer=1) silently overwrites the dict entry and the existing
+    # handler keeps reading from the new socket, racing with the new
+    # handler — the failure mode the viewer-WS split was meant to fix
+    # for OBS-flagged URLs but which still affected plain /live.
+    displaced = await ws_manager.displace_existing(
+        session_id,
+        code=4001,
+        reason="replaced by new connection",
+        channel="live",
+    )
+    if displaced:
+        print(
+            f"[live-ws {session_id}] displaced previous primary "
+            f"(close code 4001)",
+            flush=True,
+        )
+
     await ws_manager.connect(session_id, websocket, channel="live")
 
     # Inject session identity into context_variables so the live tools can
@@ -993,8 +1012,24 @@ async def live_session_ws(
 
     loop = asyncio.get_running_loop()
 
+    from . import live_runtime  # noqa: PLC0415 — module-level import would
+    # create a circular reference during the initial app.py import.
+
     async def emit(data: dict) -> None:
+        # Send to this primary WS …
         await ws_manager.send(session_id, data, channel="live")
+        # … and fan out to any read-only viewers attached to the
+        # session's engine bus (OBS Browser Source via the /viewer
+        # endpoint, debug consoles, etc.). The bus is created lazily
+        # on first publish, so the no-viewer case is essentially a
+        # dict lookup.
+        try:
+            await live_runtime.publish(user["id"], session_id, data)
+        except Exception as exc:  # noqa: BLE001 — never let pub/sub kill the primary
+            print(
+                f"[live-ws {session_id}] live_runtime.publish failed: {exc}",
+                flush=True,
+            )
 
     # Engine events arrive on the engine's emitter (called from arbitrary
     # threads in the local engine, sync in the browser engine). Funnel
@@ -1059,104 +1094,60 @@ async def live_session_ws(
 
     phase_task = asyncio.create_task(run_phase())
 
-    # ── v2.7: YouTube Live Chat ingest ─────────────────────────────────
-    # If the operator linked their YT channel and is currently broadcasting,
-    # spawn a poller that translates incoming live-chat messages into the
-    # same ``user_msg`` shape the browser DJ chat already uses. They flow
-    # through ``_live_relay`` into ``audience_request_batch`` like any
-    # other audience request — the agent doesn't need to know the source.
-    # When YT isn't configured or the user isn't connected, this branch
-    # is a no-op and the rest of the session behaves exactly as before.
-    from . import youtube_auth, youtube_chat  # noqa: PLC0415 — keep optional dep lazy
+    # ── v2.7.2: YouTube Live Chat ingest (session-scoped) ──────────────
+    # The poller now lives in ``youtube_runtime`` keyed by
+    # (user_id, session_id) — one poller per session regardless of how
+    # many WS connections are attached. The WS handler subscribes to
+    # the runtime, receives events via the two callbacks below, and
+    # detaches in the finally block. A 30-s grace window survives
+    # Chrome refreshes and OBS Browser Source reconnects without
+    # respawning the poller / re-fetching chat backlog.
+    from . import youtube_runtime  # noqa: PLC0415 — optional dep lazy
 
-    yt_stop = asyncio.Event()
-    yt_task: asyncio.Task | None = None
-    yt_enabled = youtube_auth.enabled()
-    try:
-        yt_creds = youtube_auth.get_credentials(user["id"]) if yt_enabled else None
-    except Exception as exc:  # noqa: BLE001 — never let YT setup take down the live session
-        print(f"[live-ws {session_id}] youtube_auth.get_credentials failed: {exc}", flush=True)
-        yt_creds = None
-
-    # v2.7.0 UX fix: emit a "disconnected" status so the frontend pill
-    # renders even for brand-new users who haven't OAuthed yet. Without
-    # this, the pill stays hidden (state="off") and the user has no
-    # entry point to start the OAuth flow.
-    if yt_enabled and yt_creds is None:
-        await emit({
-            "type": "youtube_status",
-            "state": "disconnected",
-            "reason": "not_connected",
-        })
-
-    if yt_creds:
+    async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
+        """Per-WS callback: emit dj_chat visibility + enqueue for agent."""
+        # Diagnostic — surfaces in .tmp/backend.log so we can confirm
+        # the poller is firing when audience messages don't appear in
+        # the UI. Cheap enough to keep in prod for now.
+        print(
+            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}",
+            flush=True,
+        )
         try:
-            broadcast = await youtube_chat.discover_active_broadcast(yt_creds)
+            await emit({"type": "dj_chat", "text": f"[YT @{author}] {text}"})
         except Exception as exc:  # noqa: BLE001
-            print(f"[live-ws {session_id}] yt discover failed: {exc}", flush=True)
-            broadcast = None
+            print(f"[live-ws {session_id}] yt dj_chat emit failed: {exc}", flush=True)
+        payload = {
+            "type": "user_msg",
+            "text": f"[YT @{author}] {text}",
+            "timestamp_ms": ts_ms or None,
+        }
+        try:
+            await command_queue.put(payload)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[live-ws {session_id}] yt enqueue failed: {exc}", flush=True)
 
-        if broadcast:
-            await emit({
-                "type": "youtube_status",
-                "state": "connected",
-                "broadcast": {
-                    "id": broadcast["id"],
-                    "title": broadcast["title"],
-                },
-            })
+    async def _on_yt_status(status_event: dict) -> None:
+        """Per-WS callback: forward poller status frames to this WS."""
+        await emit({"type": "youtube_status", **status_event})
 
-            async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
-                # v2.7.1 — surface every YT message in the Booth dj_chat
-                # panel so the operator can SEE them landing in real time
-                # (not just rely on whether the agent decides to react).
-                # This emit goes to the live channel WS unconditionally;
-                # the LLM enqueue below is the agent-input path and can
-                # be source-filtered separately.
-                try:
-                    await emit({
-                        "type": "dj_chat",
-                        "text": f"[YT @{author}] {text}",
-                    })
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[live-ws {session_id}] yt dj_chat emit failed: {exc}",
-                        flush=True,
-                    )
-                # Then push into the agent's audience-request rail. The
-                # prefix lets the LLM mention the author by handle in
-                # emit_chat replies; the existing 5-s batcher folds
-                # multiple YT + browser messages into one turn.
-                payload = {
-                    "type": "user_msg",
-                    "text": f"[YT @{author}] {text}",
-                    "timestamp_ms": ts_ms or None,
-                }
-                try:
-                    await command_queue.put(payload)
-                except Exception as exc:  # noqa: BLE001
-                    print(
-                        f"[live-ws {session_id}] yt enqueue failed: {exc}",
-                        flush=True,
-                    )
-
-            async def _on_yt_status(status_event: dict) -> None:
-                # Forward poller-level status (quota / disconnect) to the
-                # frontend so the UI pill can reflect reality.
-                await emit({"type": "youtube_status", **status_event})
-
-            yt_task = asyncio.create_task(
-                youtube_chat.poll_live_chat(
-                    yt_creds,
-                    broadcast["live_chat_id"],
-                    _on_yt_message,
-                    yt_stop,
-                    own_channel_id=broadcast.get("channel_id") or None,
-                    on_status=_on_yt_status,
-                )
-            )
-        else:
-            await emit({"type": "youtube_status", "state": "no_broadcast"})
+    yt_subscription = None
+    try:
+        yt_subscription, yt_state = await youtube_runtime.attach(
+            user_id=user["id"],
+            session_id=session_id,
+            on_message=_on_yt_message,
+            on_status=_on_yt_status,
+        )
+        # Emit the current state snapshot immediately so this WS sees
+        # whatever the existing runtime knows (or, on first attach,
+        # the freshly-discovered state). State "off" means YT is
+        # disabled server-side — skip the emit so the pill stays
+        # hidden, matching v2.6.x behaviour.
+        if yt_state.get("state") and yt_state["state"] != "off":
+            await emit({"type": "youtube_status", **yt_state})
+    except Exception as exc:  # noqa: BLE001 — never let YT setup take down the live session
+        print(f"[live-ws {session_id}] yt attach failed: {exc}", flush=True)
 
     try:
         # Initial state event so the client knows what's loaded before any
@@ -1288,19 +1279,100 @@ async def live_session_ws(
                 await phase_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
-        # v2.7: tear down the YouTube poller (if any). Signal stop first so
-        # the loop exits at the next ``_sleep_or_stop`` checkpoint, then
-        # cancel as a belt-and-braces in case it's blocked inside an
-        # asyncio.to_thread call (the cancellation propagates when the
-        # blocked HTTP request returns).
-        yt_stop.set()
-        if yt_task is not None and not yt_task.done():
-            yt_task.cancel()
+        # v2.7.2: detach from the session-scoped YT runtime. If we were
+        # the last subscriber, the runtime schedules a 30-s grace
+        # teardown — a Chrome refresh or OBS Browser Source reconnect
+        # within that window re-attaches without re-discovering the
+        # broadcast or losing the poller's state.
+        if yt_subscription is not None:
             try:
-                await yt_task
-            except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                pass
+                await yt_subscription.detach()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[live-ws {session_id}] yt detach failed: {exc}", flush=True)
+        # v2.7.2: drop the engine-event bus so a fresh primary on the
+        # same session starts with no stale cache. Viewers still attached
+        # will see their next publish silently no-op; their handlers
+        # exit when the user navigates away.
+        try:
+            await live_runtime.drop_bus(user["id"], session_id)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[live-ws {session_id}] live_runtime.drop_bus failed: {exc}",
+                flush=True,
+            )
         ws_manager.disconnect(session_id, channel="live")
+
+
+@app.websocket("/api/sessions/{session_id}/live/viewer")
+async def live_viewer_ws(
+    websocket: WebSocket,
+    session_id: str,
+    token: str = Query(...),
+):
+    """Read-only viewer WS for OBS Browser Source / embed pages (v2.7.2).
+
+    Subscribes to the session's engine pub/sub via
+    :mod:`live_runtime`. Receives every event the primary live WS emits
+    (``live_state``, ``engine_command``, ``track_started`` …) and
+    forwards them verbatim. Does NOT instantiate a ``LiveEngineBrowser``
+    and does NOT touch :mod:`ws_manager` — multiple viewers can attach
+    to the same session without contending with the primary or with
+    each other.
+
+    Auth + ownership: same checks as the primary live WS; the viewer is
+    bound to the session's owner so a shared embed URL still requires
+    the operator's JWT (carried as ``?token=`` for OBS Browser Source).
+    """
+    user = auth.user_from_query_token(token)
+    if user is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    s = store.get(session_id)
+    if not s or s.user_id != user["id"]:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    await websocket.accept()
+
+    from . import live_runtime  # noqa: PLC0415 — match primary handler.
+
+    async def on_event(event: dict) -> None:
+        try:
+            await websocket.send_json(event)
+        except Exception:
+            # Caller will catch the WS close on the next iteration of
+            # the read loop below; nothing actionable here.
+            pass
+
+    subscription = await live_runtime.subscribe_viewer(
+        user_id=user["id"], session_id=session_id, on_event=on_event,
+    )
+
+    try:
+        # Viewers don't drive the engine, but we still need a read loop
+        # so the handler stays alive (and we notice when the client
+        # disconnects). Any frames the client sends are ignored — they
+        # have no path to the agent in viewer mode by design.
+        while True:
+            try:
+                await websocket.receive_text()
+            except WebSocketDisconnect:
+                break
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[live-viewer {session_id}] receive error: {exc}",
+                    flush=True,
+                )
+                break
+    finally:
+        try:
+            await subscription.detach()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[live-viewer {session_id}] detach failed: {exc}",
+                flush=True,
+            )
 
 
 # ---------------------------------------------------------------------------

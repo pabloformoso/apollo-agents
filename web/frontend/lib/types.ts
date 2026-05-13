@@ -42,6 +42,14 @@ export interface Track {
   variant_of?: string | null;
   suno?: Suno;
   user_rating?: number | null;
+  /**
+   * v2.7.2 — 80 normalised RMS peaks (range 0..1) representing the
+   * track's amplitude envelope. Populated by ``main.py --build-catalog``
+   * via ``compute_waveform_peaks``. Optional because legacy entries
+   * predate the field; the UI falls back to a synthetic pattern
+   * when absent.
+   */
+  waveform_peaks?: number[];
 }
 
 export interface Catalog {

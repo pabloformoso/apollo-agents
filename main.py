@@ -800,6 +800,36 @@ def detect_beatgrid(filepath: str, bpm: float | None = None) -> dict:
     }
 
 
+def compute_waveform_peaks(filepath: str, n_peaks: int = 80) -> list[float]:
+    """Downsample a track's RMS amplitude to ``n_peaks`` floats in [0, 1].
+
+    Used to drive the now-playing waveform bars in the live UI so the
+    operator sees the actual song shape (intro / build / drop / outro)
+    instead of a synthetic sin pattern. ``n_peaks`` defaults to 80 to
+    match the bar count rendered in ``app/live/page.tsx``.
+
+    Strategy: load mono at native sample rate, square the samples to
+    get instantaneous power, average within ``n_peaks`` equal-width
+    windows, sqrt to get RMS, normalise against the loudest window so
+    the loudest moment maps to 1.0 (preserves relative dynamics
+    without depending on the master gain of the WAV).
+    """
+    y, _ = librosa.load(filepath, sr=None, mono=True)
+    if y.size == 0:
+        return [0.0] * n_peaks
+    # Truncate to an exact multiple of n_peaks so reshape works cleanly.
+    win = max(1, y.size // n_peaks)
+    trimmed = y[: win * n_peaks]
+    if trimmed.size < n_peaks:
+        # Pathologically short clip — pad with zeros to fill the bar count.
+        return [0.0] * n_peaks
+    rms = np.sqrt((trimmed.reshape(n_peaks, win) ** 2).mean(axis=1))
+    peak = float(rms.max())
+    if peak <= 0.0:
+        return [0.0] * n_peaks
+    return [round(float(v) / peak, 4) for v in rms]
+
+
 def detect_camelot_key(filepath):
     """Detect musical key via chromagram and Krumhansl-Schmuckler profiles.
 
@@ -1264,6 +1294,10 @@ def build_catalog():
                 print(f"  [beatgrid] {os.path.basename(audio_path)}")
                 entry["beatgrid"] = detect_beatgrid(audio_path, entry.get("bpm"))
                 needs_patch = True
+            if entry.get("waveform_peaks") is None:
+                print(f"  [peaks] {os.path.basename(audio_path)}")
+                entry["waveform_peaks"] = compute_waveform_peaks(audio_path)
+                needs_patch = True
             if _attach_suno_metadata(entry, audio_path):
                 needs_patch = True
             if entry.get("mp3_file") is None:
@@ -1309,6 +1343,8 @@ def build_catalog():
         duration_sec = _wav_duration_sec(audio_path)
         print(f"    Encoding MP3 for streaming…")
         mp3_rel = _ensure_mp3_for(audio_path)
+        print("    Computing waveform peaks…")
+        waveform_peaks = compute_waveform_peaks(audio_path)
         new_entry = {
             "id": _make_track_id(genre_folder, base_name, is_variant),
             "display_name": base_name,
@@ -1321,6 +1357,7 @@ def build_catalog():
             "duration_sec": round(duration_sec, 1) if duration_sec else None,
             "variant_of": base_name if is_variant else None,
             "beatgrid": beatgrid,
+            "waveform_peaks": waveform_peaks,
         }
         _attach_suno_metadata(new_entry, audio_path)
         updated[rel_path] = new_entry

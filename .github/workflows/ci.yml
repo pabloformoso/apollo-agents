@@ -28,7 +28,12 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --all-extras --group web --group dev
+        # v2.7.x — ``--group youtube`` pulls google-api-python-client +
+        # google-auth + google-auth-oauthlib so tests/web/test_youtube_*
+        # can import the real ``googleapiclient`` namespace. Without it
+        # the entire YT test suite fails at module-import time with
+        # ModuleNotFoundError.
+        run: uv sync --all-extras --group web --group dev --group youtube
 
       - name: Run tests
         run: uv run pytest tests/ -v --tb=short
