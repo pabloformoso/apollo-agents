@@ -279,25 +279,35 @@ export default function LivePage() {
               the engine emits playlist_running_low ~30 s before the
               last crossfade so the agent (and the operator) get a
               clear deadline to extend the set. Designed for
-              unattended YouTube streaming. */}
-          <button
-            onClick={() => live.setEndlessMode(!live.endlessMode)}
-            disabled={!live.connected}
-            title={
-              live.endlessMode
-                ? "Endless mode ON — Apollo will pick continuation tracks when the queue runs low. Click to disable."
-                : "Endless mode OFF — set ends on the last planned track. Click to enable (for YouTube streams)."
-            }
-            className={
-              "px-3.5 py-2 text-xs font-sans cursor-pointer transition-colors " +
-              "border " +
-              (live.endlessMode
-                ? "bg-ember text-cream border-ember"
-                : "bg-transparent text-mute border-line2 hover:text-ember-text")
-            }
-          >
-            ♾ Endless: {live.endlessMode ? "on" : "off"}
-          </button>
+              unattended YouTube streaming.
+
+              v2.7.2 — operator-only: in viewer mode (``?viewer=1``,
+              i.e. the OBS Browser Source URL) the hook silently
+              no-ops every outbound WS write, so clicking this here
+              would visually flip but the engine would never hear
+              about it. Hide the toggle entirely on the OBS surface
+              so there's no false affordance — the operator's main
+              tab keeps it. */}
+          {!isViewer && (
+            <button
+              onClick={() => live.setEndlessMode(!live.endlessMode)}
+              disabled={!live.connected}
+              title={
+                live.endlessMode
+                  ? "Endless mode ON — Apollo will pick continuation tracks when the queue runs low. Click to disable."
+                  : "Endless mode OFF — set ends on the last planned track. Click to enable (for YouTube streams)."
+              }
+              className={
+                "px-3.5 py-2 text-xs font-sans cursor-pointer transition-colors " +
+                "border " +
+                (live.endlessMode
+                  ? "bg-ember text-cream border-ember"
+                  : "bg-transparent text-mute border-line2 hover:text-ember-text")
+              }
+            >
+              ♾ Endless: {live.endlessMode ? "on" : "off"}
+            </button>
+          )}
 
           {/* v2.7 — YouTube Live Chat ingest pill. Only renders when
               the backend has actually emitted a youtube_status event
@@ -408,10 +418,35 @@ export default function LivePage() {
       </header>
 
       {/* WS reconnect / engine error banner — non-blocking, sits below the
-          header. Audio keeps playing during transient disconnects. */}
-      {!live.connected && live.state !== "idle" && (
-        <Banner tone="warn" className="m-3">
-          Reconnecting to the live engine…
+          header. Audio keeps playing during transient disconnects.
+          v2.7.3 — copy now reflects actual retry state instead of the
+          old always-on "Reconnecting…" text (which used to lie because
+          the hook didn't actually retry). The exhausted variant
+          surfaces a manual Reconnect button so the user doesn't have
+          to refresh the whole tab to recover. We also suppress the
+          warn banner whenever ``live.error`` is set — the close-code
+          4001 (displaced) path emits a more specific error message
+          and the two used to stack on top of each other. */}
+      {!live.connected &&
+        live.state !== "idle" &&
+        !live.wsExhausted &&
+        !live.error && (
+          <Banner tone="warn" className="m-3">
+            {live.wsRetryAttempt > 0
+              ? `Reconnecting to the live engine (attempt ${live.wsRetryAttempt}/${live.wsRetryMax})…`
+              : "Connecting to the live engine…"}
+          </Banner>
+        )}
+      {live.wsExhausted && (
+        <Banner tone="error" className="m-3">
+          <span>Live engine disconnected.</span>
+          <button
+            type="button"
+            onClick={live.reconnectNow}
+            className="ml-2 underline underline-offset-2 hover:text-warn"
+          >
+            Reconnect
+          </button>
         </Banner>
       )}
       {live.error && (

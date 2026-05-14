@@ -119,6 +119,15 @@ export interface UseLiveSessionApi {
     broadcastTitle?: string;
     reason?: string;
   };
+  // v2.7.3 — WS reconnect telemetry for the /live banner.
+  /** 0 when not retrying. 1..wsRetryMax while a backoff is scheduled or in flight. */
+  wsRetryAttempt: number;
+  /** Mirror of ``MAX_WS_RETRIES`` so the UI can render "N/MAX" without importing the const. */
+  wsRetryMax: number;
+  /** True after wsRetryMax non-4001 closes in a row — UI shows a Reconnect button. */
+  wsExhausted: boolean;
+  /** Manual "try again" trigger — clears exhausted flag and reopens the WS. */
+  reconnectNow: () => void;
 }
 
 export type LiveCommand =
@@ -253,6 +262,16 @@ function deriveWsBase(): string {
 const WS_BASE = deriveWsBase();
 const PLAYBACK_POS_INTERVAL_MS = 250;
 
+// v2.7.3 — WS auto-reconnect with exponential backoff. Mirrors the
+// SSE retry policy in ``lib/render-stream.ts`` (5 attempts, capped
+// backoff). The hook used to give up on the first close — on a
+// uvicorn ``--reload`` cycle every /live tab silently went dead and
+// needed a full refresh. Now the hook retries on any non-4001 close,
+// resets state when a reopen succeeds, and surfaces an honest
+// "exhausted" flag the UI can render a Refresh button against.
+export const MAX_WS_RETRIES = 5;
+const WS_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000] as const;
+
 /**
  * v2.7.2 — options object accepted by ``useLiveSession``.
  *
@@ -324,6 +343,15 @@ export function useLiveSession(
   // True from PLAYLIST_RUNNING_LOW until the next track_started — drives
   // the "picking continuation track…" banner on /live.
   const [playlistRunningLow, setPlaylistRunningLow] = useState(false);
+  // v2.7.3 — WS reconnect bookkeeping. ``wsRetryAttempt`` is the
+  // current retry count (0 when connected or doing the very first
+  // open). ``wsExhausted`` flips once we've burned through
+  // ``MAX_WS_RETRIES`` without a successful reopen — at that point the
+  // UI offers a manual Reconnect button. ``reconnectKey`` is bumped by
+  // ``reconnectNow`` to force the WS effect to re-run from scratch.
+  const [wsRetryAttempt, setWsRetryAttempt] = useState(0);
+  const [wsExhausted, setWsExhausted] = useState(false);
+  const [reconnectKey, setReconnectKey] = useState(0);
   // v2.7 — YouTube Live Chat status pill state. Defaults to "off" so
   // we don't render the pill at all on plain `/live` sessions where YT
   // isn't configured server-side.
@@ -886,6 +914,13 @@ export function useLiveSession(
   const onConnected = useEffectEvent(() => {
     setConnected(true);
     setError(null);
+    // v2.7.3 — reaching open clears any retry bookkeeping. A flapping
+    // backend (open / close / open / close) therefore resets the
+    // attempt counter on each successful handshake, which is the
+    // correct behaviour: the user should see "Reconnecting (1/5)" if
+    // it later drops again, not "(3/5)" from a previous outage.
+    setWsRetryAttempt(0);
+    setWsExhausted(false);
     publishLiveActive(true);
   });
   const onClosed = useEffectEvent(() => {
@@ -909,55 +944,110 @@ export function useLiveSession(
     const wsPath = viewerMode
       ? `/api/sessions/${sessionId}/live/viewer`
       : `/api/sessions/${sessionId}/live/stream`;
-    const ws = new WebSocket(`${WS_BASE}${wsPath}?token=${token}`);
-    wsRef.current = ws;
-    let opened = false;
+
     let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let currentWs: WebSocket | null = null;
 
-    ws.onopen = () => {
-      opened = true;
-      if (cancelled) {
-        ws.close();
-        return;
-      }
-      onConnected();
+    // v2.7.3 — connect / retry loop. Wrapped so the close handler can
+    // re-arm itself with backoff. ``attempt`` starts at 0 (the very
+    // first open), increments to 1..MAX_WS_RETRIES on each
+    // post-failure retry. Successful open resets the counter via
+    // ``onConnected``.
+    const connect = (attempt: number) => {
+      if (cancelled) return;
+      const ws = new WebSocket(`${WS_BASE}${wsPath}?token=${token}`);
+      currentWs = ws;
+      wsRef.current = ws;
+      let opened = false;
+
+      ws.onopen = () => {
+        opened = true;
+        if (cancelled) {
+          ws.close();
+          return;
+        }
+        onConnected();
+      };
+
+      ws.onmessage = (e) => {
+        try {
+          const data = JSON.parse(e.data) as ServerEvent;
+          onServerEvent(data);
+        } catch {
+          // ignore malformed frames
+        }
+      };
+
+      ws.onerror = () => {
+        if (opened && !cancelled) onErrorCallback("WebSocket error");
+      };
+
+      ws.onclose = (event) => {
+        // Effect cleanup already ran (component unmounted or sessionId
+        // changed). Don't schedule a retry — the next mount will own
+        // its own connect loop.
+        if (cancelled) {
+          onClosed();
+          return;
+        }
+        // v2.7.2 — close code 4001 is the backend's "displaced by a
+        // newer primary on the same session" signal (see
+        // ``ws_manager.displace_existing``). The user opened the same
+        // session in another tab; retrying here would just kick the
+        // newer tab off, ping-pong forever. Surface the honest
+        // displaced message and stop.
+        if (event && event.code === 4001) {
+          onErrorCallback(
+            "Live session moved to another window. Refresh this tab to take it back.",
+          );
+          onClosed();
+          return;
+        }
+        // Any other close (backend reload, network blip, idle
+        // timeout) is retryable. Schedule the next attempt with
+        // capped exponential backoff. After ``MAX_WS_RETRIES``
+        // consecutive failures we give up and let the UI prompt the
+        // user to retry manually.
+        onClosed();
+        const next = attempt + 1;
+        if (next > MAX_WS_RETRIES) {
+          setWsExhausted(true);
+          setWsRetryAttempt(0);
+          return;
+        }
+        const delay = WS_BACKOFF_MS[
+          Math.min(attempt, WS_BACKOFF_MS.length - 1)
+        ];
+        setWsRetryAttempt(next);
+        retryTimer = setTimeout(() => {
+          retryTimer = null;
+          connect(next);
+        }, delay);
+      };
     };
 
-    ws.onmessage = (e) => {
-      try {
-        const data = JSON.parse(e.data) as ServerEvent;
-        onServerEvent(data);
-      } catch {
-        // ignore malformed frames
-      }
-    };
-
-    ws.onerror = () => {
-      if (opened && !cancelled) onErrorCallback("WebSocket error");
-    };
-
-    ws.onclose = (event) => {
-      // v2.7.2 — close code 4001 is the backend's "displaced by a
-      // newer primary on the same session" signal (see
-      // ``ws_manager.displace_existing``). Surface an honest message
-      // via the existing ``error`` rail so the user knows the
-      // controls moved instead of staring at a "Reconnecting…" banner
-      // that will never resolve (the hook doesn't auto-retry).
-      if (event && event.code === 4001 && !cancelled) {
-        onErrorCallback(
-          "Live session moved to another window. Refresh this tab to take it back.",
-        );
-      }
-      onClosed();
-    };
+    // Effect-entry reset — clears any "exhausted" state from a prior
+    // mount of this hook so the manual ``reconnectNow`` (which bumps
+    // ``reconnectKey``) starts from a clean slate.
+    setWsExhausted(false);
+    setWsRetryAttempt(0);
+    connect(0);
 
     return () => {
       cancelled = true;
+      if (retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = null;
+      }
       wsRef.current = null;
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.close();
-      } else if (ws.readyState === WebSocket.CONNECTING) {
-        ws.addEventListener("open", () => ws.close(), { once: true });
+      const ws = currentWs;
+      if (ws) {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close();
+        } else if (ws.readyState === WebSocket.CONNECTING) {
+          ws.addEventListener("open", () => ws.close(), { once: true });
+        }
       }
       // Intentionally NOT closing the AudioContext or stopping the decks
       // here. Next.js Fast Refresh re-runs this effect every time the
@@ -970,7 +1060,19 @@ export function useLiveSession(
     };
     // ``onServerEvent`` / ``onConnected`` etc. are useEffectEvent wrappers —
     // by the rules of React they MUST NOT appear in the dep array.
-  }, [sessionId]);
+    // ``reconnectKey`` IS a dep — bumping it via ``reconnectNow`` is the
+    // signal to re-run this effect after the user clicks Reconnect.
+  }, [sessionId, reconnectKey]);
+
+  // v2.7.3 — manual "try again" trigger surfaced to the UI. Clears the
+  // exhausted flag so the banner doesn't render twice during the
+  // re-attempt, then bumps reconnectKey to force the WS effect to
+  // tear down its (terminated) WS and start a fresh connect loop.
+  const reconnectNow = useCallback(() => {
+    setWsExhausted(false);
+    setWsRetryAttempt(0);
+    setReconnectKey((k) => k + 1);
+  }, []);
 
   // True-unmount audio cleanup. ``[]`` deps means the cleanup runs only
   // when the hook is unmounted (component truly disposed), not on every
@@ -1434,6 +1536,10 @@ export function useLiveSession(
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
       youtube,
+      wsRetryAttempt,
+      wsRetryMax: MAX_WS_RETRIES,
+      wsExhausted,
+      reconnectNow,
     }),
     [
       state,
@@ -1459,6 +1565,9 @@ export function useLiveSession(
       playlistRunningLow,
       setEndlessModeWS,
       youtube,
+      wsRetryAttempt,
+      wsExhausted,
+      reconnectNow,
     ],
   );
 }

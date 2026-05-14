@@ -43,12 +43,27 @@ class FakeWebSocket {
   send(data: string) {
     this.sent.push(data);
   }
-  close() {
+  close(code?: number) {
     this.readyState = 3;
-    this.onclose?.call(
-      this as unknown as WebSocket,
-      new CloseEvent("close"),
-    );
+    // jsdom's ``CloseEvent`` constructor in our test env does not
+    // honour the ``code`` init field (always reads back as 0), which
+    // breaks the v2.7.3 reconnect logic that branches on
+    // ``event.code === 4001``. Hand the production handler a plain
+    // object — its only contract is reading ``event.code``.
+    this.onclose?.call(this as unknown as WebSocket, {
+      code: code ?? 1000,
+      reason: "",
+      wasClean: code == null || code === 1000,
+    } as unknown as CloseEvent);
+  }
+  /**
+   * v2.7.3 — test-side helper to simulate a server-initiated close
+   * (vs cleanup-initiated). Production code never calls this; tests
+   * use it to drive the reconnect loop with specific close codes
+   * (1006 = abnormal / triggers retry, 4001 = displaced / no retry).
+   */
+  triggerClose(code: number) {
+    this.close(code);
   }
   addEventListener() {}
 
@@ -1044,6 +1059,188 @@ describe("useLiveSession", () => {
       .filter((m) => m.type === "user_msg");
     expect(userMsgs).toHaveLength(1);
     expect(userMsgs[0].text).toBe("hi");
+  });
+
+  // ── v2.7.3 — WS auto-reconnect with exponential backoff ────────────────
+  // Backoff schedule mirrors the prod constant in lib/live.ts:
+  // 1s / 2s / 4s / 8s / 15s, 5 attempts max.
+  describe("WS reconnect", () => {
+    const BACKOFFS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+    async function burnRetries(advance: typeof vi.advanceTimersByTimeAsync) {
+      // Caller must have already triggered the FIRST close (which sets
+      // wsRetryAttempt=1 and schedules connect(1)). This walks through
+      // attempts 1..5: advance past the backoff so connect() fires,
+      // flush the new WS's open setTimeout(0), then close it again to
+      // queue the next attempt. After the loop the hook is in
+      // wsExhausted=true.
+      for (let i = 0; i < BACKOFFS.length; i++) {
+        await act(async () => {
+          await advance(BACKOFFS[i] + 50);
+        });
+        await act(async () => {
+          await advance(5);
+        });
+        act(() => {
+          FakeWebSocket.lastInstance!.triggerClose(1006);
+        });
+      }
+    }
+
+    it("retries with backoff after a non-4001 close and clears state on reopen", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-r1"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        expect(result.current.connected).toBe(true);
+        const ws1 = FakeWebSocket.lastInstance!;
+
+        // Server drops the connection (e.g. uvicorn --reload).
+        act(() => {
+          ws1.triggerClose(1006);
+        });
+        expect(result.current.connected).toBe(false);
+        expect(result.current.wsRetryAttempt).toBe(1);
+        expect(result.current.wsExhausted).toBe(false);
+        // No new WS has been constructed yet — the backoff is still
+        // pending. Advancing JUST under the first backoff must not
+        // create one either.
+        expect(FakeWebSocket.lastInstance).toBe(ws1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(900);
+        });
+        expect(FakeWebSocket.lastInstance).toBe(ws1);
+
+        // Cross the 1s backoff threshold — connect() fires.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(200);
+        });
+        const ws2 = FakeWebSocket.lastInstance!;
+        expect(ws2).not.toBe(ws1);
+        // FakeWebSocket constructor schedules onopen via setTimeout(0).
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        expect(result.current.connected).toBe(true);
+        expect(result.current.wsRetryAttempt).toBe(0);
+        expect(result.current.wsExhausted).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("exposes wsRetryMax matching the production constant", () => {
+      const { result } = renderHook(() => useLiveSession("sid-r-max"));
+      expect(result.current.wsRetryMax).toBe(5);
+    });
+
+    it("flips wsExhausted after MAX_WS_RETRIES consecutive failures", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-r2"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        // Initial failure that kicks off the retry loop.
+        act(() => {
+          FakeWebSocket.lastInstance!.triggerClose(1006);
+        });
+        expect(result.current.wsRetryAttempt).toBe(1);
+
+        await burnRetries(vi.advanceTimersByTimeAsync);
+
+        expect(result.current.wsExhausted).toBe(true);
+        expect(result.current.wsRetryAttempt).toBe(0);
+        expect(result.current.connected).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("does not retry on close code 4001 (displaced)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-r3"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        const ws1 = FakeWebSocket.lastInstance!;
+        act(() => {
+          ws1.triggerClose(4001);
+        });
+        expect(result.current.error).toContain("moved to another window");
+        expect(result.current.wsRetryAttempt).toBe(0);
+        expect(result.current.wsExhausted).toBe(false);
+        expect(result.current.connected).toBe(false);
+
+        // Advance well past every backoff — no new WS should ever
+        // appear. 4001 is a hard-stop signal and retrying would just
+        // kick the displacing tab off, ping-ponging forever.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20_000);
+        });
+        expect(FakeWebSocket.lastInstance).toBe(ws1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("reconnectNow() recovers from wsExhausted by opening a fresh WS", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-r4"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        // Push the hook into the exhausted state via the same helper.
+        act(() => {
+          FakeWebSocket.lastInstance!.triggerClose(1006);
+        });
+        await burnRetries(vi.advanceTimersByTimeAsync);
+        expect(result.current.wsExhausted).toBe(true);
+        const exhaustedWs = FakeWebSocket.lastInstance;
+
+        // Manual click on the Reconnect button.
+        act(() => {
+          result.current.reconnectNow();
+        });
+        expect(result.current.wsExhausted).toBe(false);
+        expect(result.current.wsRetryAttempt).toBe(0);
+
+        // The effect re-runs (reconnectKey bumped), opening a new WS.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        expect(FakeWebSocket.lastInstance).not.toBe(exhaustedWs);
+        expect(result.current.connected).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("cleanup cancels a pending retry timer (no new WS after unmount)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { unmount } = renderHook(() => useLiveSession("sid-r5"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        const ws1 = FakeWebSocket.lastInstance!;
+        act(() => {
+          ws1.triggerClose(1006);
+        });
+        // Unmount BEFORE the 1s backoff fires.
+        unmount();
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(20_000);
+        });
+        expect(FakeWebSocket.lastInstance).toBe(ws1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 
