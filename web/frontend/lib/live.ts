@@ -948,6 +948,12 @@ export function useLiveSession(
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let currentWs: WebSocket | null = null;
+    // v2.7.4 — track whether we've already burned our single allowed
+    // 4001-reclaim attempt for this effect mount. If a fresh WS open
+    // STILL gets displaced, the displacing primary is genuinely
+    // alive on the other side and ping-ponging would kick a real
+    // user off. Reset by the next effect mount (HMR / reconnectNow).
+    let displacedReclaimUsed = false;
 
     // v2.7.3 — connect / retry loop. Wrapped so the close handler can
     // re-arm itself with backoff. ``attempt`` starts at 0 (the very
@@ -993,15 +999,36 @@ export function useLiveSession(
         }
         // v2.7.2 — close code 4001 is the backend's "displaced by a
         // newer primary on the same session" signal (see
-        // ``ws_manager.displace_existing``). The user opened the same
-        // session in another tab; retrying here would just kick the
-        // newer tab off, ping-pong forever. Surface the honest
-        // displaced message and stop.
+        // ``ws_manager.displace_existing``). v2.7.4 — instead of
+        // surfacing the error immediately, allow ONE delayed reclaim
+        // attempt: the displacing tab may have closed in the
+        // meantime (common for OBS Browser Sources the operator
+        // can't manually refresh — a transient HMR remount used to
+        // strand the tab on a permanent 4001 banner). If the
+        // reclaim ALSO gets displaced, we give up — clearly there's
+        // a genuinely-active other primary and looping would kick
+        // it off.
         if (event && event.code === 4001) {
-          onErrorCallback(
-            "Live session moved to another window. Refresh this tab to take it back.",
-          );
           onClosed();
+          if (displacedReclaimUsed) {
+            onErrorCallback(
+              "Live session moved to another window. Refresh this tab to take it back.",
+            );
+            setWsRetryAttempt(0);
+            return;
+          }
+          displacedReclaimUsed = true;
+          // Longer delay than the standard backoff (the displacing
+          // primary needs time to settle before we contend; if we
+          // race-reconnect immediately we both ping-pong each
+          // other). Banner shows "Reconnecting (1/5)…" via the
+          // shared retry-attempt state.
+          const delay = 30_000;
+          setWsRetryAttempt(1);
+          retryTimer = setTimeout(() => {
+            retryTimer = null;
+            connect(attempt);
+          }, delay);
           return;
         }
         // Any other close (backend reload, network blip, idle

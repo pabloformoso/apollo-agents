@@ -1159,7 +1159,14 @@ describe("useLiveSession", () => {
       }
     });
 
-    it("does not retry on close code 4001 (displaced)", async () => {
+    it("schedules ONE delayed reclaim after a 4001 close (no immediate error)", async () => {
+      // v2.7.4 — the prior behaviour gave up on the first 4001. That
+      // stranded OBS Browser Sources (which the operator cannot
+      // refresh) on a permanent displaced banner whenever a
+      // transient HMR remount briefly stole primary. The new path
+      // schedules one delayed reclaim so the displaced tab can take
+      // primary back if the displacing connection has since gone
+      // away.
       vi.useFakeTimers();
       try {
         const { result } = renderHook(() => useLiveSession("sid-r3"));
@@ -1170,18 +1177,65 @@ describe("useLiveSession", () => {
         act(() => {
           ws1.triggerClose(4001);
         });
+        // No error yet — we're in the 30 s reclaim wait. Banner
+        // surfaces via wsRetryAttempt=1 ("Reconnecting…").
+        expect(result.current.error).toBeNull();
+        expect(result.current.wsRetryAttempt).toBe(1);
+        expect(result.current.connected).toBe(false);
+        expect(FakeWebSocket.lastInstance).toBe(ws1);
+
+        // Cross the 30 s reclaim delay — connect() fires.
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_100);
+        });
+        const ws2 = FakeWebSocket.lastInstance!;
+        expect(ws2).not.toBe(ws1);
+        // FakeWebSocket constructor schedules onopen via setTimeout(0).
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        expect(result.current.connected).toBe(true);
+        expect(result.current.wsRetryAttempt).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("gives up after a SECOND 4001 (genuine other primary still alive)", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-r3b"));
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        // First displacement → schedules 30 s reclaim.
+        act(() => {
+          FakeWebSocket.lastInstance!.triggerClose(4001);
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(30_100);
+        });
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(5);
+        });
+        expect(result.current.connected).toBe(true);
+
+        // Second displacement on the reclaim — give up. No third WS
+        // is constructed, error surfaces.
+        const reclaimWs = FakeWebSocket.lastInstance!;
+        act(() => {
+          reclaimWs.triggerClose(4001);
+        });
         expect(result.current.error).toContain("moved to another window");
         expect(result.current.wsRetryAttempt).toBe(0);
-        expect(result.current.wsExhausted).toBe(false);
         expect(result.current.connected).toBe(false);
 
-        // Advance well past every backoff — no new WS should ever
-        // appear. 4001 is a hard-stop signal and retrying would just
-        // kick the displacing tab off, ping-ponging forever.
+        // No more WS attempts — looping would kick the genuine
+        // other primary off forever.
         await act(async () => {
-          await vi.advanceTimersByTimeAsync(20_000);
+          await vi.advanceTimersByTimeAsync(60_000);
         });
-        expect(FakeWebSocket.lastInstance).toBe(ws1);
+        expect(FakeWebSocket.lastInstance).toBe(reclaimWs);
       } finally {
         vi.useRealTimers();
       }
