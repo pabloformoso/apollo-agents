@@ -2218,12 +2218,19 @@ def extend_set(track_id: str, context_variables: dict) -> str:
     auto-picks an in-genre continuation deterministically.
 
     Args:
-        track_id: Catalog track ID to append. Must already exist in the
-            catalog (run ``pick_next_track`` first to find candidates).
+        track_id: The OPAQUE catalog id (a long dashed string ending in
+            a UUID, e.g.
+            ``lofi-ambient--lofi_2-soft_focus_at_76-38b20abc-...``).
+            Must be copied VERBATIM from a ``pick_next_track`` result or
+            from an engine event. Do NOT pass the song title /
+            display_name / slugified guess — those are not ids and will
+            fail. If you're unsure of the exact id, call
+            ``pick_next_track`` again and read the ``id`` column.
 
     Returns:
         Confirmation string with the track's new playlist position, or
-        an error if the engine isn't running / track isn't in catalog.
+        a guidance string if the id wasn't found (re-run pick_next_track,
+        copy the id from its ``id`` column character for character).
     """
     engine = context_variables.get("_engine")
     if engine is None:
@@ -2240,7 +2247,19 @@ def extend_set(track_id: str, context_variables: dict) -> str:
             return "Catalog unavailable."
     track = next((t for t in catalog if t.get("id") == track_id), None)
     if track is None:
-        return f"Track ID '{track_id}' not in catalog."
+        # v2.7.2 — instead of just saying "not in catalog", coach the LLM
+        # back onto the correct path. The most common failure mode is
+        # the model fabricating an id from a display_name; the retry
+        # hint nudges it to re-fetch a real id rather than reshape its
+        # guess into something even further from the truth.
+        return (
+            f"Track ID '{track_id}' is NOT in the catalog. "
+            "This usually means the id was invented from a song title — "
+            "track ids are opaque UUID-suffixed strings and must be "
+            "copied verbatim from a pick_next_track result. "
+            "Call pick_next_track again with your criteria and use the "
+            "exact id from the 'id' column of its output."
+        )
     return engine.append_track(track)
 
 

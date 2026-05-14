@@ -52,6 +52,18 @@ class Session:
                 "camelot_key": t.get("camelot_key"),
                 "duration_sec": t.get("duration_sec"),
                 "genre": t.get("genre"),
+                # v2.7.2 — surface the per-track analysis fields the
+                # /live UI needs to render the real waveform shape and
+                # do beat-aligned visuals. They were getting silently
+                # stripped by this projection, so the frontend always
+                # fell back to the synthetic sin pattern even when the
+                # catalog had real data. ``beatgrid`` is a small dict
+                # ({bpm, first_beat_sec}); ``waveform_peaks`` is 80
+                # floats — together they add ~600 bytes per track to
+                # the session payload, fine for typical 10-30 track
+                # sets.
+                "beatgrid": t.get("beatgrid"),
+                "waveform_peaks": t.get("waveform_peaks"),
             }
             for t in playlist
         ]

@@ -185,11 +185,23 @@ class _Registry:
         for any subscriber that lands right after we kick off the
         background task.
         """
+        # Diagnostic — prints in backend.log so we can confirm WHICH
+        # branch the runtime lands on when a session attaches. Removed
+        # once the poller plumbing stabilises across restarts.
+        print(
+            f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] start: "
+            f"enabled={youtube_auth.enabled()}",
+            flush=True,
+        )
         if not youtube_auth.enabled():
             # Feature disabled server-side. Subscribers see no events;
             # the runtime exists only to avoid re-probing on each
             # attach for the same session.
             rt.state = {"state": "off"}
+            print(
+                f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] state=off (disabled)",
+                flush=True,
+            )
             return
         try:
             creds = youtube_auth.get_credentials(rt.user_id)
@@ -201,6 +213,10 @@ class _Registry:
             creds = None
         if creds is None:
             rt.state = {"state": "disconnected", "reason": "not_connected"}
+            print(
+                f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] state=disconnected (no creds)",
+                flush=True,
+            )
             return
 
         try:
@@ -211,6 +227,10 @@ class _Registry:
 
         if broadcast is None:
             rt.state = {"state": "no_broadcast"}
+            print(
+                f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] state=no_broadcast",
+                flush=True,
+            )
             return
 
         rt.broadcast = broadcast
@@ -221,6 +241,11 @@ class _Registry:
         rt.poller_task = asyncio.create_task(
             self._run_poller(rt, creds),
             name=f"yt-poller-{rt.session_id[:8]}",
+        )
+        print(
+            f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] state=connected, "
+            f"poller_task spawned (broadcast={broadcast['id']})",
+            flush=True,
         )
 
     async def _run_poller(self, rt: _Runtime, creds) -> None:

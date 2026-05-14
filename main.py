@@ -234,6 +234,11 @@ BPM_GENRE_RANGES = {
     "techno": (120, 160),
     "cyberpunk": (120, 160),
     "deep house": (115, 135),
+    # Slower house cousin for late-night lounge / cocktail bar sets —
+    # sits between lofi (60-110) and deep house (115-135) without
+    # overlap on either side. Lower bound 102 catches the slower
+    # nu-disco end; upper bound 126 stops short of standard club house.
+    "cocktail house": (102, 126),
 }
 
 # Default themes per genre folder for smart-generated sessions
@@ -285,6 +290,21 @@ GENRE_THEMES = {
         "bg_color": [8, 8, 14],
         "waveform_color": [0, 255, 136],
         "particle_color": [0, 200, 100],
+        "bg_darken": 0.75,
+        "title_font_size": 32,
+    },
+    # Cocktail house — late-night lounge / hotel-bar vibe. Warm amber
+    # title on a deep burgundy backdrop, golden particles. Reuses the
+    # ``deep-house-neon`` artwork preset because it's the closest
+    # sibling on the existing DALL-E style list; swap to a custom
+    # ``cocktail-lounge`` preset once the prompt-template work lands.
+    "cocktail house": {
+        "artwork_style": "deep-house-neon",
+        "title_color": "#E8B86C",
+        "title_stroke_color": "#3A1F1A",
+        "bg_color": [22, 10, 16],
+        "waveform_color": [232, 184, 108],
+        "particle_color": [255, 210, 140],
         "bg_darken": 0.75,
         "title_font_size": 32,
     },
