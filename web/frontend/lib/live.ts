@@ -40,6 +40,43 @@ import { streamUrl } from "./api";
 
 export type LiveEngineState = "idle" | "playing" | "crossfading" | "ended";
 
+/**
+ * v3.0 — equal-power crossfade curve generator.
+ *
+ * WebAudio's ``GainNode.setValueCurveAtTime`` takes a Float32Array
+ * sampled across the duration; the API interpolates between adjacent
+ * samples. 257 samples (a power-of-two plus one) is plenty for a
+ * 12-second crossfade — far below the audible threshold for a
+ * stepwise gain change at ~48 ms per sample.
+ *
+ * Curves match ``agent.phase_lock.phase_locked_crossfade_np`` so the
+ * offline render, the terminal-live engine, and the browser-live engine
+ * all sound the same for the same input. Two facts the algebra hinges on:
+ *
+ *   - cos(t·π/2)² + sin(t·π/2)² = 1 for all t — perceived power is
+ *     constant across the overlap.
+ *   - At t = 0: cos = 1 (full outgoing), sin = 0 (no incoming yet).
+ *     At t = 1: cos = 0, sin = 1.
+ *
+ * The 64-sample raised-cosine edge guard in the numpy / sounddevice
+ * paths is intentionally NOT applied here. Browsers route ``<audio>``
+ * through MediaElementAudioSourceNode which already smooths sample-rate
+ * conversion at the playback boundary, so the click the guard exists
+ * to mask doesn't appear on this path.
+ */
+export function buildEqualPowerCurve(
+  direction: "in" | "out",
+  samples = 257,
+): Float32Array {
+  const curve = new Float32Array(samples);
+  for (let i = 0; i < samples; i++) {
+    const t = i / (samples - 1);
+    const angle = t * (Math.PI / 2);
+    curve[i] = direction === "out" ? Math.cos(angle) : Math.sin(angle);
+  }
+  return curve;
+}
+
 export interface LiveTrackSummary {
   id: string;
   display_name: string;
@@ -136,6 +173,37 @@ export type LiveCommand =
   | { type: "more_energetic" }
   | { type: "wind_down" };
 
+/**
+ * v3.0 — phase-lock anchors carried alongside the crossfade trigger.
+ *
+ * When the catalog has v2 beatgrids on both sides of a transition, the
+ * backend (``LiveEngineBrowser``) computes the chosen outgoing-anchor
+ * downbeat, the incoming-anchor downbeat (with the pickup-skip RMS
+ * heuristic applied), and the xfade duration in catalog seconds. The
+ * frontend uses this to:
+ *
+ *   1. Seek the incoming ``<audio>`` element to ``incoming_anchor_sec``
+ *      so the first sample played IS a downbeat — that's what makes
+ *      the overlay-add phase-lock by construction.
+ *   2. Replace its legacy linear ``GainNode`` ramp with equal-power
+ *      cos/sin curves (the same algebra ``main.build_mix`` uses on the
+ *      offline render path), so the perceived loudness through the
+ *      overlap stays constant instead of dipping in the middle.
+ *
+ * The payload is empty (``{}``) when the catalog lacks v2 beatgrids
+ * or the heuristics fell back — that's the frontend's signal to take
+ * the legacy linear ramp.
+ */
+export interface PhaseLockPayload {
+  outgoing_anchor_sec?: number;
+  incoming_anchor_sec?: number;
+  xfade_sec?: number;
+  phrase_tier?: string;
+  incoming_pickup_skipped?: boolean;
+  edge_guard_samples?: number;
+  sample_rate?: number;
+}
+
 interface ServerEngineCommand {
   type: "engine_command";
   command:
@@ -151,6 +219,8 @@ interface ServerEngineCommand {
   from_track?: LiveTrackSummary;
   position?: number;
   crossfade_sec?: number;
+  /** v3.0 — phase-lock anchors for the upcoming crossfade. See type above. */
+  phase_lock?: PhaseLockPayload;
 }
 
 interface ServerLiveStateMessage {
@@ -196,6 +266,14 @@ interface ServerEngineEvent {
   /** v2.6.0 endless-mode warning payload (cap reached, no candidates). */
   reason?: string;
   message?: string;
+  /**
+   * v3.0 — phase-lock anchors. Carried by ``track_started`` so the
+   * frontend can pre-position (or at least pre-render) the incoming
+   * deck before the actual ``crossfade`` engine_command lands, and by
+   * ``approaching_crossfade`` so any pre-fade UI (countdown, deck
+   * preview) gets the same anchors the audio scheduler will use.
+   */
+  phase_lock?: PhaseLockPayload;
 }
 
 interface ServerEndlessModeMessage {
@@ -665,7 +743,11 @@ export function useLiveSession(
   );
 
   const crossfadeToNext = useCallback(
-    async (track: LiveTrackSummary, crossfadeSec: number) => {
+    async (
+      track: LiveTrackSummary,
+      crossfadeSec: number,
+      phaseLock?: PhaseLockPayload,
+    ) => {
       // Load the incoming track on the inactive deck, ramp the gains.
       const fromWhich = activeDeckRef.current;
       const toWhich = fromWhich === "a" ? "b" : "a";
@@ -674,6 +756,42 @@ export function useLiveSession(
       const toEl = ensureDeck(toWhich);
       if (!fromEl || !toEl) return;
       toEl.src = streamUrl(track.id);
+
+      // v3.0 — seek to the incoming anchor BEFORE play() so the first
+      // sample played is a downbeat. Required for phase-lock to hold;
+      // without it the incoming track would start at sample 0 and
+      // overlay-add with the outgoing tail at an arbitrary phase.
+      //
+      // The seek must be issued before play() AND we still need to
+      // wait for the browser to honour it. ``loadedmetadata`` fires
+      // when ``duration`` becomes known, after which ``currentTime``
+      // assignments stick. Most browsers also accept the seek before
+      // metadata and replay it on metadata-load; we issue it
+      // optimistically and rely on the loadedmetadata listener as the
+      // belt-and-braces correction.
+      const incomingAnchorSec =
+        typeof phaseLock?.incoming_anchor_sec === "number"
+          ? phaseLock.incoming_anchor_sec
+          : 0;
+      if (incomingAnchorSec > 0) {
+        try {
+          toEl.currentTime = incomingAnchorSec;
+        } catch {
+          /* will retry below on loadedmetadata */
+        }
+        const onMeta = () => {
+          try {
+            if (Math.abs(toEl.currentTime - incomingAnchorSec) > 0.05) {
+              toEl.currentTime = incomingAnchorSec;
+            }
+          } catch {
+            /* nothing more we can do */
+          }
+          toEl.removeEventListener("loadedmetadata", onMeta);
+        };
+        toEl.addEventListener("loadedmetadata", onMeta);
+      }
+
       try {
         await toEl.play();
         setAutoplayBlocked(false);
@@ -696,8 +814,26 @@ export function useLiveSession(
         gainTo.gain.cancelScheduledValues(now);
         gainFrom.gain.setValueAtTime(gainFrom.gain.value, now);
         gainTo.gain.setValueAtTime(gainTo.gain.value, now);
-        gainFrom.gain.linearRampToValueAtTime(0, now + crossfadeSec);
-        gainTo.gain.linearRampToValueAtTime(1, now + crossfadeSec);
+        // v3.0 — equal-power cos/sin curves when the backend has shipped
+        // a phase-lock payload (catalog has v2 beatgrids on both sides
+        // of this transition). cos² + sin² = 1, so perceived power
+        // stays constant across the overlap instead of dipping at the
+        // 50 % mark the way a linear ramp does. Algebra matches
+        // ``agent.phase_lock.phase_locked_crossfade_np`` byte-for-byte.
+        //
+        // When the payload is missing (legacy catalog entry or backend
+        // didn't compute a plan), fall back to the v2.5.x linear ramp
+        // so existing /live sessions keep working unchanged.
+        const xfadeSec = phaseLock?.xfade_sec ?? crossfadeSec;
+        if (phaseLock && phaseLock.xfade_sec && phaseLock.xfade_sec > 0) {
+          const fadeOut = buildEqualPowerCurve("out");
+          const fadeIn = buildEqualPowerCurve("in");
+          gainFrom.gain.setValueCurveAtTime(fadeOut, now, xfadeSec);
+          gainTo.gain.setValueCurveAtTime(fadeIn, now, xfadeSec);
+        } else {
+          gainFrom.gain.linearRampToValueAtTime(0, now + xfadeSec);
+          gainTo.gain.linearRampToValueAtTime(1, now + xfadeSec);
+        }
       } else {
         // No Web Audio: fall back to volume ramp on the audio elements.
         toEl.volume = 1;
@@ -740,7 +876,7 @@ export function useLiveSession(
     } else if (command === "skip" && evt.track) {
       void hardCutToTrack(evt.track);
     } else if (command === "crossfade" && evt.to_track) {
-      void crossfadeToNext(evt.to_track, evt.crossfade_sec ?? 12);
+      void crossfadeToNext(evt.to_track, evt.crossfade_sec ?? 12, evt.phase_lock);
     } else if (command === "stop_deck") {
       // v2.5.0.1 — release just the active deck (not both) so the next
       // ``load`` plays into a fresh element and the previous track's

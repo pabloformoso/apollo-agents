@@ -243,3 +243,256 @@ def test_get_state_after_play():
     assert s["current_track"]["display_name"] == "Track a"
     assert s["next_track"]["display_name"] == "Track b"
     assert s["playlist_remaining"] == 1
+
+
+# ===========================================================================
+# v3.0 — phase-lock wiring on LiveEngineBrowser
+# ===========================================================================
+#
+# These tests pin that the browser engine emits the phase-lock payload
+# the frontend's WebAudio scheduler needs. Without this surface the
+# /live tab would keep running its pre-v3.0 linear-fade crossfade while
+# the offline render uses downbeat-locked equal-power curves — exactly
+# the live-vs-offline drift that motivated this whole refactor.
+
+from agent.phase_lock import LiveTransitionPlan  # noqa: E402
+
+
+def _v2_track(
+    track_id: str,
+    *,
+    duration_sec: float = 60.0,
+    bpm: float = 128.0,
+) -> dict:
+    """Catalog track with a v2 beatgrid spanning the whole duration.
+
+    128 BPM 4/4 → bar = 1.875 s. Use ``round`` consistently so the
+    integer sample-index math in the engine matches the float
+    seconds we compare against in tests.
+    """
+    bar_sec = (60.0 / bpm) * 4.0
+    n_bars = int(duration_sec / bar_sec) + 1
+    downbeats = [round(i * bar_sec, 3) for i in range(n_bars)]
+    return {
+        "id": track_id,
+        "display_name": f"Track {track_id}",
+        "bpm": bpm,
+        "camelot_key": "8A",
+        "duration_sec": duration_sec,
+        "hot_cues": [],
+        "beatgrid": {
+            "version": 2,
+            "bpm": bpm,
+            "first_beat_sec": 0.0,
+            "downbeats_sec": downbeats,
+            "beats_per_bar": 4,
+            "source": "madmom",
+        },
+    }
+
+
+class TestBrowserPhaseLockPayload:
+    """The frontend reads the ``phase_lock`` field from three event types
+    (TRACK_STARTED, APPROACHING_CF, engine_command:crossfade). Pin that
+    each carries the right anchors at the right time."""
+
+    def test_track_started_carries_phase_lock_when_v2_beatgrids_present(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        ts = [e for e in rec.events if e["type"] == TRACK_STARTED][0]
+        pl = ts.get("phase_lock")
+        assert pl, "phase_lock payload must be present on TRACK_STARTED"
+        # 60-second track @ 128 BPM, 12 s xfade. Outgoing anchor target =
+        # 60 - 12 = 48 s; the chosen anchor must be on a phrase boundary
+        # near 48 and leave room for the xfade tail.
+        assert pl["incoming_anchor_sec"] == 0.0
+        assert pl["xfade_sec"] == 12.0
+        assert pl["phrase_tier"] != "fallback"
+        # The frontend reads ``edge_guard_samples`` to size its raised-cosine
+        # guard — must match the offline/local-live constant.
+        assert pl["edge_guard_samples"] == 64
+
+    def test_track_started_phase_lock_empty_when_no_beatgrid(self):
+        """A v1-only catalog should produce a payload that signals
+        "fall back to legacy fade" — the frontend reads this as an
+        empty truthiness check."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_track("a"), _track("b")])
+        ts = [e for e in rec.events if e["type"] == TRACK_STARTED][0]
+        # ``phase_lock`` field is present but its content is empty so
+        # the frontend's ``if (payload?.xfade_sec) {...}`` branch fails
+        # cleanly.
+        assert ts.get("phase_lock") == {}
+
+    def test_approaching_crossfade_carries_phase_lock(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(
+            emitter=rec, crossfade_sec=12, approach_warn_sec=30,
+        )
+        engine.play([_v2_track("a"), _v2_track("b")])
+        # Drive the playback position into the approaching window.
+        engine.report_playback_pos("a", current_time=30.0)
+        approached = [e for e in rec.events if e["type"] == APPROACHING_CF]
+        assert approached, "approaching_crossfade should fire at 30 s in"
+        assert approached[0].get("phase_lock"), (
+            "APPROACHING_CF must carry phase_lock so the frontend can pre-position "
+            "the incoming deck before the actual crossfade trigger."
+        )
+
+    def test_crossfade_engine_command_carries_outgoing_side_payload(self):
+        """The 'crossfade' engine_command fires AT the trigger moment.
+        Its phase_lock payload describes the OUTGOING side's anchors —
+        captured BEFORE the cursor advances. After advance the cached
+        plan will be for (to_track → next-after), so capturing before
+        is the only way to ship correct anchors to the frontend."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b"), _v2_track("c")])
+        # Fast-forward to the crossfade trigger.
+        engine.report_playback_pos("a", current_time=49.0)
+        cf_cmds = [
+            e for e in rec.events
+            if e.get("type") == "engine_command" and e.get("command") == "crossfade"
+        ]
+        assert cf_cmds, "engine_command crossfade must fire"
+        pl = cf_cmds[0].get("phase_lock")
+        assert pl, "crossfade command must carry the outgoing-side phase_lock"
+        # Outgoing anchor came from the (a → b) plan, NOT the (b → c) one
+        # that was rebuilt after the cursor advanced. We can't easily
+        # distinguish the two by value (both use the same beatgrid in this
+        # test), but the field must be present and non-empty.
+        assert "xfade_sec" in pl
+
+    def test_phase_lock_rebuilt_after_crossfade_for_new_pair(self):
+        """After the (a → b) crossfade, the cached plan should be for
+        (b → c). The TRACK_STARTED emitted for ``b`` is where the
+        frontend would read this — its phase_lock must describe the
+        new outgoing side."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b"), _v2_track("c")])
+        engine.report_playback_pos("a", current_time=49.0)
+        # TRACK_STARTED for ``b`` is the second one (the first was for ``a``).
+        ts_events = [e for e in rec.events if e["type"] == TRACK_STARTED]
+        assert len(ts_events) >= 2
+        assert ts_events[1].get("phase_lock"), (
+            "TRACK_STARTED for the new current track must carry the "
+            "phase_lock for the NEXT transition, otherwise the frontend "
+            "has no anchors for (b → c) when its approaching_crossfade fires."
+        )
+
+    def test_phase_lock_empty_when_last_track(self):
+        """On the final track there is no next transition — the rebuild
+        produces no plan and the payload is empty. The frontend uses
+        this to suppress any pre-positioning."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        engine.report_playback_pos("a", current_time=49.0)
+        ts_events = [e for e in rec.events if e["type"] == TRACK_STARTED]
+        # Last track started — its phase_lock should be empty.
+        assert ts_events[-1].get("phase_lock") == {}
+
+
+class TestBrowserCfPointSecondsLadder:
+    """Pin the priority ladder in ``_cf_point_seconds`` so a future
+    change to the hot-cue logic can't silently shadow the phase-lock
+    anchor."""
+
+    def test_plan_wins_over_hot_cue_for_current_track(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        track_a = _v2_track("a")
+        track_a["hot_cues"] = [{"type": "out", "position_sec": 55.0}]
+        engine.play([track_a, _v2_track("b")])
+        # The cached plan was built for (a → b). Its outgoing anchor
+        # was selected near (60 - 12) = 48 s, NOT 55 (the hot cue).
+        sec = engine._cf_point_seconds(track_a)
+        assert sec != 55.0, "phase-lock plan must win over hot cue"
+        assert 44.0 <= sec <= 52.0, (
+            f"outgoing anchor {sec} must land near the 48 s target "
+            f"and on a phrase boundary"
+        )
+
+    def test_legacy_path_used_for_track_not_matching_cached_plan(self):
+        """``_cf_point_seconds`` is sometimes called speculatively for a
+        track that's not the current one. The cached plan describes the
+        CURRENT track's outgoing side, so any other input must take the
+        legacy fallback ladder rather than reading stale anchor data."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        speculative = {
+            "id": "speculative",
+            "duration_sec": 100.0,
+            "hot_cues": [{"type": "out", "position_sec": 90.0}],
+        }
+        # Should fall through the legacy hot-cue path (90.0), NOT use
+        # the (a → b) plan's outgoing anchor.
+        assert engine._cf_point_seconds(speculative) == 90.0
+
+    def test_extend_sec_adds_on_top_of_plan_anchor(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        base = engine._cf_point_seconds(engine.playlist[0])
+        engine._extend_sec = 4.0
+        bumped = engine._cf_point_seconds(engine.playlist[0])
+        assert bumped == base + 4.0
+
+
+class TestBrowserPhaseLockPayloadShape:
+    """Snapshot the payload shape so a serialiser change can't quietly
+    rename a key the frontend depends on."""
+
+    def test_payload_keys_match_frontend_contract(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        payload = engine._phase_lock_payload()
+        assert set(payload.keys()) == {
+            "outgoing_anchor_sec",
+            "incoming_anchor_sec",
+            "xfade_sec",
+            "phrase_tier",
+            "incoming_pickup_skipped",
+            "edge_guard_samples",
+            "sample_rate",
+        }
+
+    def test_payload_empty_dict_when_no_plan(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        # No play() yet → no plan → empty payload.
+        assert engine._phase_lock_payload() == {}
+
+    def test_payload_empty_dict_on_fallback_tier(self):
+        """Fallback tier means the heuristics couldn't lock onto a
+        phrase boundary. The frontend reads the empty dict as the signal
+        to use its legacy linear-fade scheduling — same semantics as
+        having no beatgrid at all."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_track("a"), _track("b")])  # no beatgrid → fallback
+        assert engine._phase_lock_payload() == {}
+
+
+class TestBrowserNoDeadlockOnReportPlaybackPos:
+    """v3.0 regression: ``_cf_point_seconds`` is called from inside the
+    ``with self._lock`` block at the head of ``report_playback_pos``.
+    The first cut of ``_current_track_for_plan`` re-acquired
+    ``self._lock`` (non-reentrant) and deadlocked every browser session
+    that had a v2 beatgrid. The fix is documented in
+    ``_current_track_for_plan`` — this test pins it so a future
+    "rewrap with the lock for safety" PR cannot reintroduce the hang."""
+
+    def test_report_playback_pos_returns_under_two_seconds(self):
+        import time as _time
+
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        t0 = _time.monotonic()
+        engine.report_playback_pos("a", current_time=30.0)
+        elapsed = _time.monotonic() - t0
+        assert elapsed < 2.0, (
+            f"report_playback_pos took {elapsed:.2f}s — should be sub-ms. "
+            f"A regression here likely means _current_track_for_plan is "
+            f"re-acquiring self._lock from inside a with self._lock block."
+        )

@@ -5,6 +5,125 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] — 2026-05-17
+
+Precision beat matching, end to end. Crossfades are no longer a
+time-based overlap with accidentally-aligned beats — they are
+sample-accurate, downbeat-locked, and placed on musical phrase
+boundaries. And, critically for v3.0, the offline render, the
+terminal-live engine, and the browser-live engine all share the same
+implementation, so a session sounds the same wherever it plays.
+
+### Added (offline pipeline — PR [#51](https://github.com/pabloformoso/apollo-agents/pull/51), landed via PR [#56](https://github.com/pabloformoso/apollo-agents/pull/56))
+
+- **Phase-locked crossfades.** The first downbeat of the incoming track
+  now lands exactly on a chosen downbeat of the outgoing — the heart of
+  real DJ-style beat matching. Implemented via a sample-accurate
+  equal-power overlay-add (`phase_locked_crossfade_np`) that replaces
+  pydub's `AudioSegment.append(crossfade=)`. A 64-sample raised-cosine
+  guard masks any one-sample rounding click at the overlap edges.
+- **Phrase alignment.** Transitions are placed on 16-bar phrase
+  boundaries (with 8/4/1-bar fallbacks logged per transition) instead
+  of arbitrary timestamps near `duration − CROSSFADE_SEC`.
+- **v2 beatgrid schema.** `tracks.json` now stores a full
+  `downbeats_sec` array, `beats_per_bar`, `source` (madmom | librosa),
+  and `version`. The mixer reads this at mix time; no more runtime
+  librosa beat detection.
+- **`madmom` integration.** RNN-based downbeat tracker installed via
+  the new `beatgrid` optional extra (`uv sync --extra beatgrid`).
+  Falls back gracefully to a librosa-extrapolated synthetic grid when
+  madmom is unavailable or returns too few downbeats.
+- **`--regenerate-beatgrid` CLI flag.** Upgrades legacy v1 entries to
+  v2; `--force` re-analyses everything.
+- **`GridTracker`.** Single source of truth for catalog↔mix time
+  mapping across transitions so cumulative time-stretches don't drift.
+- **Pickup-skip heuristic.** Incoming tracks whose first bar's RMS is
+  < 40 % of track-mean RMS advance their anchor to `downbeats[1]` —
+  avoids crossfading into atmospheric sweeps.
+
+### Added (live-engine parity — new in PR [#56](https://github.com/pabloformoso/apollo-agents/pull/56))
+
+This is the v3.0 fix the user actually felt: pre-v3.0, the same
+playlist on `/live` was beat-aligning differently from the YouTube
+render because the three transition paths each had their own crossfade
+implementation. They now share one.
+
+- **`agent/phase_lock.py`.** New shared module owning every primitive:
+  `PhaseLockPlan`, `GridState`/`GridTracker`, `find_phrase_anchor`,
+  `pick_incoming_anchor`, `compute_phase_lock`,
+  `phase_locked_crossfade_np`, `resolve_downbeats`,
+  `build_live_transition_plan`, `is_v2_beatgrid`,
+  `synthesise_downbeats_from_v1`. `main.py` re-exports them under the
+  historical underscore-prefixed names so existing tests are
+  unmodified.
+- **`LiveEngineLocal` (terminal mode).** `_prestretch_worker` computes
+  the phase-lock plan against the post-stretch incoming buffer (so
+  pickup-skip runs on the same bytes the user will hear);
+  `_cf_point_samples` honours `plan.outgoing_anchor_sample` over hot
+  cues; the audio-callback "crossfading" branch runs equal-power
+  cos/sin curves with the 64-sample edge guard, byte-for-byte
+  identical to the offline path.
+- **`LiveEngineBrowser` + frontend (`/live`).** The backend computes
+  the plan and emits it as a `phase_lock` payload on `track_started`,
+  `approaching_crossfade`, and `engine_command:crossfade`. The
+  frontend (`web/frontend/lib/live.ts`) seeks the incoming
+  `<audio>` element to `incoming_anchor_sec` before `play()` (skipping
+  pickup bars), and replaces its linear `GainNode` ramp with
+  `setValueCurveAtTime` carrying cos/sin curves from a new
+  `buildEqualPowerCurve` helper.
+
+### Fixed
+
+- **Deadlock on `report_playback_pos`.** During Stage 3c-backend
+  development, `_cf_point_seconds` re-acquired the engine's
+  non-reentrant `self._lock` from inside the `with self._lock` block
+  at the head of `report_playback_pos`, hanging any browser session
+  that had a v2 beatgrid. Pinned with
+  `TestBrowserNoDeadlockOnReportPlaybackPos`.
+
+### Changed
+
+- `_adjust_outgoing_tail` and `_prepare_incoming` take explicit anchor
+  parameters; both slice from a downbeat so first samples line up by
+  construction post-stretch.
+- `analyze_tracks` reads from the catalog (v2 → v1 → runtime librosa
+  fallback ladder) instead of always running librosa.
+- Three `_cf_point_*` methods (offline + both live engines) all use
+  the same 3-tier ladder: phase-lock plan → OUT hot cue → legacy
+  `duration - crossfade - 5`.
+
+### Backward compatibility
+
+Entries without `beatgrid` at all fall back to runtime librosa
+analysis on the offline path and to the legacy hot-cue / duration
+formula on the live paths. Entries with v1 beatgrid (`first_beat_sec`
++ `bpm` only) keep working — every path synthesises downbeats from
+BPM via `synthesise_downbeats_from_v1`. Run `--regenerate-beatgrid`
+once to upgrade the whole catalog for maximum precision.
+
+### Tests
+
+- Backend pytest: +~70 cases across `test_phase_lock.py` (19 → 43),
+  `test_live_engine.py` (18 → 32), `test_live_engine_browser.py`
+  (16 → 29), and a new `test_phase_lock_parity.py` (6 cases pinning
+  cross-path agreement: offline / local-live / browser-live MUST
+  produce the same anchors for the same input).
+- Frontend vitest: 122 → 132. New `setValueCurveAtTime`-vs-linear-ramp
+  branch coverage, incoming-deck seek behaviour with `loadedmetadata`
+  belt-and-braces, and the `buildEqualPowerCurve` cos² + sin² = 1
+  invariant test.
+
+### Deferred to v3.0.1
+
+- Pre-flight validator/critic warning when a planned transition falls
+  back to `phrase_tier == "fallback"` (UX polish — structural parity
+  is already enforced by `test_phase_lock_parity.py`).
+- Mic VAD (WebRTC VAD WASM) — `voice_likelihood` still `null` from
+  v2.5.1.
+- Visualizer effect-switching glitches ([#44](https://github.com/pabloformoso/apollo-agents/issues/44)).
+- pyrubberband on the browser live path via
+  `/api/live/{id}/prestretched/{track_id}`.
+
 ## [2.5.1] — 2026-05-09
 
 Patch release fixing two bugs surfaced during real-world testing of

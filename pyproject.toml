@@ -1,6 +1,6 @@
 [project]
 name = "apollo-agents"
-version = "2.5.1"
+version = "3.0.0"
 description = "AI-powered DJ set builder — multi-agent pipeline from tracks to YouTube video"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -20,6 +20,18 @@ dependencies = [
     "pyrekordbox>=0.4.0",
     "pyloudnorm>=0.2.0",
     "pedalboard>=0.9.22",
+]
+
+[project.optional-dependencies]
+# v3.0 precision beat-matching. Adds madmom (RNN downbeat tracker) for
+# offline analysis at --build-catalog time. PyPI's madmom 0.16.1 pins
+# numpy<2 which conflicts with this project; installing from the
+# upstream master branch removes that cap.
+#
+#   uv sync --extra beatgrid
+beatgrid = [
+    "madmom @ git+https://github.com/CPJKU/madmom@main",
+    "cython>=3",
 ]
 
 [dependency-groups]

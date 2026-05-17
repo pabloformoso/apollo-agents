@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import wave
+from dataclasses import dataclass
 
 # Force UTF-8 on stdout/stderr so non-ASCII print() calls (e.g. "→" in BPM ramp
 # logs) survive on Windows consoles, where the default is cp1252 and inherits
@@ -524,6 +525,54 @@ def find_beat_near(beat_times, target_sec):
     return float(beat_times[idx])
 
 
+# === v3.0 Phase-locked beat matching ===
+#
+# The pure logic lives in ``agent/phase_lock.py`` so the live engines
+# (``LiveEngineLocal`` / ``LiveEngineBrowser``) and this offline pipeline
+# share one source of truth. The pre-v3.0-ports symptoms reported on /live
+# (beats sliding off-grid when pyrubberband stretched a track) traced back
+# to the live engine running its own time-based crossfade while this file
+# did the precision math — never again.
+#
+# The historical names with leading underscores are re-exported below so
+# ``tests/test_phase_lock.py`` (which imports them straight from ``main``)
+# keeps working without a rename pass.
+
+from agent.phase_lock import (  # noqa: E402
+    INCOMING_PICKUP_RMS_RATIO,
+    XFADE_EDGE_GUARD_SAMPLES,
+    GridState as _GridState,
+    GridTracker as _GridTracker,
+    PhaseLockPlan,
+    compute_phase_lock,
+    find_phrase_anchor,
+    phase_locked_crossfade_np,
+    pick_incoming_anchor as _pick_incoming_anchor,
+)
+
+
+def _phase_locked_crossfade(
+    mix_seg: AudioSegment,
+    incoming_seg: AudioSegment,
+    xfade_samples: int,
+) -> AudioSegment:
+    """``AudioSegment`` wrapper around the numpy-pure equal-power overlay.
+
+    The offline pipeline operates on pydub ``AudioSegment`` instances; the
+    live engines operate on numpy float buffers. The actual cross-fade is
+    one implementation in ``agent.phase_lock``; this wrapper just handles
+    the conversions either side. Falls back to a plain concatenation when
+    the requested overlap doesn't fit (matches pre-v3.0 behaviour).
+    """
+    mix_y = _segment_to_numpy(mix_seg)
+    in_y = _segment_to_numpy(incoming_seg)
+    n = min(int(xfade_samples), len(mix_y), len(in_y))
+    if n <= 0:
+        return mix_seg + incoming_seg
+    out = phase_locked_crossfade_np(mix_y, in_y, n)
+    return _numpy_to_segment(out, mix_seg)
+
+
 def compute_transition_bpm(bpm_out, bpm_in):
     """Shared BPM during crossfade.
     Small diff  → incoming stretches to match outgoing (less noticeable).
@@ -799,6 +848,12 @@ def detect_bpm(filepath, genre_folder=""):
     return round(bpm, 1)
 
 
+# Beatgrid schema version is owned by ``agent.phase_lock`` (the single source
+# of truth used by every transition path). Re-imported here so existing
+# call-sites that read ``main.BEATGRID_SCHEMA_VERSION`` keep working.
+from agent.phase_lock import BEATGRID_SCHEMA_VERSION  # noqa: E402
+
+
 def detect_beatgrid(filepath: str, bpm: float | None = None) -> dict:
     """Detect beatgrid: first beat position and BPM.
 
@@ -848,6 +903,121 @@ def compute_waveform_peaks(filepath: str, n_peaks: int = 80) -> list[float]:
     if peak <= 0.0:
         return [0.0] * n_peaks
     return [round(float(v) / peak, 4) for v in rms]
+
+
+def detect_downbeats(filepath: str, bpm: float | None = None) -> dict:
+    """v2 beatgrid: full downbeat array via madmom's RNN downbeat tracker.
+
+    Falls back to a librosa-extrapolated synthetic grid when madmom is not
+    installed, returns too few downbeats, or fails outright. The returned
+    dict always conforms to the v2 schema:
+
+        {
+          "bpm": float,
+          "first_beat_sec": float,
+          "downbeats_sec": [float, ...],
+          "beats_per_bar": int,             # 3 or 4
+          "source": "madmom" | "librosa",
+          "version": BEATGRID_SCHEMA_VERSION,
+        }
+
+    Mix-time consumers should treat any entry with version < 2 as legacy
+    and synthesise downbeats via _synthesise_downbeats_from_v1().
+    """
+    v1 = detect_beatgrid(filepath, bpm)
+    start_bpm = v1["bpm"]
+    first_beat = v1["first_beat_sec"]
+
+    try:
+        from madmom.features.downbeats import (  # noqa: PLC0415
+            DBNDownBeatTrackingProcessor,
+            RNNDownBeatProcessor,
+        )
+    except Exception:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom not installed")
+
+    try:
+        rnn = RNNDownBeatProcessor()
+        dbn = DBNDownBeatTrackingProcessor(beats_per_bar=[3, 4], fps=100)
+        activations = rnn(filepath)
+        beats = dbn(activations)  # (N, 2): [time_sec, beat_position_in_bar]
+    except Exception as exc:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason=f"madmom failed: {exc}")
+
+    if beats is None or len(beats) < 2:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom returned <2 beats")
+
+    downbeats = [float(round(t, 3)) for t, pos in beats if int(pos) == 1]
+    if len(downbeats) < 2:
+        return _librosa_v2_beatgrid(filepath, start_bpm, first_beat,
+                                    reason="madmom returned <2 downbeats")
+
+    # Beats per bar = max observed position. DBN locks to a single time
+    # signature per track; tracks that flip mid-piece are rare and 4 is the
+    # right default for our genres anyway.
+    beats_per_bar = int(max(int(pos) for _, pos in beats))
+    if beats_per_bar not in (3, 4):
+        beats_per_bar = 4
+
+    return {
+        "bpm": round(float(start_bpm), 3),
+        "first_beat_sec": round(float(downbeats[0]), 3),
+        "downbeats_sec": downbeats,
+        "beats_per_bar": beats_per_bar,
+        "source": "madmom",
+        "version": BEATGRID_SCHEMA_VERSION,
+    }
+
+
+def _librosa_v2_beatgrid(filepath: str, bpm: float, first_beat: float,
+                         reason: str) -> dict:
+    """Fallback v2 beatgrid built from librosa beats + extrapolated downbeats.
+
+    Used when madmom is unavailable, fails, or yields too few downbeats.
+    Assumes 4/4 (true for the vast majority of this project's electronic
+    catalog). The synthesised downbeats are exact under the assumption of
+    constant tempo, which is fine for sequenced electronic tracks.
+    """
+    print(f"    [v2-fallback] {os.path.basename(filepath)}: {reason} — "
+          f"synthesising downbeats from librosa @ {bpm:.1f} BPM")
+    if bpm <= 0:
+        return {
+            "bpm": round(float(bpm), 3),
+            "first_beat_sec": round(float(first_beat), 3),
+            "downbeats_sec": [round(float(first_beat), 3)],
+            "beats_per_bar": 4,
+            "source": "librosa",
+            "version": BEATGRID_SCHEMA_VERSION,
+        }
+    bar_sec = (60.0 / bpm) * 4.0
+    try:
+        track_dur = _wav_duration_sec(filepath) or 0.0
+    except Exception:
+        track_dur = 0.0
+    if track_dur <= 0:
+        downbeats = [first_beat]
+    else:
+        n_bars = max(1, int((track_dur - first_beat) / bar_sec) + 1)
+        downbeats = [round(first_beat + i * bar_sec, 3) for i in range(n_bars)]
+    return {
+        "bpm": round(float(bpm), 3),
+        "first_beat_sec": round(float(first_beat), 3),
+        "downbeats_sec": downbeats,
+        "beats_per_bar": 4,
+        "source": "librosa",
+        "version": BEATGRID_SCHEMA_VERSION,
+    }
+
+
+# Schema-helpers re-exported from the shared module under the historical
+# underscore names so call-sites scattered through ``main.py`` keep working.
+from agent.phase_lock import (  # noqa: E402
+    is_v2_beatgrid as _is_v2_beatgrid,
+    synthesise_downbeats_from_v1 as _synthesise_downbeats_from_v1,
+)
 
 
 def detect_camelot_key(filepath):
@@ -987,8 +1157,11 @@ def fix_incomplete_catalog():
             print(f"    Duration: {dur:.1f}s" if dur else "    Duration: unknown")
 
         if entry.get("beatgrid") is None and entry.get("bpm"):
-            entry["beatgrid"] = detect_beatgrid(abs_file, entry.get("bpm"))
-            print(f"    Beatgrid: first beat at {entry['beatgrid']['first_beat_sec']}s")
+            entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+            n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+            print(f"    Beatgrid v{entry['beatgrid'].get('version', 1)} "
+                  f"({entry['beatgrid'].get('source', '?')}): first beat at "
+                  f"{entry['beatgrid']['first_beat_sec']}s, {n_db} downbeats")
 
         fixed += 1
 
@@ -1033,13 +1206,71 @@ def generate_beatgrid_catalog(genre_filter: str | None = None) -> None:
             print(f"  [SKIP] {name} — file not found")
             continue
         print(f"  {name}")
-        entry["beatgrid"] = detect_beatgrid(abs_file, entry.get("bpm"))
-        print(f"    first beat: {entry['beatgrid']['first_beat_sec']}s")
+        entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+        n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+        print(f"    v{entry['beatgrid'].get('version', 1)} "
+              f"({entry['beatgrid'].get('source', '?')}): first beat "
+              f"{entry['beatgrid']['first_beat_sec']}s, {n_db} downbeats")
         updated += 1
 
     with open(CATALOG_PATH, "w", encoding="utf-8") as f:
         json.dump({"tracks": tracks}, f, indent=2, ensure_ascii=False)
     print(f"\nBeatgrid generated for {updated} track(s) → {CATALOG_PATH}")
+
+
+def regenerate_beatgrid_catalog(genre_filter: str | None = None,
+                                force: bool = False) -> None:
+    """Upgrade legacy (v1) beatgrid entries to v2 by running detect_downbeats.
+
+    Without --force, only entries whose stored beatgrid lacks the v2 schema
+    (no downbeats_sec / no version) are re-analysed. With --force, every
+    entry in scope is re-analysed regardless of current schema. New entries
+    (no beatgrid at all) are also picked up.
+    """
+    if not os.path.exists(CATALOG_PATH):
+        print("Error: catalog not found. Run --build-catalog first.")
+        sys.exit(1)
+
+    with open(CATALOG_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+
+    tracks = data["tracks"]
+    scope = tracks
+    if genre_filter:
+        scope = [t for t in tracks if t.get("genre_folder", "").lower() == genre_filter.lower()]
+        print(f"=== Regenerating v{BEATGRID_SCHEMA_VERSION} beatgrid for genre "
+              f"'{genre_filter}'{' (force)' if force else ''} ===\n")
+    else:
+        print(f"=== Regenerating v{BEATGRID_SCHEMA_VERSION} beatgrid for all tracks"
+              f"{' (force)' if force else ''} ===\n")
+
+    if force:
+        pending = [t for t in scope if t.get("bpm")]
+    else:
+        pending = [t for t in scope
+                   if t.get("bpm") and not _is_v2_beatgrid(t.get("beatgrid"))]
+    if not pending:
+        print(f"All tracks already have v{BEATGRID_SCHEMA_VERSION} beatgrid. Nothing to do.")
+        return
+
+    print(f"{len(pending)} track(s) need v{BEATGRID_SCHEMA_VERSION} analysis.\n")
+    updated = 0
+    for entry in pending:
+        abs_file = os.path.join(_SCRIPT_DIR, entry["file"]) if not os.path.isabs(entry["file"]) else entry["file"]
+        name = entry.get("display_name", os.path.basename(entry["file"]))
+        if not os.path.exists(abs_file):
+            print(f"  [SKIP] {name} — file not found")
+            continue
+        print(f"  {name}")
+        entry["beatgrid"] = detect_downbeats(abs_file, entry.get("bpm"))
+        n_db = len(entry["beatgrid"].get("downbeats_sec", []))
+        print(f"    v{entry['beatgrid'].get('version', 1)} "
+              f"({entry['beatgrid'].get('source', '?')}): {n_db} downbeats")
+        updated += 1
+
+    with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+        json.dump({"tracks": tracks}, f, indent=2, ensure_ascii=False)
+    print(f"\nUpgraded {updated} track(s) → {CATALOG_PATH}")
 
 
 _UUID_RE = re.compile(
@@ -1311,8 +1542,8 @@ def build_catalog():
                 entry["duration_sec"] = round(_wav_duration_sec(audio_path), 1) or None
                 needs_patch = True
             if entry.get("beatgrid") is None and entry.get("bpm"):
-                print(f"  [beatgrid] {os.path.basename(audio_path)}")
-                entry["beatgrid"] = detect_beatgrid(audio_path, entry.get("bpm"))
+                print(f"  [beatgrid v{BEATGRID_SCHEMA_VERSION}] {os.path.basename(audio_path)}")
+                entry["beatgrid"] = detect_downbeats(audio_path, entry.get("bpm"))
                 needs_patch = True
             if entry.get("waveform_peaks") is None:
                 print(f"  [peaks] {os.path.basename(audio_path)}")
@@ -1351,8 +1582,11 @@ def build_catalog():
 
         bpm = detect_bpm(audio_path, genre_folder)
         print(f"    BPM: {bpm}")
-        beatgrid = detect_beatgrid(audio_path, bpm)
-        print(f"    Beatgrid: first beat at {beatgrid['first_beat_sec']}s")
+        beatgrid = detect_downbeats(audio_path, bpm)
+        n_db = len(beatgrid.get("downbeats_sec", []))
+        print(f"    Beatgrid v{beatgrid.get('version', 1)} "
+              f"({beatgrid.get('source', '?')}): first beat at "
+              f"{beatgrid['first_beat_sec']}s, {n_db} downbeats")
 
         if not camelot_key:
             camelot_key = detect_camelot_key(audio_path)
@@ -1592,23 +1826,95 @@ def generate_session(name, genre, duration_minutes):
 
 # === Track analysis ===
 
-def analyze_tracks(track_entries, use_playlist_order=False):
-    """Analyze BPM and beats for each track entry.
+def _load_catalog_index() -> dict[str, dict]:
+    """Index catalog entries by absolute file path. Empty dict if no catalog."""
+    if not os.path.exists(CATALOG_PATH):
+        return {}
+    try:
+        with open(CATALOG_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    idx = {}
+    for entry in data.get("tracks", []):
+        rel = entry.get("file", "")
+        if not rel:
+            continue
+        abs_path = rel if os.path.isabs(rel) else os.path.join(_SCRIPT_DIR, rel)
+        idx[os.path.normpath(abs_path)] = entry
+    return idx
 
-    When use_playlist_order is True, preserves playlist order.
-    Otherwise sorts by BPM (backward compat).
+
+def analyze_tracks(track_entries, use_playlist_order=False):
+    """Resolve BPM, beats, and downbeats for each track from the catalog.
+
+    Prefers the v2 beatgrid stored in tracks.json (downbeats from madmom).
+    Falls back to v1 (extrapolated downbeats) for legacy entries, and to a
+    runtime librosa call for tracks that aren't in the catalog at all
+    (only used by tests / preview tools). The returned dicts carry the v2
+    fields the mixer expects: bpm, beats, downbeats_sec, beats_per_bar,
+    duration_sec, beatgrid_source.
     """
+    catalog_idx = _load_catalog_index()
     analyzed = []
     for entry in track_entries:
         name = entry["display_name"]
-        print(f"Analyzing {name} ({os.path.basename(entry['path'])})...")
-        bpm, beats = get_bpm_and_beats(entry["path"])
-        print(f"  BPM: {bpm:.1f} | Beats: {len(beats)}")
+        abs_path = os.path.normpath(entry["path"])
+        cat = catalog_idx.get(abs_path)
+        bg = cat.get("beatgrid") if cat else None
+
+        if cat and bg and _is_v2_beatgrid(bg):
+            bpm = float(bg.get("bpm") or cat.get("bpm") or 120.0)
+            downbeats = [float(t) for t in bg["downbeats_sec"]]
+            beats_per_bar = int(bg.get("beats_per_bar") or 4)
+            duration_sec = float(cat.get("duration_sec") or 0.0)
+            source = bg.get("source", "madmom")
+            beats = np.array(downbeats, dtype=float)  # body uses this only for legacy
+            print(f"Loaded {name}: BPM {bpm:.1f}, {len(downbeats)} downbeats "
+                  f"(v2/{source})")
+        elif cat and bg:
+            # v1 fallback — synthesise downbeats from first_beat_sec + bpm
+            bpm = float(bg.get("bpm") or cat.get("bpm") or 120.0)
+            duration_sec = float(cat.get("duration_sec") or 0.0)
+            if duration_sec <= 0:
+                try:
+                    duration_sec = float(_wav_duration_sec(abs_path) or 0.0)
+                except Exception:
+                    duration_sec = 0.0
+            downbeats = _synthesise_downbeats_from_v1(bg, duration_sec)
+            beats_per_bar = 4
+            source = "v1-synth"
+            beats = np.array(downbeats, dtype=float)
+            print(f"Loaded {name}: BPM {bpm:.1f}, {len(downbeats)} downbeats "
+                  f"(v1-synth — run --regenerate-beatgrid for accuracy)")
+        else:
+            # No catalog entry at all — analyse now (preview / test paths)
+            print(f"Analysing {name} ({os.path.basename(entry['path'])})…")
+            bpm, beat_times = get_bpm_and_beats(entry["path"])
+            try:
+                duration_sec = float(_wav_duration_sec(entry["path"]) or 0.0)
+            except Exception:
+                duration_sec = 0.0
+            synth = _synthesise_downbeats_from_v1(
+                {"bpm": bpm, "first_beat_sec": float(beat_times[0]) if len(beat_times) else 0.0},
+                duration_sec,
+            )
+            downbeats = synth
+            beats_per_bar = 4
+            beats = beat_times
+            source = "runtime"
+            print(f"  BPM: {bpm:.1f} | Beats: {len(beats)} | synthesised "
+                  f"{len(downbeats)} downbeats")
+
         analyzed.append({
             "path": entry["path"],
             "display_name": name,
             "bpm": bpm,
             "beats": beats,
+            "downbeats_sec": downbeats,
+            "beats_per_bar": beats_per_bar,
+            "duration_sec": duration_sec,
+            "beatgrid_source": source,
             "camelot_key": entry.get("camelot_key"),
             "genre": entry.get("genre"),
         })
@@ -1631,96 +1937,152 @@ def _track_display_name(filepath):
     return os.path.splitext(os.path.basename(filepath))[0]
 
 
-def _adjust_outgoing_tail(mix, mix_bpm, trans_bpm, key_distance: int = 0,
-                          crispness: int = RUBBERBAND_CRISPNESS_DEFAULT):
-    """Ramp the tail of the current mix from mix_bpm toward trans_bpm."""
-    if abs(mix_bpm - trans_bpm) < 0.5:
-        return mix
+def _adjust_outgoing_tail(mix, mix_bpm, trans_bpm,
+                          outgoing_anchor_in_mix_sec: float,
+                          key_distance: int = 0,
+                          crispness: int = RUBBERBAND_CRISPNESS_DEFAULT,
+                          xfade_sec: float = CROSSFADE_SEC,
+                          ramp_sec: float = TEMPO_RAMP_SEC):
+    """Slice the outgoing tail at a downbeat anchor and stretch toward trans_bpm.
 
-    ramp_ms = TEMPO_RAMP_SEC * 1000
-    xfade_ms = CROSSFADE_SEC * 1000
-    tail_ms = min(ramp_ms + xfade_ms, len(mix))
+    The mix is cut at `outgoing_anchor_in_mix_sec`; the audio in
+    [anchor - ramp_sec, anchor) is the ramp slice (mix_bpm → trans_bpm) and
+    [anchor, anchor + xfade_sec) is the xfade slice (stretched to trans_bpm).
+    Any outgoing audio past `anchor + xfade_sec` is discarded — it would
+    overlap the incoming track. The xfade slice's first sample IS the anchor
+    downbeat, which is the phase-lock guarantee.
+    """
+    anchor_ms = int(round(outgoing_anchor_in_mix_sec * 1000))
+    ramp_ms = int(round(ramp_sec * 1000))
+    xfade_ms = int(round(xfade_sec * 1000))
 
-    tail = mix[-tail_ms:]
-    pre_tail = mix[:-tail_ms]
+    pre_tail_end = max(0, anchor_ms - ramp_ms)
+    pre_tail = mix[:pre_tail_end]
+    ramp_part = mix[pre_tail_end:anchor_ms]
+    xfade_part = mix[anchor_ms:anchor_ms + xfade_ms]
 
-    if len(tail) > xfade_ms:
-        ramp_part = tail[: len(tail) - xfade_ms]
-        xfade_part = tail[len(tail) - xfade_ms :]
-    else:
-        ramp_part = AudioSegment.empty()
-        xfade_part = tail
-
-    if len(ramp_part) > 0:
-        ramp_part = tempo_ramp(ramp_part, mix_bpm, mix_bpm, trans_bpm, crispness=crispness)
-    xfade_part = change_speed(xfade_part, trans_bpm / mix_bpm, crispness=crispness)
+    if abs(mix_bpm - trans_bpm) >= 0.5:
+        if len(ramp_part) > 0:
+            ramp_part = tempo_ramp(ramp_part, mix_bpm, mix_bpm, trans_bpm,
+                                   crispness=crispness)
+        if len(xfade_part) > 0:
+            xfade_part = change_speed(xfade_part, trans_bpm / mix_bpm,
+                                      crispness=crispness)
     xfade_part = _apply_crossfade_eq(xfade_part, "outgoing", key_distance)
 
     return pre_tail + ramp_part + xfade_part
 
 
-def _prepare_incoming(segment, native_bpm, trans_bpm, beats, duration_sec, key_distance: int = 0,
-                      crispness: int = RUBBERBAND_CRISPNESS_DEFAULT):
-    """Split and tempo-adjust the incoming track into three sections:
-    1. Crossfade section  — at trans_bpm
-    2. Ramp section       — gradual trans_bpm → native_bpm
-    3. Body               — native BPM (ends early, leaving room for next crossfade)
+def _prepare_incoming(segment, native_bpm, trans_bpm,
+                      incoming_anchor_catalog_sec: float,
+                      key_distance: int = 0,
+                      crispness: int = RUBBERBAND_CRISPNESS_DEFAULT,
+                      xfade_sec: float = CROSSFADE_SEC,
+                      ramp_sec: float = TEMPO_RAMP_SEC):
+    """Slice the incoming track at a downbeat anchor and tempo-adjust.
+
+    Sections, all in catalog time of the incoming track:
+      [anchor, anchor + xfade_sec)              xfade (native_bpm → trans_bpm)
+      [anchor + xfade, anchor + xfade + ramp)   ramp  (trans_bpm → native_bpm)
+      [anchor + xfade + ramp, end)              body  (native_bpm)
     """
-    xfade_end = find_beat_near(beats, CROSSFADE_SEC)
-    ramp_end = find_beat_near(beats, CROSSFADE_SEC + TEMPO_RAMP_SEC)
-    body_end = find_beat_near(beats, duration_sec - CROSSFADE_SEC)
+    anchor_ms = int(round(incoming_anchor_catalog_sec * 1000))
+    xfade_ms = int(round(xfade_sec * 1000))
+    ramp_ms = int(round(ramp_sec * 1000))
 
-    ramp_end = max(ramp_end, xfade_end + 0.1)
-    body_end = max(body_end, ramp_end + 0.1)
+    xfade_part = segment[anchor_ms:anchor_ms + xfade_ms]
+    ramp_part = segment[anchor_ms + xfade_ms:anchor_ms + xfade_ms + ramp_ms]
+    body_part = segment[anchor_ms + xfade_ms + ramp_ms:]
 
-    xfade_part = segment[: int(xfade_end * 1000)]
-    ramp_part = segment[int(xfade_end * 1000) : int(ramp_end * 1000)]
-    body_part = segment[int(ramp_end * 1000) : int(body_end * 1000)]
-
-    if abs(native_bpm - trans_bpm) > 0.5:
-        xfade_part = change_speed(xfade_part, trans_bpm / native_bpm, crispness=crispness)
-        ramp_part = tempo_ramp(ramp_part, native_bpm, trans_bpm, native_bpm, crispness=crispness)
+    if abs(native_bpm - trans_bpm) >= 0.5:
+        if len(xfade_part) > 0:
+            xfade_part = change_speed(xfade_part, trans_bpm / native_bpm,
+                                      crispness=crispness)
+        if len(ramp_part) > 0:
+            ramp_part = tempo_ramp(ramp_part, native_bpm, trans_bpm, native_bpm,
+                                   crispness=crispness)
     xfade_part = _apply_crossfade_eq(xfade_part, "incoming", key_distance)
 
     return xfade_part + ramp_part + body_part
 
 
+def _track_grid(track: dict, segment: AudioSegment) -> tuple[list[float], int, float]:
+    """Return (downbeats_sec, beats_per_bar, duration_sec) for a track dict.
+
+    Prefers v2 fields populated by analyze_tracks(); falls back to
+    synthesising downbeats from `bpm` + `beats` for legacy callers
+    (e.g. tests that construct tracks by hand).
+    """
+    duration_sec = float(track.get("duration_sec") or (len(segment) / 1000.0))
+    downbeats = track.get("downbeats_sec")
+    if downbeats:
+        return [float(t) for t in downbeats], int(track.get("beats_per_bar") or 4), duration_sec
+
+    bpm = float(track.get("bpm") or 120.0)
+    beats = track.get("beats")
+    if beats is not None and len(beats) > 0:
+        first_beat = float(beats[0])
+    else:
+        first_beat = 0.0
+    synth = _synthesise_downbeats_from_v1(
+        {"bpm": bpm, "first_beat_sec": first_beat}, duration_sec,
+    )
+    return synth, 4, duration_sec
+
+
 def build_mix(tracks, target_duration_sec=TARGET_DURATION_SEC):
     """Build the audio mix and return (AudioSegment, transitions).
 
-    transitions is a list of {"name": str, "start_sec": float} dicts
-    recording when each track becomes audible in the final mix.
-
-    target_duration_sec: max duration in seconds, or None to use all tracks.
+    v3 uses sample-accurate downbeat phase-locking: each transition is
+    anchored on a 16/8/4-bar phrase boundary of the outgoing track, both
+    sides are cut at downbeats, and the equal-power overlay-add guarantees
+    the first sample of the incoming xfade lands on the chosen outgoing
+    downbeat. The legacy time-overlap (pydub append crossfade=) is gone.
     """
     mix = None
     mix_bpm = None
     transitions = []
+    grid_tracker = _GridTracker()
 
     for i, track in enumerate(tracks):
         name = track.get("display_name") or _track_display_name(track["path"])
         native_bpm = track["bpm"]
-        beats = track["beats"]
         segment = AudioSegment.from_file(track["path"])
         segment, lufs_gain_db = _normalize_loudness(segment, LOUDNESS_TARGET_LUFS)
         duration_sec = len(segment) / 1000.0
+        sr = segment.frame_rate
+
+        downbeats, beats_per_bar, _ = _track_grid(track, segment)
+        bg_source = track.get("beatgrid_source", "?")
 
         print(f"\n[{i + 1}/{len(tracks)}] {name} "
-              f"({native_bpm:.1f} BPM, {duration_sec:.0f}s, LUFS gain {lufs_gain_db:+.1f} dB)")
+              f"({native_bpm:.1f} BPM, {duration_sec:.0f}s, "
+              f"{len(downbeats)} downbeats/{bg_source}, "
+              f"LUFS gain {lufs_gain_db:+.1f} dB)")
 
         # --- First track ---
+        # Don't pre-cut: the next transition will phase-lock its anchor
+        # somewhere in [duration - CROSSFADE_SEC, duration] and slice the
+        # xfade tail from there. If this is the *only* track, the final
+        # fade_out at the end of build_mix handles a clean ending.
         if i == 0:
-            cut_sec = find_beat_near(beats, duration_sec - CROSSFADE_SEC)
-            mix = segment[: int(cut_sec * 1000)]
+            mix = segment
             mix_bpm = native_bpm
             transitions.append({"name": name, "start_sec": 0.0, "stretch_ratio": 1.0})
-            print(f"  Body: {cut_sec:.1f}s | Mix: {len(mix)/1000/60:.1f} min")
+            grid_tracker.set_first(
+                track_id=track.get("path", name),
+                duration_catalog_sec=duration_sec,
+                downbeats_sec=downbeats,
+                beats_per_bar=beats_per_bar,
+            )
+            print(f"  Loaded {duration_sec:.1f}s | Mix: {len(mix)/1000/60:.1f} min")
             continue
 
-        # --- Transition BPM ---
+        # --- Transition BPM & strategy ---
         trans_bpm = compute_transition_bpm(mix_bpm, native_bpm)
         bpm_diff = abs(mix_bpm - native_bpm)
-        stretch_ratio = max(mix_bpm, native_bpm) / min(mix_bpm, native_bpm) if min(mix_bpm, native_bpm) > 0 else 1.0
+        stretch_ratio = (max(mix_bpm, native_bpm) / min(mix_bpm, native_bpm)
+                         if min(mix_bpm, native_bpm) > 0 else 1.0)
         soft_fade = stretch_ratio > SOFT_FADE_RATIO_THRESHOLD
 
         # Soft-fade needs the incoming track to be at least one full overlap
@@ -1734,60 +2096,119 @@ def build_mix(tracks, target_duration_sec=TARGET_DURATION_SEC):
 
         if soft_fade:
             strategy = f"soft-fade @{SOFT_FADE_CROSSFADE_SEC}s (no stretch)"
+            active_xfade_sec = SOFT_FADE_CROSSFADE_SEC
+            active_ramp_sec = 0.0
+            active_trans_bpm = mix_bpm  # no stretch on outgoing
         elif bpm_diff > BPM_MATCH_THRESHOLD:
             strategy = "meet-in-middle"
+            active_xfade_sec = CROSSFADE_SEC
+            active_ramp_sec = TEMPO_RAMP_SEC
+            active_trans_bpm = trans_bpm
         else:
             strategy = "match outgoing"
+            active_xfade_sec = CROSSFADE_SEC
+            active_ramp_sec = TEMPO_RAMP_SEC
+            active_trans_bpm = trans_bpm
         print(f"  {mix_bpm:.1f} → {native_bpm:.1f} BPM "
-              f"(Δ{bpm_diff:.1f}, ratio {stretch_ratio:.2f}×, {strategy}, xfade@{trans_bpm:.1f})")
+              f"(Δ{bpm_diff:.1f}, ratio {stretch_ratio:.2f}×, {strategy}, "
+              f"xfade@{active_trans_bpm:.1f})")
 
-        # --- Key distance for EQ matching ---
+        # --- Phase-lock plan ---
+        # incoming_audio_y is only used for the pickup-RMS heuristic; cheap
+        # to compute once from the LUFS-normalised segment.
+        try:
+            incoming_audio_y = _segment_to_numpy(segment)
+        except Exception:
+            incoming_audio_y = None
+        out_state = grid_tracker.state
+        plan = compute_phase_lock(
+            outgoing_downbeats=out_state.downbeats_sec if out_state else [],
+            outgoing_duration_catalog_sec=(out_state.duration_catalog_sec
+                                           if out_state else 0.0),
+            incoming_downbeats=downbeats,
+            incoming_audio_y=incoming_audio_y,
+            incoming_sr=sr,
+            target_xfade_sec=active_xfade_sec,
+            target_ramp_sec=active_ramp_sec,
+        )
+        outgoing_anchor_in_mix_sec = (
+            out_state.catalog_to_mix(plan.outgoing_anchor_catalog_sec)
+            if out_state else max(0.0, len(mix) / 1000.0 - active_xfade_sec)
+        )
+        pickup_note = " [pickup skipped]" if plan.incoming_pickup_skipped else ""
+        print(f"  Anchor: out={plan.outgoing_anchor_catalog_sec:.2f}s ({plan.phrase_tier}, "
+              f"mix-time {outgoing_anchor_in_mix_sec:.2f}s)  "
+              f"in={plan.incoming_anchor_catalog_sec:.2f}s{pickup_note}")
+
+        # --- Key distance + Rubber Band crispness ---
         key_dist = _camelot_step_distance(
             tracks[i - 1].get("camelot_key", ""),
-            track.get("camelot_key", "")
+            track.get("camelot_key", ""),
         )
-
-        # Rubber Band crispness: incoming track's genre governs the transition,
-        # since both segments are stretched toward the same trans_bpm.
         crispness = _crispness_for_genre(track.get("genre"))
 
-        if soft_fade:
-            # Both tracks stay at native BPM; longer overlap absorbs the tempo
-            # difference perceptually instead of via time-stretch.
-            xfade_ms = SOFT_FADE_CROSSFADE_SEC * 1000
-            if len(mix) > xfade_ms:
-                head = mix[:-xfade_ms]
-                tail = _apply_crossfade_eq(mix[-xfade_ms:], "outgoing", key_dist)
-                mix = head + tail
-            body_end = find_beat_near(beats, duration_sec - CROSSFADE_SEC)
-            body_end = max(body_end, SOFT_FADE_CROSSFADE_SEC + 0.1)
-            incoming_xfade = _apply_crossfade_eq(
-                segment[: int(SOFT_FADE_CROSSFADE_SEC * 1000)], "incoming", key_dist
-            )
-            incoming_body = segment[int(SOFT_FADE_CROSSFADE_SEC * 1000) : int(body_end * 1000)]
-            incoming = incoming_xfade + incoming_body
-            crossfade_ms = min(xfade_ms, len(mix), len(incoming))
-        else:
-            # --- Adjust outgoing tail ---
-            mix = _adjust_outgoing_tail(mix, mix_bpm, trans_bpm, key_distance=key_dist,
-                                        crispness=crispness)
-            # --- Prepare incoming track ---
-            incoming = _prepare_incoming(
-                segment, native_bpm, trans_bpm, beats, duration_sec, key_distance=key_dist,
-                crispness=crispness,
-            )
-            crossfade_ms = min(CROSSFADE_SEC * 1000, len(mix), len(incoming))
+        # --- Slice & stretch ---
+        mix = _adjust_outgoing_tail(
+            mix, mix_bpm, active_trans_bpm,
+            outgoing_anchor_in_mix_sec=outgoing_anchor_in_mix_sec,
+            key_distance=key_dist, crispness=crispness,
+            xfade_sec=active_xfade_sec, ramp_sec=active_ramp_sec,
+        )
+        incoming = _prepare_incoming(
+            segment, native_bpm, active_trans_bpm,
+            incoming_anchor_catalog_sec=plan.incoming_anchor_catalog_sec,
+            key_distance=key_dist, crispness=crispness,
+            xfade_sec=active_xfade_sec, ramp_sec=active_ramp_sec,
+        )
+
+        # Post-stretch xfade lengths differ slightly when mix_bpm != native_bpm
+        # (each side is stretched by its own ratio). Take the min so the
+        # overlay window matches exactly on both sides.
+        outgoing_xfade_post_ms = int(round(
+            active_xfade_sec * 1000.0
+            * (mix_bpm / active_trans_bpm if active_trans_bpm > 0 else 1.0)
+        ))
+        incoming_xfade_post_ms = int(round(
+            active_xfade_sec * 1000.0
+            * (native_bpm / active_trans_bpm if active_trans_bpm > 0 else 1.0)
+        ))
+        xfade_ms_actual = min(outgoing_xfade_post_ms, incoming_xfade_post_ms,
+                              len(mix), len(incoming))
+        xfade_samples = int(round(xfade_ms_actual / 1000.0 * sr))
 
         # Record transition timestamp (where the crossfade begins)
-        track_start_sec = (len(mix) - crossfade_ms) / 1000.0
+        track_start_sec = (len(mix) - xfade_ms_actual) / 1000.0
         if stretch_ratio > 1.5:
             suffix = " (soft-faded)" if soft_fade else ""
-            print(f"  [STRETCH WARNING] Ratio {stretch_ratio:.2f}× ({mix_bpm:.1f} → {native_bpm:.1f} BPM){suffix}")
-        transitions.append({"name": name, "start_sec": track_start_sec, "stretch_ratio": round(stretch_ratio, 3)})
+            print(f"  [STRETCH WARNING] Ratio {stretch_ratio:.2f}× "
+                  f"({mix_bpm:.1f} → {native_bpm:.1f} BPM){suffix}")
+        transitions.append({
+            "name": name,
+            "start_sec": track_start_sec,
+            "stretch_ratio": round(stretch_ratio, 3),
+            "phrase_tier": plan.phrase_tier,
+        })
 
-        # --- Crossfade ---
-        mix = mix.append(incoming, crossfade=crossfade_ms)
+        # --- Phase-locked sample-accurate overlay-add ---
+        ramp_post_ms_incoming = int(round(
+            active_ramp_sec * 1000.0
+            * (native_bpm / active_trans_bpm if active_trans_bpm > 0 else 1.0)
+        ))
+        body_mix_start_sec = (len(mix) - xfade_ms_actual + xfade_ms_actual
+                              + ramp_post_ms_incoming) / 1000.0
+        mix = _phase_locked_crossfade(mix, incoming, xfade_samples)
         mix_bpm = native_bpm
+        crossfade_ms = xfade_ms_actual  # legacy var name kept for the peak-check block below
+        grid_tracker.set_after_transition(
+            track_id=track.get("path", name),
+            duration_catalog_sec=duration_sec,
+            downbeats_sec=downbeats,
+            beats_per_bar=beats_per_bar,
+            incoming_anchor_catalog_sec=plan.incoming_anchor_catalog_sec,
+            xfade_catalog_sec=active_xfade_sec,
+            ramp_catalog_sec=active_ramp_sec,
+            body_mix_start_sec=body_mix_start_sec,
+        )
 
         # Fast peak check on the crossfade zone — no librosa, uses pydub
         xfade_zone = mix[max(0, len(mix) - crossfade_ms - 1000):]
@@ -3510,6 +3931,11 @@ def _parse_args():
                         help="Re-detect BPM for all catalog entries (use after updating detection logic)")
     parser.add_argument("--generate-beatgrid", action="store_true",
                         help="Generate beatgrid (first beat position) for catalog entries that are missing it")
+    parser.add_argument("--regenerate-beatgrid", action="store_true",
+                        help="Upgrade legacy v1 beatgrid entries to v2 (downbeat-accurate, via madmom)")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-analyse every entry even if it already has the current schema "
+                             "(combine with --regenerate-beatgrid)")
     parser.add_argument("--name", default=None,
                         help="Session name (used as output folder name)")
     parser.add_argument("--genre", default=None,
@@ -3549,6 +3975,11 @@ def main():
     # --generate-beatgrid: compute first_beat_sec for entries missing beatgrid and exit
     if args.generate_beatgrid:
         generate_beatgrid_catalog(genre_filter=args.genre)
+        return
+
+    # --regenerate-beatgrid: upgrade legacy v1 entries (or all with --force) to v2 and exit
+    if args.regenerate_beatgrid:
+        regenerate_beatgrid_catalog(genre_filter=args.genre, force=args.force)
         return
 
     # Validate required args for session generation
