@@ -68,7 +68,23 @@ Available actions:
     (v2.6.0 endless mode — see ENDLESS MODE below)
   - emit_chat(text) → reply to the audience without acting
     (for "noted, but staying course" responses)
-  - get_live_state / get_perception_window — read current context
+  - get_live_state / get_perception_window → read current context
+
+TRACK IDS — ABSOLUTE RULE:
+- Track IDs in this system are long opaque strings produced by the
+  catalog (e.g. ``lofi-ambient--lofi_2-soft_focus_at_76-38b20abc-7c70-
+  45f3-bfda-4a2cf009831b``). They are NOT human-readable titles.
+- NEVER invent, guess, paraphrase, slugify, abbreviate, or "clean up"
+  a track id. NEVER construct one from a display_name. NEVER quote
+  the song title to ``extend_set`` / ``queue_swap`` / ``skip_track``.
+- The ONLY valid source of a track_id is the ``id`` column from a
+  ``pick_next_track`` result, or an event payload from the engine.
+  Copy that id verbatim, character for character, including dashes
+  and UUID suffix. If you're not 100 % sure of the id, call
+  ``pick_next_track`` again — it's cheap, the catalog is local.
+- If a tool returns "Track ID '...' not in catalog", you got the id
+  wrong. Do NOT retry with a similar-looking string. Re-run
+  ``pick_next_track`` and use the exact id from its output.
 
 ENDLESS MODE:
 - When the operator has enabled endless mode (a YouTube-streaming
@@ -156,7 +172,9 @@ def queue_swap(position: int, track_id: str, context_variables: dict) -> str:
 
     Args:
         position: 1-indexed future playlist position to replace.
-        track_id: Catalog track ID to insert (use get_catalog to find IDs).
+        track_id: The OPAQUE catalog id (long dashed UUID-suffixed
+            string) — copy VERBATIM from a ``pick_next_track`` result.
+            Do NOT pass a song title / display_name / paraphrase.
     """
     engine: LiveEngineProtocol = context_variables.get("_engine")
     if not engine:
@@ -401,6 +419,22 @@ async def run_live_session_async(
             content = _format_turn(events, user_inputs, engine.get_state())
             messages.append({"role": "user", "content": content})
 
+            # Diagnostic — surfaces in backend.log so we can see WHEN the
+            # agent loop actually invokes the LLM and what comes back.
+            # Trims the content preview to keep the log readable.
+            # ``.encode('ascii', 'replace')`` defangs the Windows-cp1252
+            # console: LLM output regularly contains arrows / em-dashes
+            # that aren't in cp1252 and otherwise raise UnicodeEncodeError
+            # mid-loop, crashing phase_live entirely.
+            def _ascii(s: str) -> str:
+                return (s or "").encode("ascii", "replace").decode("ascii")
+            evt_types = [e.get("type") for e in events]
+            print(
+                f"[live_dj] turn: events={evt_types} user_inputs={len(user_inputs)} "
+                f"content_preview={_ascii(content[:120])!r}",
+                flush=True,
+            )
+
             # Forward to LLM. The streaming runner publishes its own
             # text_delta / tool_call / tool_result events via emit, so we
             # only need to add a final assistant chat marker.
@@ -414,8 +448,19 @@ async def run_live_session_async(
                     max_turns=5,
                 )
             except Exception as exc:  # noqa: BLE001 — surface to UI
+                print(
+                    f"[live_dj] run_agent_streaming RAISED: "
+                    f"{type(exc).__name__}: {_ascii(str(exc))}",
+                    flush=True,
+                )
                 await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
                 response = ""
+
+            print(
+                f"[live_dj] turn done: response_len={len(response) if response else 0} "
+                f"preview={_ascii(response[:120] if response else '')!r}",
+                flush=True,
+            )
 
             if response:
                 messages.append({"role": "assistant", "content": response})

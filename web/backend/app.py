@@ -1260,6 +1260,23 @@ async def live_session_ws(
                 enabled = bool(msg.get("enabled", False))
                 s.context_variables["endless_mode"] = enabled
                 engine._endless_mode = enabled
+                # v2.7.2 — persist the ctx mutation so a backend restart
+                # between toggle and the actual end-of-set still has the
+                # flag. Without this the in-memory toggle is lost on
+                # reload and ``phase_live`` syncs ``False`` to a fresh
+                # engine while the frontend pill still reads ON.
+                try:
+                    store.save(s)
+                except Exception as exc:  # noqa: BLE001
+                    print(
+                        f"[live-ws {session_id}] set_endless_mode store.save failed: {exc}",
+                        flush=True,
+                    )
+                print(
+                    f"[live-ws {session_id}] set_endless_mode enabled={enabled} "
+                    f"(persisted to session ctx)",
+                    flush=True,
+                )
                 await emit({"type": "endless_mode", "enabled": enabled})
 
     except WebSocketDisconnect:

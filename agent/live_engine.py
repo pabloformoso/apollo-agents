@@ -311,7 +311,12 @@ class LiveEngineLocal:
         catalog = _load_catalog()
         track = next((t for t in catalog if t["id"] == track_id), None)
         if not track:
-            return f"Track ID '{track_id}' not found in catalog."
+            return (
+                f"Track ID '{track_id}' not found in catalog. "
+                "This usually means the id was invented from a song "
+                "title — re-run pick_next_track and copy the exact id "
+                "from its 'id' column."
+            )
         with self._lock:
             self.playlist[idx] = track
         return f"Queued '{track['display_name']}' at position {position}."
@@ -1212,16 +1217,48 @@ class LiveEngineBrowser:
             remaining_after = len(self.playlist) - idx - 1
             low_water_at = self._low_water_at
 
+        # Diagnostic — surfaces in backend.log so we can see WHICH branch
+        # the engine takes when a session reaches the last track. Removed
+        # once endless-mode end-of-set is verified across genre + catalog
+        # combinations.
+        cur_id = (current_track or {}).get("id") or "?"
+        cur_name = ((current_track or {}).get("display_name") or "?")[:40]
+        print(
+            f"[engine _maybe_end_or_extend] track={cur_id!r} ({cur_name!r}) "
+            f"endless={endless} remaining_after={remaining_after} "
+            f"low_water_at={'set' if low_water_at else 'None'}",
+            flush=True,
+        )
+
         if not endless:
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: emit SESSION_ENDED (endless OFF)",
+                flush=True,
+            )
             self._emit(SESSION_ENDED)
             return True
         if remaining_after > 0:
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: keep looping (agent appended)",
+                flush=True,
+            )
             return False
         if low_water_at is None:
             with self._lock:
                 self._low_water_at = time.monotonic()
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: start grace timer "
+                f"(PLAYLIST_RUNNING_LOW never fired — first end-of-set ping)",
+                flush=True,
+            )
             return False
-        if (time.monotonic() - low_water_at) < ENDLESS_GRACE_SEC:
+        elapsed = time.monotonic() - low_water_at
+        if elapsed < ENDLESS_GRACE_SEC:
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: wait grace "
+                f"({elapsed:.1f}s of {ENDLESS_GRACE_SEC}s)",
+                flush=True,
+            )
             return False
 
         # Grace elapsed without an append → deterministic fallback.
@@ -1232,8 +1269,19 @@ class LiveEngineBrowser:
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
+        print(
+            f"[engine _maybe_end_or_extend] grace elapsed ({elapsed:.1f}s) — "
+            f"running fallback: genre={genre!r} catalog_size={len(catalog)} "
+            f"exclude_size={len(exclude)}",
+            flush=True,
+        )
         pick = _autoplay_pick(current_track, catalog, genre, exclude)
         if pick is None:
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: _autoplay_pick returned None — "
+                f"emit ENDLESS_WARNING + SESSION_ENDED",
+                flush=True,
+            )
             self._emit(
                 ENDLESS_WARNING,
                 reason="no_candidates",
@@ -1244,6 +1292,11 @@ class LiveEngineBrowser:
             )
             self._emit(SESSION_ENDED)
             return True
+        print(
+            f"[engine _maybe_end_or_extend] DECISION: append fallback track "
+            f"{pick.get('id')!r} ({(pick.get('display_name') or '')[:40]!r})",
+            flush=True,
+        )
         self.append_track(pick)
         return False
 

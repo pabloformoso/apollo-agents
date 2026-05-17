@@ -259,7 +259,11 @@ def test_extend_set_invalid_id(monkeypatch):
         lambda _genre=None: ([{"id": "real-track", "display_name": "Real"}], []),
     )
     result = extend_set("does-not-exist", _ctx(engine))
-    assert "not in catalog" in result.lower()
+    assert "not in the catalog" in result.lower()
+    assert "pick_next_track" in result, (
+        "Error message must coach the LLM to re-run pick_next_track "
+        "(see 1a212dc: track-id discipline)."
+    )
     engine.append_track.assert_not_called()
 
 

@@ -1030,16 +1030,26 @@ async def _live_relay(
             audience_flush_at = None
             return
         cur = now()
+        n = len(pending_requests)
         if (
             last_audience_emit_ts is not None
             and (cur - last_audience_emit_ts) < AUDIENCE_RATELIMIT_SEC
         ):
             # Drop this batch — the agent is still in the cooldown for the
             # previous one. We log on the context for tests / debugging.
+            print(
+                f"[live_relay] DROPPED audience batch of {n} (rate-limited, "
+                f"{cur - last_audience_emit_ts:.1f}s of {AUDIENCE_RATELIMIT_SEC}s cooldown)",
+                flush=True,
+            )
             ctx.setdefault("audience_dropped", []).extend(pending_requests)
             pending_requests = []
             audience_flush_at = None
             return
+        print(
+            f"[live_relay] FLUSH audience batch of {n} to agent",
+            flush=True,
+        )
         await inner_queue.put(
             {
                 "type": "audience_request_batch",

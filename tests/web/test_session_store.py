@@ -56,6 +56,12 @@ def test_to_dict_on_empty_context():
 
 
 def test_to_dict_sanitizes_playlist_fields():
+    """Projection allow-lists the fields the frontend needs and drops
+    everything else. v2.7.3 added ``beatgrid`` + ``waveform_peaks`` to
+    the allow-list so /live can render real waveforms / beat-aligned
+    visuals instead of falling back to the synthetic sin pattern; this
+    test guards both that they ARE surfaced AND that arbitrary extra
+    fields ARE still dropped (no information leak)."""
     s = Session("abc", user_id=1)
     s.context_variables["genre"] = "techno"
     s.context_variables["playlist"] = [
@@ -66,10 +72,51 @@ def test_to_dict_sanitizes_playlist_fields():
             "camelot_key": "9A",
             "duration_sec": 300,
             "genre": "techno",
+            "beatgrid": {"bpm": 128.0, "first_beat_sec": 0.012},
+            "waveform_peaks": [0.1, 0.2, 0.3],
             "secret_field": "should-be-dropped",
+            "file": "/absolute/path/should-not-leak.wav",
         }
     ]
     d = s.to_dict()
     track = d["playlist"][0]
-    assert set(track.keys()) == {"id", "display_name", "bpm", "camelot_key", "duration_sec", "genre"}
+    assert set(track.keys()) == {
+        "id",
+        "display_name",
+        "bpm",
+        "camelot_key",
+        "duration_sec",
+        "genre",
+        "beatgrid",
+        "waveform_peaks",
+    }
+    # Sanity check that the new fields preserve their structure end-to-end.
+    assert track["beatgrid"] == {"bpm": 128.0, "first_beat_sec": 0.012}
+    assert track["waveform_peaks"] == [0.1, 0.2, 0.3]
+    # Negative assertions: arbitrary fields must still be stripped — the
+    # projection is an allow-list, not a deny-list, and a regression that
+    # accidentally widened it could leak file paths or secrets.
+    assert "secret_field" not in track
+    assert "file" not in track
     assert d["genre"] == "techno"
+
+
+def test_to_dict_playlist_missing_beatgrid_or_peaks_is_none():
+    """Legacy entries (catalogged before v2 beatgrid + before the waveform
+    analyser ran) don't have these keys. The projection must surface
+    ``None`` rather than KeyError-ing or omitting the field, so the
+    frontend's ``track.beatgrid ?? null`` fallback fires."""
+    s = Session("abc", user_id=1)
+    s.context_variables["playlist"] = [
+        {
+            "id": "t1",
+            "display_name": "Legacy",
+            "bpm": 100,
+            "camelot_key": "5A",
+            "duration_sec": 200,
+            "genre": "lofi - ambient",
+        }
+    ]
+    track = s.to_dict()["playlist"][0]
+    assert track["beatgrid"] is None
+    assert track["waveform_peaks"] is None
