@@ -1,7 +1,28 @@
 """Unit tests for web/backend/session_store.py in-memory state."""
 from __future__ import annotations
 
+import pytest
+
 from web.backend.session_store import Session, SessionStore
+
+
+@pytest.fixture(autouse=True)
+def _isolated_store_db(tmp_path, monkeypatch):
+    """Point ``SessionStore``'s SQLite at an isolated per-test DB.
+
+    Without this, ``SessionStore._ensure_loaded()`` lazy-loads from the
+    production ``db.DB_PATH`` on first access. On a developer's local
+    machine that DB carries accumulated session rows from real /live
+    sessions, which break every "this store should only have the
+    sessions I created" assertion below. CI happens to pass because the
+    Actions runner has no prior dev state, but the tests were always
+    one stray .db away from breaking — locked down here.
+    """
+    from web.backend import db
+
+    test_db = tmp_path / "session_store.db"
+    monkeypatch.setattr(db, "DB_PATH", test_db)
+    db.init_db()
 
 
 def test_create_returns_unique_ids():
@@ -43,6 +64,19 @@ def test_delete_removes_from_both_maps():
 def test_delete_of_unknown_id_is_noop():
     store = SessionStore()
     store.delete("nonexistent")  # must not raise
+
+
+def test_store_does_not_leak_production_db_rows_into_tests(tmp_path):
+    """Regression for the local-only failure mode that prompted this
+    fixture: a fresh ``SessionStore()`` MUST NOT auto-load sessions
+    from whatever ``db.DB_PATH`` happens to point at. If the autouse
+    fixture above breaks (e.g. someone renames it without renaming
+    references), this test makes the leak visible by asserting the
+    user-session map is empty for an arbitrary user."""
+    store = SessionStore()
+    assert store.get_user_sessions(1) == []
+    assert store.get_user_sessions(42) == []
+    assert store.get("sentinel-id-that-never-existed") is None
 
 
 def test_to_dict_on_empty_context():
