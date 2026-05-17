@@ -268,3 +268,47 @@ def test_live_ws_set_endless_mode_round_trip(
         else:
             raise AssertionError("No endless_mode echo for enabled=False")
         assert store.get(sid).context_variables.get("endless_mode") is False
+
+
+def test_live_ws_set_endless_mode_survives_backend_restart(
+    auth_client, auth_token, mock_pipeline
+):
+    """v2.7.3 regression net for the bug 1a212dc fixed.
+
+    Pre-fix, ``set_endless_mode`` only mutated ``session.context_variables``
+    in memory. A ``uvicorn --reload`` between the toggle and end-of-set
+    wiped the in-memory cache, so ``phase_live`` resumed with a fresh
+    engine reading ``endless_mode=False`` from SQLite while the frontend
+    pill still rendered ON. The post-fix WS handler explicitly calls
+    ``store.save(s)`` so the SQLite row carries the flag across restarts.
+
+    This test simulates the restart by toggling the flag, draining the
+    in-memory cache via ``store._reset()`` (the test helper that forces
+    re-hydration from disk on next access), then re-reading the session.
+    Without the ``store.save(s)`` line we'd see ``False`` here even though
+    the toggle ran. With the fix in place the flag survives.
+    """
+    from web.backend.session_store import store
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    _seed_playlist(auth_client, sid)
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        ws.receive_json()  # initial live_state
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "track_started":
+                break
+        ws.send_json({"type": "set_endless_mode", "enabled": True})
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "endless_mode":
+                break
+
+    # Simulate the backend restart: in-memory store gone, SQLite intact.
+    store._reset()
+    rehydrated = store.get(sid)
+    assert rehydrated is not None, "session row should still exist after restart"
+    assert rehydrated.context_variables.get("endless_mode") is True, (
+        "endless_mode flag must survive a uvicorn reload — pre-fix this "
+        "was False because the WS handler skipped store.save()."
+    )
