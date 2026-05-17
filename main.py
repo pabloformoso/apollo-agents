@@ -526,231 +526,50 @@ def find_beat_near(beat_times, target_sec):
 
 
 # === v3.0 Phase-locked beat matching ===
+#
+# The pure logic lives in ``agent/phase_lock.py`` so the live engines
+# (``LiveEngineLocal`` / ``LiveEngineBrowser``) and this offline pipeline
+# share one source of truth. The pre-v3.0-ports symptoms reported on /live
+# (beats sliding off-grid when pyrubberband stretched a track) traced back
+# to the live engine running its own time-based crossfade while this file
+# did the precision math — never again.
+#
+# The historical names with leading underscores are re-exported below so
+# ``tests/test_phase_lock.py`` (which imports them straight from ``main``)
+# keeps working without a rename pass.
 
-# Pickup heuristic: if the first bar's RMS is below this fraction of the
-# track-mean RMS, treat downbeats[0] as an intro pickup and start at downbeats[1].
-INCOMING_PICKUP_RMS_RATIO = 0.4
-
-# Sample count for the raised-cosine guard at each end of the overlap window.
-# Masks any one-sample discontinuity from rounding while staying inaudible.
-XFADE_EDGE_GUARD_SAMPLES = 64
-
-
-@dataclass
-class PhaseLockPlan:
-    """Output of compute_phase_lock(). All times in seconds of catalog audio.
-
-    Both anchors are downbeat times; cutting each track at its anchor and
-    overlaying with equal-power fades produces sample-accurate phase lock.
-    """
-    outgoing_anchor_catalog_sec: float
-    incoming_anchor_catalog_sec: float
-    xfade_catalog_sec: float
-    ramp_catalog_sec: float
-    phrase_tier: str
-    incoming_pickup_skipped: bool = False
-
-
-@dataclass
-class _GridState:
-    """Mapping catalog→mix time for the BODY portion of the current outgoing track.
-
-    Body has no time-stretch (it plays at native_bpm in the mix), so the
-    mapping is a constant offset. We only need correctness for the body —
-    the next transition's outgoing anchor will live there.
-    """
-    track_id: str
-    duration_catalog_sec: float
-    downbeats_sec: list[float]
-    beats_per_bar: int
-    body_catalog_start_sec: float
-    body_mix_start_sec: float
-
-    def catalog_to_mix(self, catalog_t: float) -> float:
-        return self.body_mix_start_sec + (catalog_t - self.body_catalog_start_sec)
+from agent.phase_lock import (  # noqa: E402
+    INCOMING_PICKUP_RMS_RATIO,
+    XFADE_EDGE_GUARD_SAMPLES,
+    GridState as _GridState,
+    GridTracker as _GridTracker,
+    PhaseLockPlan,
+    compute_phase_lock,
+    find_phrase_anchor,
+    phase_locked_crossfade_np,
+    pick_incoming_anchor as _pick_incoming_anchor,
+)
 
 
-class _GridTracker:
-    """Tracks the current outgoing track's catalog↔mix grid mapping.
+def _phase_locked_crossfade(
+    mix_seg: AudioSegment,
+    incoming_seg: AudioSegment,
+    xfade_samples: int,
+) -> AudioSegment:
+    """``AudioSegment`` wrapper around the numpy-pure equal-power overlay.
 
-    Single source of truth across transitions — the body portion of every
-    transitioned-in track lands at native_bpm, so a simple offset suffices.
-    """
-
-    def __init__(self):
-        self.state: _GridState | None = None
-
-    def set_first(self, *, track_id, duration_catalog_sec, downbeats_sec,
-                  beats_per_bar, body_mix_start_sec=0.0):
-        self.state = _GridState(
-            track_id=track_id,
-            duration_catalog_sec=duration_catalog_sec,
-            downbeats_sec=list(downbeats_sec),
-            beats_per_bar=beats_per_bar,
-            body_catalog_start_sec=0.0,
-            body_mix_start_sec=body_mix_start_sec,
-        )
-
-    def set_after_transition(self, *, track_id, duration_catalog_sec,
-                             downbeats_sec, beats_per_bar,
-                             incoming_anchor_catalog_sec,
-                             xfade_catalog_sec, ramp_catalog_sec,
-                             body_mix_start_sec):
-        body_catalog_start = (incoming_anchor_catalog_sec
-                              + xfade_catalog_sec
-                              + ramp_catalog_sec)
-        self.state = _GridState(
-            track_id=track_id,
-            duration_catalog_sec=duration_catalog_sec,
-            downbeats_sec=list(downbeats_sec),
-            beats_per_bar=beats_per_bar,
-            body_catalog_start_sec=body_catalog_start,
-            body_mix_start_sec=body_mix_start_sec,
-        )
-
-
-def find_phrase_anchor(downbeats: list[float], target_sec: float,
-                       track_duration_sec: float,
-                       min_tail_sec: float = CROSSFADE_SEC + 1.0,
-                       max_offset_sec: float = 4.0) -> tuple[float, str]:
-    """Pick the downbeat closest to target_sec sitting on a 16/8/4-bar phrase boundary.
-
-    Phrase boundary candidates are `downbeats[::N]` for N=16, 8, 4 (counting
-    bars from downbeats[0], which madmom locks to the song's true bar 1).
-    Falls back through the ladder when no candidate fits the constraints,
-    finally returning the nearest plain downbeat. The string return is a
-    diagnostic tier label printed alongside per-transition logging.
-    """
-    if not downbeats:
-        return target_sec, "fallback"
-
-    def _candidates(stride):
-        out = []
-        for i in range(0, len(downbeats), stride):
-            t = downbeats[i]
-            if (track_duration_sec - t) < min_tail_sec:
-                continue
-            if abs(t - target_sec) > max_offset_sec:
-                continue
-            out.append(t)
-        return out
-
-    for stride, label in ((16, "16-bar"), (8, "8-bar"), (4, "4-bar"), (1, "downbeat")):
-        cands = _candidates(stride)
-        if cands:
-            return min(cands, key=lambda t: abs(t - target_sec)), label
-
-    # Last resort: closest beat we know about, even past the tail constraint.
-    return min(downbeats, key=lambda t: abs(t - target_sec)), "fallback"
-
-
-def _pick_incoming_anchor(downbeats: list[float], audio_y: "np.ndarray | None",
-                          sr: int) -> tuple[float, bool]:
-    """Choose the incoming track's anchor downbeat, optionally skipping a pickup bar.
-
-    Returns (anchor_sec, pickup_skipped). When the first bar's energy is
-    well below the track average we advance to downbeats[1] — a cheap way
-    to skip atmospheric pickups / sweeps that would otherwise crossfade in
-    inaudibly.
-    """
-    if not downbeats:
-        return 0.0, False
-    default = float(downbeats[0])
-    if len(downbeats) < 2 or audio_y is None or len(audio_y) == 0:
-        return default, False
-
-    bar0_start = int(round(default * sr))
-    bar0_end = int(round(downbeats[1] * sr))
-    if bar0_end <= bar0_start or bar0_start >= len(audio_y):
-        return default, False
-    bar0 = audio_y[bar0_start:min(bar0_end, len(audio_y))]
-    sample_window = audio_y[: min(len(audio_y), sr * 60)]
-    bar_rms = float(np.sqrt(np.mean(np.square(bar0)))) if len(bar0) else 0.0
-    track_rms = float(np.sqrt(np.mean(np.square(sample_window)))) if len(sample_window) else 0.0
-    if track_rms > 0.0 and bar_rms < INCOMING_PICKUP_RMS_RATIO * track_rms:
-        return float(downbeats[1]), True
-    return default, False
-
-
-def compute_phase_lock(
-    *,
-    outgoing_downbeats: list[float],
-    outgoing_duration_catalog_sec: float,
-    incoming_downbeats: list[float],
-    incoming_audio_y: "np.ndarray | None",
-    incoming_sr: int,
-    target_xfade_sec: float = CROSSFADE_SEC,
-    target_ramp_sec: float = TEMPO_RAMP_SEC,
-) -> PhaseLockPlan:
-    """Plan a downbeat-locked transition between two tracks.
-
-    Both tracks are sliced at a downbeat. Cutting at a downbeat means the
-    first sample of each track's xfade slice IS a downbeat; overlay-adding
-    the two slices puts them in phase by construction. The outgoing anchor
-    is chosen near (duration - xfade) on a phrase boundary; the incoming
-    anchor is its first downbeat (or [1] if the first bar is a quiet pickup).
-    """
-    target_pos = outgoing_duration_catalog_sec - target_xfade_sec
-    outgoing_anchor, tier = find_phrase_anchor(
-        outgoing_downbeats,
-        target_pos,
-        outgoing_duration_catalog_sec,
-        min_tail_sec=target_xfade_sec + 0.5,
-    )
-    incoming_anchor, pickup_skipped = _pick_incoming_anchor(
-        incoming_downbeats, incoming_audio_y, incoming_sr,
-    )
-    return PhaseLockPlan(
-        outgoing_anchor_catalog_sec=float(outgoing_anchor),
-        incoming_anchor_catalog_sec=float(incoming_anchor),
-        xfade_catalog_sec=float(target_xfade_sec),
-        ramp_catalog_sec=float(target_ramp_sec),
-        phrase_tier=tier,
-        incoming_pickup_skipped=pickup_skipped,
-    )
-
-
-def _phase_locked_crossfade(mix_seg: AudioSegment, incoming_seg: AudioSegment,
-                            xfade_samples: int) -> AudioSegment:
-    """Sample-accurate equal-power overlay-add at the tail of `mix_seg`.
-
-    Replaces pydub's AudioSegment.append(crossfade=N), which can only fade
-    symmetrically at the very end of mix. Here the caller has already
-    positioned both segments so that the LAST `xfade_samples` of mix and
-    the FIRST `xfade_samples` of incoming represent the same musical bar
-    at the same downbeat — we just sum them with cos/sin curves so power
-    is preserved. A 64-sample raised-cosine guard at the entry of the
-    outgoing tail masks any 1-sample rounding click.
+    The offline pipeline operates on pydub ``AudioSegment`` instances; the
+    live engines operate on numpy float buffers. The actual cross-fade is
+    one implementation in ``agent.phase_lock``; this wrapper just handles
+    the conversions either side. Falls back to a plain concatenation when
+    the requested overlap doesn't fit (matches pre-v3.0 behaviour).
     """
     mix_y = _segment_to_numpy(mix_seg)
     in_y = _segment_to_numpy(incoming_seg)
     n = min(int(xfade_samples), len(mix_y), len(in_y))
     if n <= 0:
         return mix_seg + incoming_seg
-
-    t = np.linspace(0.0, 1.0, n, endpoint=False, dtype=np.float32)
-    fade_out = np.cos(t * (np.pi / 2.0)).astype(np.float32)
-    fade_in = np.sin(t * (np.pi / 2.0)).astype(np.float32)
-
-    is_stereo = mix_y.ndim == 2
-    if is_stereo:
-        fade_out = fade_out[:, None]
-        fade_in = fade_in[:, None]
-
-    mix_tail = (mix_y[-n:].astype(np.float32) * fade_out)
-    in_head = (in_y[:n].astype(np.float32) * fade_in)
-
-    guard_n = min(XFADE_EDGE_GUARD_SAMPLES, n // 2)
-    if guard_n > 0:
-        ramp = (0.5 - 0.5 * np.cos(
-            np.linspace(0.0, np.pi, guard_n, dtype=np.float32))).astype(np.float32)
-        if is_stereo:
-            ramp = ramp[:, None]
-        mix_tail[:guard_n] *= ramp
-
-    overlap = mix_tail + in_head
-    out = np.concatenate([mix_y[:-n].astype(np.float32), overlap,
-                          in_y[n:].astype(np.float32)], axis=0)
+    out = phase_locked_crossfade_np(mix_y, in_y, n)
     return _numpy_to_segment(out, mix_seg)
 
 
@@ -1029,11 +848,10 @@ def detect_bpm(filepath, genre_folder=""):
     return round(bpm, 1)
 
 
-# Beatgrid schema version. v2 adds downbeats_sec + beats_per_bar + source so
-# the mixer can do downbeat-accurate phase locking. v1 entries (legacy
-# librosa-only beatgrid) still load and the mixer synthesises downbeats from
-# first_beat_sec + bpm.
-BEATGRID_SCHEMA_VERSION = 2
+# Beatgrid schema version is owned by ``agent.phase_lock`` (the single source
+# of truth used by every transition path). Re-imported here so existing
+# call-sites that read ``main.BEATGRID_SCHEMA_VERSION`` keep working.
+from agent.phase_lock import BEATGRID_SCHEMA_VERSION  # noqa: E402
 
 
 def detect_beatgrid(filepath: str, bpm: float | None = None) -> dict:
@@ -1194,30 +1012,12 @@ def _librosa_v2_beatgrid(filepath: str, bpm: float, first_beat: float,
     }
 
 
-def _is_v2_beatgrid(beatgrid: dict | None) -> bool:
-    """True if a stored beatgrid dict has the v2 schema."""
-    if not beatgrid:
-        return False
-    return (
-        beatgrid.get("version", 1) >= BEATGRID_SCHEMA_VERSION
-        and isinstance(beatgrid.get("downbeats_sec"), list)
-        and len(beatgrid["downbeats_sec"]) >= 1
-    )
-
-
-def _synthesise_downbeats_from_v1(beatgrid: dict, track_duration_sec: float) -> list[float]:
-    """Build a v2-style downbeat list from a v1 beatgrid (bpm + first_beat_sec).
-
-    Assumes 4/4. Used to keep mixing functional for un-migrated catalog
-    entries — accurate to within the precision of the original BPM detection.
-    """
-    bpm = float(beatgrid.get("bpm") or 120.0)
-    first_beat = float(beatgrid.get("first_beat_sec") or 0.0)
-    if bpm <= 0 or track_duration_sec <= 0:
-        return [first_beat]
-    bar_sec = (60.0 / bpm) * 4.0
-    n_bars = max(1, int((track_duration_sec - first_beat) / bar_sec) + 1)
-    return [round(first_beat + i * bar_sec, 3) for i in range(n_bars)]
+# Schema-helpers re-exported from the shared module under the historical
+# underscore names so call-sites scattered through ``main.py`` keep working.
+from agent.phase_lock import (  # noqa: E402
+    is_v2_beatgrid as _is_v2_beatgrid,
+    synthesise_downbeats_from_v1 as _synthesise_downbeats_from_v1,
+)
 
 
 def detect_camelot_key(filepath):

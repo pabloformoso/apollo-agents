@@ -417,3 +417,290 @@ class TestBuildMixIntegration:
                 f"click spacing {diff} samples deviates from k={k} bars "
                 f"({k * bar_period_samples}) by more than 20 ms"
             )
+
+
+# ===========================================================================
+# v3.0 — shared module surface (agent.phase_lock)
+# ===========================================================================
+#
+# The block above tests the v3.0 phase-lock behaviour by importing the
+# historical underscore names from ``main``. The block below tests the
+# new public surface in ``agent.phase_lock`` that the live engines
+# (LiveEngineLocal, LiveEngineBrowser) consume. Together the two blocks
+# pin both the public API and the backward-compat re-exports.
+
+from agent import phase_lock as phase_lock_mod  # noqa: E402
+from agent.phase_lock import (  # noqa: E402
+    BEATGRID_SCHEMA_VERSION,
+    DEFAULT_CROSSFADE_SEC,
+    DEFAULT_TEMPO_RAMP_SEC,
+    GridState,
+    GridTracker,
+    LiveTransitionPlan,
+    build_live_transition_plan,
+    is_v2_beatgrid,
+    phase_locked_crossfade_np,
+    pick_incoming_anchor,
+    resolve_downbeats,
+    synthesise_downbeats_from_v1,
+)
+
+
+class TestMainReExports:
+    """The historical underscore-prefixed names in ``main`` MUST resolve to
+    the same objects as the public names in ``agent.phase_lock``. Two
+    different implementations would re-introduce exactly the live-vs-offline
+    drift the extraction was meant to kill."""
+
+    def test_grid_state_re_export_is_same_class(self):
+        assert main_module._GridState is GridState
+
+    def test_grid_tracker_re_export_is_same_class(self):
+        assert main_module._GridTracker is GridTracker
+
+    def test_find_phrase_anchor_is_same_function(self):
+        assert main_module.find_phrase_anchor is phase_lock_mod.find_phrase_anchor
+
+    def test_compute_phase_lock_is_same_function(self):
+        assert main_module.compute_phase_lock is phase_lock_mod.compute_phase_lock
+
+    def test_pick_incoming_anchor_is_same_function(self):
+        assert main_module._pick_incoming_anchor is pick_incoming_anchor
+
+    def test_is_v2_beatgrid_re_export(self):
+        assert main_module._is_v2_beatgrid is is_v2_beatgrid
+
+    def test_synthesise_downbeats_re_export(self):
+        assert main_module._synthesise_downbeats_from_v1 is synthesise_downbeats_from_v1
+
+    def test_beatgrid_schema_version_value(self):
+        assert main_module.BEATGRID_SCHEMA_VERSION == BEATGRID_SCHEMA_VERSION == 2
+
+    def test_default_constants_match_main(self):
+        # The duplicated defaults in phase_lock.py and the constants in
+        # main.py must stay in sync. The module-level docstring promises this.
+        assert DEFAULT_CROSSFADE_SEC == float(main_module.CROSSFADE_SEC)
+        assert DEFAULT_TEMPO_RAMP_SEC == float(main_module.TEMPO_RAMP_SEC)
+
+
+class TestResolveDownbeats:
+    """``resolve_downbeats`` is the public fallback ladder used by both live
+    engines. Wrong branching here = wrong anchors = the live-vs-offline
+    bug we are explicitly fixing."""
+
+    def test_v2_beatgrid_uses_explicit_downbeats(self):
+        bg = {
+            "version": 2,
+            "downbeats_sec": [0.0, 2.0, 4.0, 6.0],
+            "beats_per_bar": 4,
+            "bpm": 120.0,
+            "first_beat_sec": 0.0,
+        }
+        downbeats, bpb = resolve_downbeats(bg, track_duration_sec=10.0)
+        assert downbeats == [0.0, 2.0, 4.0, 6.0]
+        assert bpb == 4
+
+    def test_v2_beatgrid_with_3_4_passes_beats_per_bar_through(self):
+        """The 3/4 path matters for waltz / handpan-style genres. madmom
+        is configured with beats_per_bar=[3, 4] and the live engine must
+        honour the detected meter."""
+        bg = {
+            "version": 2,
+            "downbeats_sec": [0.0, 1.5, 3.0],
+            "beats_per_bar": 3,
+            "bpm": 120.0,
+            "first_beat_sec": 0.0,
+        }
+        _, bpb = resolve_downbeats(bg, track_duration_sec=10.0)
+        assert bpb == 3
+
+    def test_v1_beatgrid_synthesises_4_4_grid(self):
+        bg = {"bpm": 120.0, "first_beat_sec": 0.0}
+        # No version field → v1. Should synthesise a 4/4 grid: bar = 2.0 s.
+        downbeats, bpb = resolve_downbeats(bg, track_duration_sec=8.0)
+        assert bpb == 4
+        assert downbeats[0] == 0.0
+        # 4 bars in 8 s + 1 extra bar = 5 entries (the synthesiser
+        # over-shoots by one bar so the last anchor is still reachable
+        # even if the duration estimate is slightly low).
+        assert len(downbeats) >= 4
+        assert all(
+            abs((b - a) - 2.0) < 0.005 for a, b in zip(downbeats, downbeats[1:])
+        )
+
+    def test_none_beatgrid_returns_empty_downbeats(self):
+        downbeats, bpb = resolve_downbeats(None, track_duration_sec=10.0)
+        assert downbeats == []
+        # 4/4 default lets the caller compose a bar_sec without
+        # special-casing the None branch separately.
+        assert bpb == 4
+
+    def test_empty_beatgrid_dict_returns_empty(self):
+        downbeats, bpb = resolve_downbeats({}, track_duration_sec=10.0)
+        assert downbeats == []
+        assert bpb == 4
+
+
+class TestBuildLiveTransitionPlan:
+    """``build_live_transition_plan`` converts the catalog-time phase-lock
+    plan into the sample-space offsets the live engines actually consume
+    when positioning decks. Sample-index math is where rounding errors
+    would visibly shift downbeats off-grid in the rendered audio, so the
+    arithmetic gets pinned here."""
+
+    SR = 44100
+
+    def _v2(self, downbeats):
+        return {
+            "version": 2,
+            "downbeats_sec": list(downbeats),
+            "beats_per_bar": 4,
+            "bpm": 128.0,
+            "first_beat_sec": downbeats[0],
+        }
+
+    def test_returns_live_transition_plan_dataclass(self):
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=self._v2([round(i * 1.875, 3) for i in range(32)]),
+            outgoing_duration_sec=60.0,
+            incoming_beatgrid=self._v2([round(i * 1.875, 3) for i in range(32)]),
+            incoming_duration_sec=60.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+        )
+        assert isinstance(plan, LiveTransitionPlan)
+        assert plan.sample_rate == self.SR
+
+    def test_sample_offsets_match_rounded_catalog_times(self):
+        """The chosen anchors must convert to sample indices via the engine
+        sample rate without surprises. Rounding rather than truncating
+        keeps the maximum error to half a sample."""
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=self._v2([round(i * 1.875, 3) for i in range(32)]),
+            outgoing_duration_sec=60.0,
+            incoming_beatgrid=self._v2([0.0, 1.875, 3.75]),
+            incoming_duration_sec=10.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+        )
+        catalog = plan.plan
+        assert plan.outgoing_anchor_sample == int(
+            round(catalog.outgoing_anchor_catalog_sec * self.SR)
+        )
+        assert plan.incoming_start_sample == int(
+            round(catalog.incoming_anchor_catalog_sec * self.SR)
+        )
+        # 12 s @ 44.1 kHz = 529 200 samples exactly.
+        assert plan.xfade_samples == 12 * self.SR
+
+    def test_legacy_v1_outgoing_synthesises_grid_for_anchor(self):
+        """If only one side has v2 data, ``build_live_transition_plan``
+        must still resolve via the v1 synthesiser rather than refuse —
+        this is the path that fires for catalogs that haven't yet been
+        regenerated via ``--regenerate-beatgrid``."""
+        plan = build_live_transition_plan(
+            outgoing_beatgrid={"bpm": 128.0, "first_beat_sec": 0.0},
+            outgoing_duration_sec=60.0,
+            incoming_beatgrid=self._v2([0.0, 1.875, 3.75]),
+            incoming_duration_sec=10.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+        )
+        # The synthesised grid still produces a phrase-locked anchor;
+        # phrase_tier may be a coarser bracket but should not be "fallback".
+        assert plan.phrase_tier != "fallback"
+        assert plan.outgoing_anchor_sample > 0
+
+    def test_missing_beatgrid_both_sides_falls_back_gracefully(self):
+        """Both sides missing → empty downbeats → fallback. Engines use
+        ``phrase_tier == "fallback"`` as the signal to drop into the
+        legacy linear-fade path. The transition plan must NOT raise."""
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=None,
+            outgoing_duration_sec=60.0,
+            incoming_beatgrid=None,
+            incoming_duration_sec=10.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+        )
+        assert plan.phrase_tier == "fallback"
+
+    def test_ramp_sec_carries_through(self):
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            outgoing_duration_sec=20.0,
+            incoming_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            incoming_duration_sec=20.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=8.0,
+            target_ramp_sec=4.0,
+        )
+        assert plan.plan.ramp_catalog_sec == 4.0
+
+
+class TestPhaseLockedCrossfadeNp:
+    """The numpy-pure crossfade is what every path eventually runs. The
+    AudioSegment wrapper in main.py just routes through it. Pin the
+    equal-power property directly on the numpy version so a change in
+    main.py's wrapper can't silently break the energy curve."""
+
+    def test_equal_power_curves_sum_to_unity_power(self):
+        # Two constant-amplitude mono tracks: their squared sum across
+        # the overlap should be constant at 1.0 if cos² + sin² = 1.
+        mix = np.ones(1000, dtype=np.float32)
+        inc = np.ones(1000, dtype=np.float32)
+        out = phase_locked_crossfade_np(mix, inc, xfade_samples=500)
+        # Sample the middle of the overlap (after the 64-sample guard).
+        overlap_region = out[500 + 100 : 500 + 400]
+        # cos(t) + sin(t) is ≤ √2; squared sum stays ≤ 2. For equal-power
+        # crossfade with cos/sin curves both tracks contribute, and
+        # cos² + sin² = 1 means each sample's POWER (square) is 1.
+        # The amplitude itself is cos + sin ≤ √2, but with both inputs
+        # at 1.0 we get amplitude = cos(t) + sin(t) which peaks at √2.
+        assert np.all(overlap_region > 0.99)
+        assert np.all(overlap_region < 1.42)
+
+    def test_short_buffers_fall_back_to_concat(self):
+        mix = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        inc = np.array([4.0, 5.0], dtype=np.float32)
+        out = phase_locked_crossfade_np(mix, inc, xfade_samples=100)
+        # Requested 100 samples but only 2 available on incoming side →
+        # crossfade still runs on 2 samples, not a concat.
+        assert len(out) == len(mix) + len(inc) - min(2, 100)
+
+    def test_zero_xfade_returns_concat(self):
+        mix = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        inc = np.array([4.0, 5.0, 6.0], dtype=np.float32)
+        out = phase_locked_crossfade_np(mix, inc, xfade_samples=0)
+        np.testing.assert_array_equal(out, np.array([1, 2, 3, 4, 5, 6], dtype=np.float32))
+
+    def test_stereo_preserved(self):
+        mix = np.ones((1000, 2), dtype=np.float32)
+        mix[:, 1] *= 0.5  # right channel quieter
+        inc = np.ones((1000, 2), dtype=np.float32)
+        out = phase_locked_crossfade_np(mix, inc, xfade_samples=500)
+        assert out.ndim == 2
+        assert out.shape[1] == 2
+        # Tail of pre-overlap region keeps the L/R asymmetry of mix.
+        assert out[400, 0] == 1.0
+        assert out[400, 1] == 0.5
+
+    def test_edge_guard_attenuates_first_sample(self):
+        """The 64-sample raised-cosine guard masks a one-sample
+        discontinuity at the overlap entry. First overlap sample must be
+        attenuated; without the guard a discontinuity would show as a
+        click in the output."""
+        mix = np.ones(2000, dtype=np.float32)
+        inc = np.ones(2000, dtype=np.float32) * 2.0
+        out = phase_locked_crossfade_np(mix, inc, xfade_samples=1000)
+        overlap_start = 1000  # mix ends at index 1000, overlap starts there
+        # First sample of overlap: guard ramp at 0 → mix_tail ≈ 0, incoming
+        # contribution at t=0 is sin(0) * 2 = 0. So first sample ≈ 0.
+        assert out[overlap_start] < 0.1
+        # 64 samples in, ramp is full strength.
+        assert out[overlap_start + 64] > 0.05
