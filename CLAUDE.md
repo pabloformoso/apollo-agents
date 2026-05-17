@@ -20,6 +20,20 @@ python main.py --name "midnight-lofi" --genre "lofi - ambient" --duration 60
 uv run python agent/run.py
 ```
 
+## Web app
+
+Backend (FastAPI) on `:4020`, frontend (Next.js) on `:4010`. Run both from the project root in the **main checkout** (not a worktree — worktrees lack tracks/.env/venv).
+
+```bash
+# Backend — install web deps once, then run from project root
+uv sync --group web
+uv run uvicorn backend.app:app --reload --port 4020 --app-dir web
+
+# Frontend (in another shell)
+cd web/frontend
+npm run dev   # serves on :4010, proxies /api to :4020
+```
+
 `--genre` must match a subfolder name under `tracks/` (case-insensitive).
 `--duration` is in minutes (soft target — last track is never cut).
 
