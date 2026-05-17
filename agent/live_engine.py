@@ -35,6 +35,12 @@ from typing import Callable, Protocol, runtime_checkable
 import numpy as np
 import soundfile as sf
 
+from agent.phase_lock import (
+    XFADE_EDGE_GUARD_SAMPLES,
+    LiveTransitionPlan,
+    build_live_transition_plan,
+)
+
 # sounddevice requires PortAudio — guarded so the module can be imported in
 # headless / CI environments without audio hardware.
 try:
@@ -185,6 +191,16 @@ class LiveEngineLocal:
         # Watchdog signals
         self._cf_just_finished: bool = False  # set by callback, cleared by watchdog
         self._prev_idx: int = 0
+
+        # v3.0 — phase-lock plan computed once per transition by the
+        # prestretch worker. Consumed by ``_cf_point_samples`` (to pick the
+        # outgoing-anchor sample) and by ``_audio_callback`` (so the
+        # equal-power cos/sin curves run over the exact same window the
+        # offline render uses). Reset to ``None`` after each successful
+        # crossfade so a degraded next-transition (e.g. missing beatgrid)
+        # cleanly falls back to the legacy hot-cue / linear-fade path
+        # without inheriting stale anchor data.
+        self._transition_plan: LiveTransitionPlan | None = None
 
         # Threads
         self._stream: sd.OutputStream | None = None
@@ -527,6 +543,12 @@ class LiveEngineLocal:
                 self._pos += n
 
             elif self._state == "crossfading":
+                # v3.0 — equal-power cos/sin curves over the absolute
+                # position within the cf_len window, with a 64-sample
+                # raised-cosine guard at the entry to mask any rounding
+                # click. Replaces the pre-v3.0 linear ramp so the live
+                # engine sounds identical to the offline render's
+                # ``_phase_locked_crossfade`` for the same input.
                 cf_elapsed = self._pos - self._cf_start
                 cf_len = int(self.crossfade_sec * _SAMPLE_RATE)
                 remaining = cf_len - cf_elapsed
@@ -539,12 +561,44 @@ class LiveEngineLocal:
                     in_chunk = self._next_audio[self._next_pos : i_end]
                     actual = min(len(out_chunk), len(in_chunk))
                     if actual > 0:
-                        t = np.linspace(
-                            cf_elapsed / cf_len,
-                            (cf_elapsed + actual) / cf_len,
-                            actual, endpoint=False,
-                        ).reshape(-1, 1).astype(np.float32)
-                        outdata[:actual] = out_chunk[:actual] * (1.0 - t) + in_chunk[:actual] * t
+                        # Phase angle for each sample of this chunk inside
+                        # the [0, π/2] crossfade arc. Using the absolute
+                        # callback positions (cf_elapsed..cf_elapsed+actual)
+                        # rather than a fresh linspace keeps the curve
+                        # mathematically identical regardless of how
+                        # sounddevice chunks the stream.
+                        angles = np.linspace(
+                            (cf_elapsed / cf_len) * (np.pi / 2.0),
+                            ((cf_elapsed + actual) / cf_len) * (np.pi / 2.0),
+                            actual, endpoint=False, dtype=np.float32,
+                        )
+                        fade_out = np.cos(angles).reshape(-1, 1)
+                        fade_in = np.sin(angles).reshape(-1, 1)
+                        mixed_out = out_chunk[:actual] * fade_out
+                        # Raised-cosine edge guard at the very entry of
+                        # the outgoing tail. Matches the offline path's
+                        # ``XFADE_EDGE_GUARD_SAMPLES``. If this chunk lies
+                        # entirely past the guard window, the slice is
+                        # empty and nothing is attenuated.
+                        guard_total = min(XFADE_EDGE_GUARD_SAMPLES, cf_len // 2)
+                        if guard_total > 0 and cf_elapsed < guard_total:
+                            g_lo = cf_elapsed
+                            g_hi = min(cf_elapsed + actual, guard_total)
+                            g_n = g_hi - g_lo
+                            if g_n > 0:
+                                ramp = (
+                                    0.5
+                                    - 0.5
+                                    * np.cos(
+                                        np.linspace(
+                                            (g_lo / guard_total) * np.pi,
+                                            (g_hi / guard_total) * np.pi,
+                                            g_n, endpoint=False, dtype=np.float32,
+                                        )
+                                    )
+                                ).reshape(-1, 1)
+                                mixed_out[:g_n] *= ramp
+                        outdata[:actual] = mixed_out + in_chunk[:actual] * fade_in
                         if actual < frames:
                             outdata[actual:] = 0
                         self._pos += actual
@@ -562,6 +616,9 @@ class LiveEngineLocal:
                     self._next_audio = None
                     self._extend_samples = 0
                     self._cf_just_finished = True  # watchdog will emit events
+                    # Reset the phase-lock plan — the next transition
+                    # will build its own from the new current track.
+                    self._transition_plan = None
 
     # ------------------------------------------------------------------
     # Watchdog thread
@@ -708,14 +765,84 @@ class LiveEngineLocal:
         audio = self._load_audio(next_track)
         audio = self._time_stretch(audio, next_track, current_track)
 
-        in_pt = self._in_point_of(next_track)
-        # Trim to in-point
+        # v3.0 — compute the phase-lock plan now that the post-stretch
+        # incoming buffer exists. ``incoming_audio_y`` lets
+        # ``pick_incoming_anchor`` run its pickup-skip RMS heuristic on
+        # the SAME bytes the audio callback will play, so skipping a
+        # quiet intro can't disagree with what the user hears.
+        plan = self._build_transition_plan_for_next(
+            current_track, next_track, audio,
+        )
+
+        # Pick the start offset:
+        #   - With a phase-lock plan: trim to the chosen incoming anchor
+        #     downbeat (or downbeats[1] if pickup-skip fired) so the
+        #     incoming buffer's sample 0 IS a downbeat — that's what
+        #     makes the overlay-add phase-lock.
+        #   - Without a plan (no v2 beatgrid, both sides missing, fallback
+        #     tier): fall back to the legacy IN hot cue / 0 path.
+        if plan is not None and plan.phrase_tier != "fallback":
+            in_pt = max(0, min(plan.incoming_start_sample, len(audio)))
+        else:
+            in_pt = self._in_point_of(next_track)
         audio_trimmed = audio[in_pt:] if in_pt < len(audio) else audio
 
         with self._lock:
             self._next_audio = audio_trimmed
             self._in_point = 0  # already trimmed to in-point
+            self._transition_plan = plan
         self._prestretch_ready.set()
+
+    def _build_transition_plan_for_next(
+        self,
+        current_track: dict,
+        next_track: dict,
+        next_audio_post_stretch: np.ndarray,
+    ) -> LiveTransitionPlan | None:
+        """Compute the phase-lock plan for the upcoming transition.
+
+        Returns ``None`` if either side is missing enough metadata for
+        the plan to be meaningful (e.g. a track came in with no
+        ``duration_sec`` at all). The caller treats ``None`` as
+        equivalent to the legacy fallback path.
+
+        Note on the catalog vs. post-stretch duration: the outgoing
+        beatgrid lives in catalog time (un-stretched), while the body
+        of the current track is playing at native_bpm and so the
+        outgoing-anchor catalog sample == outgoing-anchor playback
+        sample within ``_audio``. The incoming side has been stretched
+        already, so we feed the POST-stretch buffer (and the
+        recalibrated duration) to ``build_live_transition_plan`` and
+        use the catalog beatgrid's downbeats AS IF they apply to the
+        stretched signal — true to ±1 sample given how pyrubberband
+        preserves relative positions across the stretch.
+        """
+        outgoing_beatgrid = current_track.get("beatgrid")
+        incoming_beatgrid = next_track.get("beatgrid")
+        outgoing_duration = float(
+            current_track.get("duration_sec")
+            or (len(self._audio) / _SAMPLE_RATE if self._audio is not None else 0.0)
+        )
+        incoming_duration = float(len(next_audio_post_stretch)) / _SAMPLE_RATE
+        if outgoing_duration <= 0 or incoming_duration <= 0:
+            return None
+
+        # ``incoming_audio_y`` is mono'd for the RMS heuristic — the
+        # full stereo buffer would just double the compute for no gain.
+        if next_audio_post_stretch.ndim == 2:
+            incoming_y = next_audio_post_stretch.mean(axis=1)
+        else:
+            incoming_y = next_audio_post_stretch
+
+        return build_live_transition_plan(
+            outgoing_beatgrid=outgoing_beatgrid,
+            outgoing_duration_sec=outgoing_duration,
+            incoming_beatgrid=incoming_beatgrid,
+            incoming_duration_sec=incoming_duration,
+            incoming_audio_y=incoming_y,
+            sample_rate=_SAMPLE_RATE,
+            target_xfade_sec=float(self.crossfade_sec),
+        )
 
     # ------------------------------------------------------------------
     # Audio helpers
@@ -753,7 +880,23 @@ class LiveEngineLocal:
         return stretched.astype(np.float32)
 
     def _cf_point_samples(self, track: dict) -> int:
-        """Return sample index where crossfade should begin, respecting hot cues + extensions."""
+        """Return sample index where crossfade should begin.
+
+        Priority ladder:
+          1. v3.0 phase-lock plan (``self._transition_plan``) — produced
+             by the prestretch worker from the v2 beatgrid; honours
+             16/8/4-bar phrase boundaries. This is the unified path that
+             matches the offline render's ``build_mix`` behaviour.
+          2. OUT hot cue from the catalog (legacy v2.x).
+          3. ``duration_sec - crossfade_sec - 5`` (legacy v1.x).
+
+        ``_extend_samples`` is added at every level so the agent's
+        ``extend_track`` tool keeps shifting the cut point regardless of
+        which path produced the base anchor.
+        """
+        plan = self._transition_plan
+        if plan is not None and plan.phrase_tier != "fallback":
+            return plan.outgoing_anchor_sample + self._extend_samples
         cues = track.get("hot_cues", [])
         out_cues = [c for c in cues if c.get("type") == "out"]
         if out_cues:
