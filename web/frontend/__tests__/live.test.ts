@@ -16,7 +16,12 @@ import {
 } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
-import { useLiveSession, useIsLiveActive } from "@/lib/live";
+import {
+  buildEqualPowerCurve,
+  useIsLiveActive,
+  useLiveSession,
+  type PhaseLockPayload,
+} from "@/lib/live";
 
 // ── Fake WebSocket ─────────────────────────────────────────────────────────
 class FakeWebSocket {
@@ -128,13 +133,20 @@ class FakeAudioElement {
 }
 
 class FakeGainNode {
+  static instances: FakeGainNode[] = [];
   gain = {
     value: 1,
     cancelScheduledValues: vi.fn(),
     setValueAtTime: vi.fn(),
     linearRampToValueAtTime: vi.fn(),
+    // v3.0 — equal-power phase-lock curves go through this method
+    // instead of linearRampToValueAtTime.
+    setValueCurveAtTime: vi.fn(),
   };
   connect = vi.fn(() => this);
+  constructor() {
+    FakeGainNode.instances.push(this);
+  }
 }
 
 class FakeAudioContext {
@@ -180,6 +192,7 @@ afterEach(() => {
   FakeAudioElement.lastInstance = null;
   FakeAudioElement.instances = [];
   FakeAudioElement.nextPlayBehavior = "resolve";
+  FakeGainNode.instances = [];
 });
 
 async function flushOpen() {
@@ -1295,6 +1308,254 @@ describe("useLiveSession", () => {
         vi.useRealTimers();
       }
     });
+  });
+
+  // =======================================================================
+  // v3.0 — phase-lock wiring on the engine_command:crossfade path.
+  //
+  // These tests pin the surface that pairs with agent/live_engine.py's
+  // LiveEngineBrowser phase-lock emit. The whole reason this WS payload
+  // exists is so the frontend's WebAudio scheduler stops disagreeing
+  // with what main.build_mix and LiveEngineLocal already do. A
+  // regression here would silently push /live back to its pre-v3.0
+  // off-grid linear-fade behaviour.
+  // =======================================================================
+
+  describe("v3.0 phase-lock crossfade", () => {
+    const v2Track = (id: string, name: string) => ({
+      id,
+      display_name: name,
+      bpm: 128,
+      camelot_key: "8A",
+      duration_sec: 60,
+      beatgrid: {
+        version: 2,
+        bpm: 128,
+        first_beat_sec: 0,
+        downbeats_sec: [0, 1.875, 3.75, 5.625],
+        beats_per_bar: 4,
+        source: "madmom" as const,
+      },
+    });
+
+    const phaseLockPayload = {
+      outgoing_anchor_sec: 48.0,
+      incoming_anchor_sec: 1.875,
+      xfade_sec: 12.0,
+      phrase_tier: "16-bar",
+      incoming_pickup_skipped: true,
+      edge_guard_samples: 64,
+      sample_rate: 44100,
+    };
+
+    async function bootstrapAndStart(sessionId: string) {
+      const { result } = renderHook(() => useLiveSession(sessionId));
+      await flushOpen();
+      const playlist = [v2Track("A", "Track A"), v2Track("B", "Track B")];
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: sessionId,
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      return { result, playlist };
+    }
+
+    it("uses setValueCurveAtTime (equal-power) when phase_lock is present", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-1");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLockPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Both gain nodes received the equal-power curve, not a linear ramp.
+      const curveCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.setValueCurveAtTime.mock.calls,
+      );
+      expect(curveCalls.length).toBeGreaterThanOrEqual(2);
+      // Two ramps wired: one fading out, one fading in. The first sample of
+      // a fade-out curve is 1 (cos(0)); first sample of fade-in is 0 (sin(0)).
+      const firstSamples = curveCalls
+        .map((call) => (call[0] as Float32Array)[0])
+        .sort();
+      expect(firstSamples[0]).toBeLessThan(0.01); // fade-in starts at 0
+      expect(firstSamples[1]).toBeGreaterThan(0.99); // fade-out starts at 1
+      // Linear ramp must NOT be invoked when phase-lock is in play.
+      const linearCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.linearRampToValueAtTime.mock.calls,
+      );
+      expect(linearCalls).toHaveLength(0);
+    });
+
+    it("falls back to linearRampToValueAtTime when phase_lock is missing", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-2");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          // no phase_lock — legacy catalog without v2 beatgrid
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const linearCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.linearRampToValueAtTime.mock.calls,
+      );
+      expect(linearCalls.length).toBeGreaterThanOrEqual(2);
+      const curveCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.setValueCurveAtTime.mock.calls,
+      );
+      expect(curveCalls).toHaveLength(0);
+    });
+
+    it("seeks the incoming deck to incoming_anchor_sec before play", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-3");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLockPayload, // incoming_anchor_sec = 1.875
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // The incoming deck is whichever was newly populated with track B's
+      // streamUrl. Its currentTime must equal the anchor BEFORE play.
+      const incomingDeck = FakeAudioElement.instances.find(
+        (el) => el.currentTime > 0 && el.src.includes("B"),
+      );
+      expect(incomingDeck).toBeDefined();
+      expect(incomingDeck!.currentTime).toBeCloseTo(1.875, 3);
+      // Also registers a loadedmetadata listener so the seek survives a
+      // late metadata load (some browsers reset currentTime when metadata
+      // becomes available).
+      expect(incomingDeck!.addEventListener).toHaveBeenCalledWith(
+        "loadedmetadata",
+        expect.any(Function),
+      );
+    });
+
+    it("does NOT seek when incoming_anchor_sec is 0 (no pickup skip needed)", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-4");
+      const baselinePayload = {
+        ...phaseLockPayload,
+        incoming_anchor_sec: 0,
+        incoming_pickup_skipped: false,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: baselinePayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // currentTime should still be 0 — no anchor seek means no listener,
+      // no pre-positioning. The "incoming" deck is the one with track B src.
+      const incomingDeck = FakeAudioElement.instances.find((el) =>
+        el.src.includes("B"),
+      );
+      expect(incomingDeck).toBeDefined();
+      expect(incomingDeck!.currentTime).toBe(0);
+    });
+
+    it("falls back to crossfade_sec when phase_lock.xfade_sec is missing", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-5");
+      const partialPayload = {
+        incoming_anchor_sec: 1.875,
+        // xfade_sec missing — payload is partial / malformed
+        phrase_tier: "16-bar",
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 7,
+          phase_lock: partialPayload as unknown as PhaseLockPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Missing xfade_sec → linear-ramp fallback at the engine's
+      // crossfade_sec (7 here, not the payload-default 12). Verifies the
+      // partial-payload defensive branch.
+      const linearCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.linearRampToValueAtTime.mock.calls,
+      );
+      expect(linearCalls.length).toBeGreaterThan(0);
+    });
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// v3.0 — buildEqualPowerCurve helper (pure function, no React/WS state)
+// ───────────────────────────────────────────────────────────────────────────
+
+describe("buildEqualPowerCurve", () => {
+  it("fade-out curve starts at 1 and ends at 0", () => {
+    const curve = buildEqualPowerCurve("out");
+    expect(curve[0]).toBeCloseTo(1.0, 5);
+    expect(curve[curve.length - 1]).toBeCloseTo(0.0, 5);
+  });
+
+  it("fade-in curve starts at 0 and ends at 1", () => {
+    const curve = buildEqualPowerCurve("in");
+    expect(curve[0]).toBeCloseTo(0.0, 5);
+    expect(curve[curve.length - 1]).toBeCloseTo(1.0, 5);
+  });
+
+  it("squared sum stays at unity power across the overlap", () => {
+    // cos²(t·π/2) + sin²(t·π/2) = 1 — the whole point of "equal-power"
+    // crossfading. If a future contributor switches to e.g. linear ramps
+    // here, the perceived loudness will dip in the middle of the overlap
+    // and this assertion catches it.
+    const fadeOut = buildEqualPowerCurve("out");
+    const fadeIn = buildEqualPowerCurve("in");
+    for (let i = 0; i < fadeOut.length; i++) {
+      const power = fadeOut[i] ** 2 + fadeIn[i] ** 2;
+      expect(power).toBeCloseTo(1.0, 4);
+    }
+  });
+
+  it("midpoint is √2/2 for both curves (45° on the cos/sin arc)", () => {
+    const mid = Math.floor(257 / 2);
+    expect(buildEqualPowerCurve("out")[mid]).toBeCloseTo(Math.SQRT1_2, 2);
+    expect(buildEqualPowerCurve("in")[mid]).toBeCloseTo(Math.SQRT1_2, 2);
+  });
+
+  it("custom sample count produces matching length", () => {
+    expect(buildEqualPowerCurve("out", 64)).toHaveLength(64);
+    expect(buildEqualPowerCurve("in", 1024)).toHaveLength(1024);
   });
 });
 
