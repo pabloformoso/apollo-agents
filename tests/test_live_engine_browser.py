@@ -456,6 +456,9 @@ class TestBrowserPhaseLockPayloadShape:
             "incoming_pickup_skipped",
             "edge_guard_samples",
             "sample_rate",
+            # v3.1 — tempo-match rates for the browser playbackRate path.
+            "incoming_rate",
+            "outgoing_rate",
         }
 
     def test_payload_empty_dict_when_no_plan(self):
@@ -471,6 +474,81 @@ class TestBrowserPhaseLockPayloadShape:
         engine = LiveEngineBrowser(crossfade_sec=12)
         engine.play([_track("a"), _track("b")])  # no beatgrid → fallback
         assert engine._phase_lock_payload() == {}
+
+
+class TestBrowserPhaseLockTempoMatching:
+    """v3.1 — tempo-match playback rate.
+
+    The browser path can't run pyrubberband, so it mimics CLI behaviour by
+    setting ``HTMLMediaElement.playbackRate`` on the incoming deck before
+    play. The backend pre-computes the rate so all three paths (offline /
+    CLI / browser) make the same stretch decision."""
+
+    def test_incoming_rate_is_one_when_bpms_match(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=128.0), _v2_track("b", bpm=128.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+    def test_incoming_rate_is_one_when_delta_within_threshold(self):
+        """5-BPM delta is the threshold — exactly equal still counts as
+        "no audible benefit from stretching" (mirrors CLI behaviour)."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=128.0), _v2_track("b", bpm=124.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+    def test_incoming_rate_scales_when_delta_exceeds_threshold(self):
+        """120 BPM outgoing → 130 BPM incoming: incoming must be slowed
+        to 120/130 ≈ 0.923 so the two tracks crossfade at the same BPM.
+        Sign convention matches the CLI ``_time_stretch`` (and main's
+        compute_transition_bpm "match outgoing" branch): ratio
+        = outgoing / incoming."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=120.0), _v2_track("b", bpm=130.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == round(120.0 / 130.0, 6)
+
+    def test_incoming_rate_clamped_to_stretch_max(self):
+        """A huge BPM jump (60 → 180) would otherwise produce a 0.333
+        rate that's both unmusical and crashes browsers. Clamp keeps it
+        at 1/1.5 ≈ 0.667 — same safety bound as CLI's _STRETCH_MIN."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=60.0), _v2_track("b", bpm=180.0)]
+        )
+        payload = engine._phase_lock_payload()
+        from agent.phase_lock import STRETCH_RATIO_MIN
+        assert payload["incoming_rate"] == round(STRETCH_RATIO_MIN, 6)
+
+    def test_outgoing_rate_is_always_one_today(self):
+        """Phase 1 ships with ``outgoing_rate == 1.0`` for both small and
+        large BPM deltas. Meet-in-middle stretching on the outgoing deck
+        is reserved for Phase 2 (alongside backend pre-stretching for
+        large ratios where playbackRate quality degrades)."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=120.0), _v2_track("b", bpm=130.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["outgoing_rate"] == 1.0
+
+    def test_incoming_rate_is_one_when_outgoing_bpm_missing(self):
+        """Legacy catalog entries with no BPM must not crash or produce a
+        runaway rate. The backend treats missing BPM as "skip the stretch"
+        — frontend keeps playbackRate at 1.0."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        track_a = _v2_track("a", bpm=120.0)
+        track_a["bpm"] = 0  # simulate missing/invalid BPM in catalog
+        engine.play([track_a, _v2_track("b", bpm=130.0)])
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
 
 
 class TestBrowserNoDeadlockOnReportPlaybackPos:

@@ -94,6 +94,12 @@ class FakeAudioElement {
   paused = true;
   preload = "auto";
   crossOrigin: string | null = null;
+  // v3.1 — production code sets ``preservesPitch`` and ``playbackRate``
+  // on the deck before play() to tempo-match the incoming track. Mock
+  // them as plain writable properties so the assignment doesn't throw
+  // and tests can assert the value the hook applied.
+  preservesPitch = true;
+  playbackRate = 1.0;
   // Listener bus so the v2.5.0.1 tests can fire a real ``ended`` event.
   _listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
   play = vi.fn(() => {
@@ -1513,6 +1519,213 @@ describe("useLiveSession", () => {
         g.gain.linearRampToValueAtTime.mock.calls,
       );
       expect(linearCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  // =======================================================================
+  // v3.1 — tempo matching on the incoming deck via playbackRate.
+  //
+  // The browser path can't run pyrubberband, so when ``incoming_rate``
+  // arrives in the phase_lock payload the hook applies it as the
+  // incoming deck's ``playbackRate`` (with ``preservesPitch=true`` so
+  // pitch/key doesn't shift). These tests pin the wiring: rate gets
+  // applied before play, ``preservesPitch`` is set, and a subsequent
+  // plain ``load`` resets the rate back to 1.0.
+  // =======================================================================
+
+  describe("v3.1 tempo matching", () => {
+    const v2Track = (id: string, name: string, bpm = 128) => ({
+      id,
+      display_name: name,
+      bpm,
+      camelot_key: "8A",
+      duration_sec: 60,
+      beatgrid: {
+        version: 2,
+        bpm,
+        first_beat_sec: 0,
+        downbeats_sec: [0, 1.875, 3.75, 5.625],
+        beats_per_bar: 4,
+        source: "madmom" as const,
+      },
+    });
+
+    async function bootstrapAndStart(sessionId: string) {
+      const { result } = renderHook(() => useLiveSession(sessionId));
+      await flushOpen();
+      const playlist = [v2Track("A", "Track A", 120), v2Track("B", "Track B", 130)];
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: sessionId,
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      return { result, playlist };
+    }
+
+    it("applies incoming_rate to the incoming deck during crossfade", async () => {
+      const { playlist } = await bootstrapAndStart("sid-tempo-1");
+      const phaseLock = {
+        outgoing_anchor_sec: 48.0,
+        incoming_anchor_sec: 0,
+        xfade_sec: 12.0,
+        phrase_tier: "16-bar",
+        incoming_pickup_skipped: false,
+        edge_guard_samples: 64,
+        sample_rate: 44100,
+        incoming_rate: 120 / 130,  // backend ratio for 120→130 BPM
+        outgoing_rate: 1.0,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLock,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const incomingDeck = FakeAudioElement.instances.find((el) =>
+        el.src.includes("B"),
+      );
+      expect(incomingDeck).toBeDefined();
+      expect(incomingDeck!.playbackRate).toBeCloseTo(120 / 130, 6);
+      expect(incomingDeck!.preservesPitch).toBe(true);
+    });
+
+    it("keeps playbackRate at 1.0 when incoming_rate is missing", async () => {
+      const { playlist } = await bootstrapAndStart("sid-tempo-2");
+      const phaseLockNoRate = {
+        outgoing_anchor_sec: 48.0,
+        incoming_anchor_sec: 0,
+        xfade_sec: 12.0,
+        phrase_tier: "16-bar",
+        incoming_pickup_skipped: false,
+        edge_guard_samples: 64,
+        sample_rate: 44100,
+        // No incoming_rate (older backend without v3.1 wiring).
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLockNoRate,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const incomingDeck = FakeAudioElement.instances.find((el) =>
+        el.src.includes("B"),
+      );
+      expect(incomingDeck).toBeDefined();
+      expect(incomingDeck!.playbackRate).toBe(1.0);
+    });
+
+    it("keeps playbackRate at 1.0 when incoming_rate is exactly 1.0", async () => {
+      // Below-threshold delta → backend sends 1.0 → frontend must not
+      // accidentally treat that as "skip the assignment" and leave a
+      // stale value from a prior crossfade.
+      const { playlist } = await bootstrapAndStart("sid-tempo-3");
+      const phaseLock = {
+        outgoing_anchor_sec: 48.0,
+        incoming_anchor_sec: 0,
+        xfade_sec: 12.0,
+        phrase_tier: "16-bar",
+        incoming_pickup_skipped: false,
+        edge_guard_samples: 64,
+        sample_rate: 44100,
+        incoming_rate: 1.0,
+        outgoing_rate: 1.0,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLock,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const incomingDeck = FakeAudioElement.instances.find((el) =>
+        el.src.includes("B"),
+      );
+      expect(incomingDeck!.playbackRate).toBe(1.0);
+    });
+
+    it("resets playbackRate to 1.0 on a plain load (post-crossfade hand-off)", async () => {
+      // After a crossfade the deck-that-was-incoming may still be at the
+      // matched rate. When the engine subsequently advances via
+      // track_ended → load (no second crossfade), the new track must
+      // play at its native rate, not the previous transition's ratio.
+      const { playlist } = await bootstrapAndStart("sid-tempo-4");
+      const phaseLock = {
+        outgoing_anchor_sec: 48.0,
+        incoming_anchor_sec: 0,
+        xfade_sec: 12.0,
+        phrase_tier: "16-bar",
+        incoming_pickup_skipped: false,
+        edge_guard_samples: 64,
+        sample_rate: 44100,
+        incoming_rate: 0.9,
+        outgoing_rate: 1.0,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: phaseLock,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const deckB = FakeAudioElement.instances.find((el) => el.src.includes("B"))!;
+      expect(deckB.playbackRate).toBeCloseTo(0.9, 6);
+
+      // Engine advances to track C via plain load (no crossfade) — deck
+      // B's playbackRate must be reset to 1.0 so the new track plays at
+      // native rate.
+      const trackC = v2Track("C", "Track C", 130);
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: trackC,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // The most recently-loaded deck (whichever it was) must be at 1.0.
+      // Find it by track-C src.
+      const deckC = FakeAudioElement.instances.find((el) =>
+        el.src.includes("C"),
+      );
+      expect(deckC).toBeDefined();
+      expect(deckC!.playbackRate).toBe(1.0);
+      expect(deckC!.preservesPitch).toBe(true);
     });
   });
 });

@@ -50,6 +50,18 @@ BEATGRID_SCHEMA_VERSION: int = 2
 DEFAULT_CROSSFADE_SEC: float = 12.0
 DEFAULT_TEMPO_RAMP_SEC: float = 16.0
 
+# BPM delta below which tempo matching is a no-op (no audible benefit from
+# stretching, and ~5 BPM falls within typical madmom/librosa detection noise).
+# Mirrors ``main.BPM_MATCH_THRESHOLD`` and ``live_engine._BPM_THRESHOLD``.
+DEFAULT_BPM_MATCH_THRESHOLD: float = 5.0
+
+# Safety bounds on the time-stretch ratio. Past 1.5× (or its inverse) the
+# stretched audio sounds wrong regardless of algorithm, and a malformed
+# catalog entry could otherwise produce a 10× rate that just stops playing.
+# Mirrors ``live_engine._STRETCH_MAX`` / ``_STRETCH_MIN``.
+STRETCH_RATIO_MAX: float = 1.5
+STRETCH_RATIO_MIN: float = 1.0 / STRETCH_RATIO_MAX
+
 
 # ---------------------------------------------------------------------------
 # Plan + grid tracking
@@ -369,6 +381,37 @@ def synthesise_downbeats_from_v1(
 # Live-engine helpers
 # ---------------------------------------------------------------------------
 
+def compute_tempo_match_rate(
+    outgoing_bpm: Optional[float],
+    incoming_bpm: Optional[float],
+    threshold: float = DEFAULT_BPM_MATCH_THRESHOLD,
+) -> float:
+    """Playback rate that aligns the incoming track's tempo to the outgoing's.
+
+    Mirrors the ratio computed by ``LiveEngineLocal._time_stretch`` and the
+    "match outgoing" branch of the offline mixer's ``compute_transition_bpm``
+    + pyrubberband stretch. The browser path applies this as the incoming
+    deck's ``HTMLMediaElement.playbackRate`` (with ``preservesPitch=true``)
+    during the crossfade window so the two decks stay in beat-lock without
+    pyrubberband running in WASM.
+
+    Returns ``1.0`` (no stretch) when either BPM is missing or non-positive,
+    or when the BPM delta is within ``threshold`` — same early-return shape
+    as the CLI engine so the three paths' tempo decisions agree by
+    construction. The result is clamped to
+    ``[STRETCH_RATIO_MIN, STRETCH_RATIO_MAX]`` so a malformed catalog entry
+    can't produce a runaway rate.
+    """
+    if outgoing_bpm is None or incoming_bpm is None:
+        return 1.0
+    if outgoing_bpm <= 0 or incoming_bpm <= 0:
+        return 1.0
+    if abs(outgoing_bpm - incoming_bpm) <= threshold:
+        return 1.0
+    rate = outgoing_bpm / incoming_bpm
+    return max(STRETCH_RATIO_MIN, min(STRETCH_RATIO_MAX, rate))
+
+
 @dataclass
 class LiveTransitionPlan:
     """Live-engine-facing summary of a phase-lock plan.
@@ -386,6 +429,19 @@ class LiveTransitionPlan:
     cross-check. Both tracks resample to a common rate before this struct
     is built (44.1 kHz in ``LiveEngineLocal``, the browser's
     ``AudioContext`` rate in ``LiveEngineBrowser``).
+
+    Tempo-match rates (v3.1):
+
+    - ``incoming_rate`` — multiplier to apply to the incoming deck's playback
+      speed so its tempo matches the outgoing's during the crossfade. Equals
+      ``outgoing_bpm / incoming_bpm`` (clamped) when the delta exceeds
+      ``DEFAULT_BPM_MATCH_THRESHOLD``, else ``1.0``. The CLI engine's
+      pyrubberband pre-stretch consumes this implicitly via
+      ``_time_stretch``; the browser path applies it directly as
+      ``HTMLMediaElement.playbackRate``.
+    - ``outgoing_rate`` — placeholder for a future meet-in-middle strategy.
+      Always ``1.0`` today (matches CLI behaviour, where only the incoming
+      deck is stretched).
     """
     outgoing_anchor_sample: int
     incoming_start_sample: int
@@ -396,6 +452,8 @@ class LiveTransitionPlan:
     # Raw catalog plan kept for diagnostics + tests; the engines only consume
     # the sample fields above.
     plan: PhaseLockPlan = field(repr=False)
+    incoming_rate: float = 1.0
+    outgoing_rate: float = 1.0
 
 
 def resolve_downbeats(
@@ -431,6 +489,9 @@ def build_live_transition_plan(
     sample_rate: int,
     target_xfade_sec: float,
     target_ramp_sec: float = 0.0,
+    outgoing_bpm: Optional[float] = None,
+    incoming_bpm: Optional[float] = None,
+    bpm_match_threshold: float = DEFAULT_BPM_MATCH_THRESHOLD,
 ) -> LiveTransitionPlan:
     """Top-level convenience for the live engines.
 
@@ -441,6 +502,13 @@ def build_live_transition_plan(
 
     ``target_ramp_sec`` is carried through for parity with the offline
     pipeline (live engines that don't run a tempo ramp can leave it at 0).
+
+    When ``outgoing_bpm`` and ``incoming_bpm`` are supplied, the returned
+    plan also carries ``incoming_rate`` — a tempo-match playback rate the
+    browser path applies via ``HTMLMediaElement.playbackRate``. The CLI
+    engine already pre-stretches with pyrubberband so it ignores this
+    field; passing the BPMs is still useful for diagnostics. Defaults to
+    ``1.0`` (no rate change) when either BPM is missing.
     """
     outgoing_downbeats, _ = resolve_downbeats(outgoing_beatgrid, outgoing_duration_sec)
     incoming_downbeats, _ = resolve_downbeats(incoming_beatgrid, incoming_duration_sec)
@@ -454,6 +522,9 @@ def build_live_transition_plan(
         target_xfade_sec=target_xfade_sec,
         target_ramp_sec=target_ramp_sec,
     )
+    incoming_rate = compute_tempo_match_rate(
+        outgoing_bpm, incoming_bpm, threshold=bpm_match_threshold,
+    )
     return LiveTransitionPlan(
         outgoing_anchor_sample=int(round(plan.outgoing_anchor_catalog_sec * sample_rate)),
         incoming_start_sample=int(round(plan.incoming_anchor_catalog_sec * sample_rate)),
@@ -462,4 +533,6 @@ def build_live_transition_plan(
         phrase_tier=plan.phrase_tier,
         incoming_pickup_skipped=plan.incoming_pickup_skipped,
         plan=plan,
+        incoming_rate=incoming_rate,
+        outgoing_rate=1.0,
     )

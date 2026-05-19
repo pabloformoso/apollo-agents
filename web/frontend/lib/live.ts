@@ -202,6 +202,26 @@ export interface PhaseLockPayload {
   incoming_pickup_skipped?: boolean;
   edge_guard_samples?: number;
   sample_rate?: number;
+  /**
+   * v3.1 — tempo-match playback rate for the incoming deck. Applied as
+   * ``HTMLMediaElement.playbackRate`` (with ``preservesPitch=true``) so the
+   * incoming track's BPM matches the outgoing's during the crossfade,
+   * mirroring the pyrubberband pre-stretch the CLI ``LiveEngineLocal``
+   * runs. ``1.0`` (or undefined) means "no rate change" — either the BPM
+   * delta is within ``DEFAULT_BPM_MATCH_THRESHOLD`` (~5 BPM, inaudible),
+   * or one of the catalog entries lacks a usable BPM.
+   *
+   * Clamped to ``[1/1.5, 1.5]`` server-side so a corrupted catalog entry
+   * can't produce a runaway rate. We keep the same value past the
+   * crossfade window — the body of the incoming track stays at the
+   * outgoing's BPM for parity with the CLI engine (no ramp-back).
+   */
+  incoming_rate?: number;
+  /**
+   * v3.1 — placeholder for a future meet-in-middle strategy on the
+   * outgoing deck. Always ``1.0`` today.
+   */
+  outgoing_rate?: number;
 }
 
 interface ServerEngineCommand {
@@ -693,6 +713,18 @@ export function useLiveSession(
       if (!el) return;
       audioRef.current = el;
       el.src = streamUrl(track.id);
+      // v3.1 — reset the tempo-match rate to 1.0 on a plain ``load``. A
+      // prior crossfade may have left ``playbackRate`` at e.g. 0.95 on
+      // this deck; without the reset the next track loaded directly
+      // (engine advanced via ``track_ended``, skip, or hard-cut) would
+      // play at the previous transition's tempo-match ratio instead of
+      // its native speed.
+      try {
+        el.playbackRate = 1.0;
+        el.preservesPitch = true;
+      } catch {
+        /* preservesPitch may be readonly on legacy WebKit; ignore */
+      }
       // v2.5.0.1 — defensive gain restore. After a crossfade the
       // previously-inactive deck's gain was ramped down to 0; if a
       // ``load`` (rather than another ``crossfade``) is the next event
@@ -756,6 +788,33 @@ export function useLiveSession(
       const toEl = ensureDeck(toWhich);
       if (!fromEl || !toEl) return;
       toEl.src = streamUrl(track.id);
+
+      // v3.1 — tempo-match the incoming deck to the outgoing's BPM via
+      // ``playbackRate`` (with ``preservesPitch=true`` so pitch/key
+      // doesn't shift). The backend supplies ``incoming_rate`` =
+      // outgoing_bpm / incoming_bpm (clamped to [1/1.5, 1.5]) when the
+      // delta exceeds the threshold; ``1.0`` / missing means leave at
+      // native rate. This must be set BEFORE ``play()`` so the first
+      // audible sample is already at the correct tempo — matching the
+      // CLI ``LiveEngineLocal`` which pre-stretches the whole buffer
+      // with pyrubberband. Kept at the matched rate past the crossfade
+      // (no ramp-back) for CLI parity.
+      const incomingRate =
+        typeof phaseLock?.incoming_rate === "number" && phaseLock.incoming_rate > 0
+          ? phaseLock.incoming_rate
+          : 1.0;
+      try {
+        toEl.preservesPitch = true;
+        toEl.playbackRate = incomingRate;
+      } catch {
+        /* preservesPitch is readonly on legacy WebKit; fall back to
+           pitch-shifted rate change rather than no rate change at all. */
+        try {
+          toEl.playbackRate = incomingRate;
+        } catch {
+          /* nothing more we can do */
+        }
+      }
 
       // v3.0 — seek to the incoming anchor BEFORE play() so the first
       // sample played is a downbeat. Required for phase-lock to hold;

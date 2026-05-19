@@ -432,12 +432,16 @@ class TestBuildMixIntegration:
 from agent import phase_lock as phase_lock_mod  # noqa: E402
 from agent.phase_lock import (  # noqa: E402
     BEATGRID_SCHEMA_VERSION,
+    DEFAULT_BPM_MATCH_THRESHOLD,
     DEFAULT_CROSSFADE_SEC,
     DEFAULT_TEMPO_RAMP_SEC,
     GridState,
     GridTracker,
     LiveTransitionPlan,
+    STRETCH_RATIO_MAX,
+    STRETCH_RATIO_MIN,
     build_live_transition_plan,
+    compute_tempo_match_rate,
     is_v2_beatgrid,
     phase_locked_crossfade_np,
     pick_incoming_anchor,
@@ -641,6 +645,110 @@ class TestBuildLiveTransitionPlan:
             target_ramp_sec=4.0,
         )
         assert plan.plan.ramp_catalog_sec == 4.0
+
+    def test_default_rates_are_one_without_bpm_args(self):
+        """Callers that don't pass BPMs (legacy code, or paths that don't
+        need tempo matching) must get plans with ``incoming_rate == 1.0``
+        so nothing silently stretches when the data isn't available."""
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            outgoing_duration_sec=20.0,
+            incoming_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            incoming_duration_sec=20.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=8.0,
+        )
+        assert plan.incoming_rate == 1.0
+        assert plan.outgoing_rate == 1.0
+
+    def test_bpm_args_populate_incoming_rate(self):
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            outgoing_duration_sec=20.0,
+            incoming_beatgrid=self._v2([0.0, 1.875, 3.75, 5.625]),
+            incoming_duration_sec=20.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=8.0,
+            outgoing_bpm=120.0,
+            incoming_bpm=130.0,
+        )
+        assert plan.incoming_rate == pytest.approx(120.0 / 130.0)
+        assert plan.outgoing_rate == 1.0
+
+
+class TestComputeTempoMatchRate:
+    """The single source of truth for "what rate plays the incoming track
+    at the outgoing's tempo". The CLI engine implicitly consumes this via
+    pyrubberband; the browser path consumes it directly via
+    ``HTMLMediaElement.playbackRate``. Cross-path parity hinges on this
+    function returning the same value for the same BPM pair regardless
+    of caller."""
+
+    def test_returns_one_when_bpms_equal(self):
+        assert compute_tempo_match_rate(128.0, 128.0) == 1.0
+
+    def test_returns_one_when_delta_within_threshold(self):
+        # Threshold is 5 BPM — exactly 5 still rounds to "no stretch"
+        # (matches CLI ``_time_stretch``'s ``<=`` comparison).
+        assert compute_tempo_match_rate(128.0, 124.0) == 1.0
+        assert compute_tempo_match_rate(128.0, 123.0) == 1.0  # delta=5
+
+    def test_returns_outgoing_over_incoming_when_delta_exceeds_threshold(self):
+        """Sign convention: ``incoming_bpm`` is too high → rate < 1.0
+        (slow it down). Matches ``LiveEngineLocal._time_stretch`` exactly."""
+        rate = compute_tempo_match_rate(120.0, 130.0)
+        assert rate == pytest.approx(120.0 / 130.0)
+        assert rate < 1.0
+
+    def test_returns_outgoing_over_incoming_when_incoming_slower(self):
+        """Incoming too slow → rate > 1.0 (speed it up)."""
+        rate = compute_tempo_match_rate(130.0, 120.0)
+        assert rate == pytest.approx(130.0 / 120.0)
+        assert rate > 1.0
+
+    def test_clamps_to_stretch_max(self):
+        """A 60 → 180 BPM jump would naively give 3.0× — far past the
+        1.5 ceiling. Without the clamp the browser would silently
+        playback at chipmunk-territory rates (or fail outright)."""
+        assert compute_tempo_match_rate(180.0, 60.0) == STRETCH_RATIO_MAX
+
+    def test_clamps_to_stretch_min(self):
+        """Inverse direction: 60 → 180 incoming would give 0.333. Clamp
+        keeps it at 1/1.5."""
+        assert compute_tempo_match_rate(60.0, 180.0) == STRETCH_RATIO_MIN
+
+    def test_returns_one_for_missing_outgoing_bpm(self):
+        assert compute_tempo_match_rate(None, 128.0) == 1.0
+
+    def test_returns_one_for_missing_incoming_bpm(self):
+        assert compute_tempo_match_rate(128.0, None) == 1.0
+
+    def test_returns_one_for_zero_or_negative_bpm(self):
+        """Catalog corruption guard. A 0 BPM in catalog must NOT cause a
+        division-by-zero — return the safe identity rate instead."""
+        assert compute_tempo_match_rate(0.0, 128.0) == 1.0
+        assert compute_tempo_match_rate(128.0, 0.0) == 1.0
+        assert compute_tempo_match_rate(-1.0, 128.0) == 1.0
+
+    def test_threshold_argument_is_honoured(self):
+        """A path that wants tighter tempo matching can pass a smaller
+        threshold. Useful for genres where 2-BPM drift IS audible."""
+        # Default threshold (5) → no stretch.
+        assert compute_tempo_match_rate(120.0, 122.0) == 1.0
+        # Tighter threshold (1) → stretch even tiny deltas.
+        rate = compute_tempo_match_rate(120.0, 122.0, threshold=1.0)
+        assert rate == pytest.approx(120.0 / 122.0)
+
+    def test_default_threshold_matches_constant(self):
+        """Sanity check: the implicit default mirrors the documented
+        module-level constant. Tests reference the constant elsewhere so
+        a drift here would mask cross-path disagreement."""
+        # Anything inside ±DEFAULT_BPM_MATCH_THRESHOLD must collapse to 1.0.
+        assert compute_tempo_match_rate(
+            120.0, 120.0 + DEFAULT_BPM_MATCH_THRESHOLD
+        ) == 1.0
 
 
 class TestPhaseLockedCrossfadeNp:

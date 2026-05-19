@@ -842,6 +842,9 @@ class LiveEngineLocal:
             incoming_audio_y=incoming_y,
             sample_rate=_SAMPLE_RATE,
             target_xfade_sec=float(self.crossfade_sec),
+            outgoing_bpm=float(current_track.get("bpm") or 0) or None,
+            incoming_bpm=float(next_track.get("bpm") or 0) or None,
+            bpm_match_threshold=_BPM_THRESHOLD,
         )
 
     # ------------------------------------------------------------------
@@ -1666,6 +1669,9 @@ class LiveEngineBrowser:
             incoming_audio_y=None,  # browser holds the bytes; backend doesn't
             sample_rate=_SAMPLE_RATE,
             target_xfade_sec=float(self.crossfade_sec),
+            outgoing_bpm=float(current_track.get("bpm") or 0) or None,
+            incoming_bpm=float(next_track.get("bpm") or 0) or None,
+            bpm_match_threshold=_BPM_THRESHOLD,
         )
         with self._lock:
             self._transition_plan = plan
@@ -1678,6 +1684,14 @@ class LiveEngineBrowser:
         the signal to take its legacy linear-fade path. Keeping the
         empty case explicitly empty (rather than a structure-with-nulls)
         keeps the frontend branch concise: ``if (payload?.xfade_sec) {…}``.
+
+        v3.1 — ``incoming_rate`` / ``outgoing_rate`` carry the tempo-match
+        playback rate. The frontend applies ``incoming_rate`` as
+        ``HTMLMediaElement.playbackRate`` (with ``preservesPitch=true``)
+        on the incoming deck so its BPM matches the outgoing's during the
+        crossfade, mirroring the pyrubberband pre-stretch the CLI engine
+        runs. ``1.0`` means "no rate change" (BPMs already within
+        threshold, or one of them was missing from the catalog).
         """
         plan = self._transition_plan
         if plan is None or plan.phrase_tier == "fallback":
@@ -1690,6 +1704,8 @@ class LiveEngineBrowser:
             "incoming_pickup_skipped": plan.incoming_pickup_skipped,
             "edge_guard_samples": XFADE_EDGE_GUARD_SAMPLES,
             "sample_rate": plan.sample_rate,
+            "incoming_rate": round(plan.incoming_rate, 6),
+            "outgoing_rate": round(plan.outgoing_rate, 6),
         }
 
     def _emit(self, type_: str, **kwargs) -> None:
