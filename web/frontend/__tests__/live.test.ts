@@ -413,6 +413,132 @@ describe("useLiveSession", () => {
     expect(result.current.error).toBe("something blew up");
   });
 
+  // ── v3.0.1 — critic_warning surfacing ─────────────────────────────────
+  it("appends critic_warning events to criticWarnings with mapped payload", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cw-1"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "critic_warning",
+        kind: "phase_lock_fallback",
+        reason: "no_beatgrid_either_side",
+        outgoing_track: { id: "a", display_name: "Track A" },
+        incoming_track: { id: "b", display_name: "Track B" },
+        phrase_tier: "fallback",
+        message: "regenerate beatgrid",
+      });
+    });
+    expect(result.current.criticWarnings).toHaveLength(1);
+    const w = result.current.criticWarnings[0];
+    expect(w.reason).toBe("no_beatgrid_either_side");
+    expect(w.message).toBe("regenerate beatgrid");
+    // snake_case → camelCase mapping happens in the hook.
+    expect(w.outgoingTrack.id).toBe("a");
+    expect(w.outgoingTrack.displayName).toBe("Track A");
+    expect(w.incomingTrack.id).toBe("b");
+    expect(w.incomingTrack.displayName).toBe("Track B");
+    // Every warning gets a stable client-generated id so the UI can
+    // dismiss them individually.
+    expect(w.id).toMatch(/^cw-/);
+  });
+
+  it("falls back to the reason enum when message is missing", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cw-2"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "critic_warning",
+        kind: "phase_lock_fallback",
+        reason: "no_phrase_anchor_in_window",
+        outgoing_track: { id: "a" },
+        incoming_track: { id: "b" },
+        // message intentionally omitted — older backend, partial payload
+      });
+    });
+    expect(result.current.criticWarnings[0].message).toBe(
+      "no_phrase_anchor_in_window",
+    );
+  });
+
+  it("caps criticWarnings at 10 entries (drops oldest first)", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cw-3"));
+    await flushOpen();
+    act(() => {
+      for (let i = 0; i < 15; i++) {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "critic_warning",
+          kind: "phase_lock_fallback",
+          reason: "no_beatgrid_either_side",
+          outgoing_track: { id: `out-${i}`, display_name: `O ${i}` },
+          incoming_track: { id: `in-${i}`, display_name: `I ${i}` },
+          message: `msg-${i}`,
+        });
+      }
+    });
+    // Capped at 10; the oldest five (msg-0..msg-4) must be evicted so
+    // a sloppy catalog session doesn't accumulate dozens in memory.
+    expect(result.current.criticWarnings).toHaveLength(10);
+    expect(result.current.criticWarnings[0].message).toBe("msg-5");
+    expect(result.current.criticWarnings[9].message).toBe("msg-14");
+  });
+
+  it("dismissCriticWarning removes a warning by id and is no-op for unknown id", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cw-4"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "critic_warning",
+        kind: "phase_lock_fallback",
+        reason: "no_beatgrid_either_side",
+        outgoing_track: { id: "a" },
+        incoming_track: { id: "b" },
+        message: "msg-1",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "critic_warning",
+        kind: "phase_lock_fallback",
+        reason: "no_beatgrid_incoming",
+        outgoing_track: { id: "a" },
+        incoming_track: { id: "c" },
+        message: "msg-2",
+      });
+    });
+    expect(result.current.criticWarnings).toHaveLength(2);
+    const firstId = result.current.criticWarnings[0].id;
+    act(() => {
+      result.current.dismissCriticWarning(firstId);
+    });
+    expect(result.current.criticWarnings).toHaveLength(1);
+    expect(result.current.criticWarnings[0].message).toBe("msg-2");
+    // Calling with a stale id must be a safe no-op (banner code may
+    // race a fresh emit + a dismiss click).
+    act(() => {
+      result.current.dismissCriticWarning("does-not-exist");
+    });
+    expect(result.current.criticWarnings).toHaveLength(1);
+  });
+
+  it("does not bleed critic_warning into the log or djChat feeds", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-cw-5"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "critic_warning",
+        kind: "phase_lock_fallback",
+        reason: "no_beatgrid_either_side",
+        outgoing_track: { id: "a" },
+        incoming_track: { id: "b" },
+        message: "msg-1",
+      });
+    });
+    // The warning routes to criticWarnings only — the command log and
+    // dj_chat feeds are separate UI surfaces that should not get
+    // cross-contaminated.
+    expect(result.current.criticWarnings).toHaveLength(1);
+    expect(result.current.log).toHaveLength(0);
+    expect(result.current.djChat).toHaveLength(0);
+  });
+
   // ── Bug-1 / Bug-2 regression — track position + nextTrack derivation ────
   it("derives currentPosition + nextTrack from playlist after track_started(A)", async () => {
     const { result } = renderHook(() => useLiveSession("sid-pos-1"));

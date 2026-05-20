@@ -78,6 +78,37 @@ SESSION_ENDED       = "session_ended"
 # in-genre continuation from the catalog.
 PLAYLIST_RUNNING_LOW = "playlist_running_low"
 ENDLESS_WARNING      = "endless_warning"
+# v3.0.1 — phase-lock observability. Fires once per (current → next)
+# transition when the planner couldn't land on a phrase boundary
+# (16/8/4-bar ladder all rejected) AND fell back to the legacy linear-
+# fade path. Surfaces in the UI as a "this transition didn't lock to a
+# downbeat — likely missing beatgrid" banner so the DJ knows whether to
+# regenerate beatgrids for the affected tracks. Carries the two track
+# ids + a ``reason`` enum so the frontend can give actionable guidance.
+CRITIC_WARNING       = "critic_warning"
+
+# Human-readable explanations for each ``critic_warning`` reason. The
+# UI can either show these verbatim or map the reason enum to its own
+# i18n strings — both paths are valid. Keys MUST match the literals in
+# ``_maybe_emit_critic_warning``.
+_CRITIC_WARNING_MESSAGES = {
+    "no_beatgrid_either_side": (
+        "Phase-lock unavailable — neither track has a beatgrid. "
+        "Run `--build-catalog --extra beatgrid` to regenerate."
+    ),
+    "no_beatgrid_outgoing": (
+        "Phase-lock unavailable — outgoing track is missing its beatgrid. "
+        "Regenerate it with `python main.py --fix-incomplete`."
+    ),
+    "no_beatgrid_incoming": (
+        "Phase-lock unavailable — incoming track is missing its beatgrid. "
+        "Regenerate it with `python main.py --fix-incomplete`."
+    ),
+    "no_phrase_anchor_in_window": (
+        "Phase-lock fell back — no phrase boundary fits the crossfade "
+        "window. The transition will use a linear fade."
+    ),
+}
 
 # Grace window the LLM gets to append a successor track before the
 # deterministic in-engine fallback kicks in.
@@ -187,6 +218,12 @@ class LiveEngineLocal:
         # Playlist tracking
         self._idx: int = 0
         self._extend_samples: int = 0  # extra samples before auto-crossfade
+
+        # v3.0.1 — debounce for ``critic_warning`` (one event per
+        # transition pair regardless of how many times the planner
+        # re-runs). Mirrors the browser engine's bookkeeping so the agent
+        # event log isn't spammed by re-pre-stretches on skip / extend.
+        self._critic_warned_for_transition: tuple[int, int] | None = None
 
         # Watchdog signals
         self._cf_just_finished: bool = False  # set by callback, cleared by watchdog
@@ -793,6 +830,66 @@ class LiveEngineLocal:
             self._transition_plan = plan
         self._prestretch_ready.set()
 
+        # v3.0.1 — surface phase-lock fallbacks to the agent's event
+        # log. ``plan is None`` covers the no-duration-data case
+        # ``_build_transition_plan_for_next`` returns early on; treat
+        # it like a fallback for warning purposes since the audible
+        # outcome (linear fade, no downbeat lock) is the same.
+        if plan is None or plan.phrase_tier == "fallback":
+            self._maybe_emit_critic_warning(
+                plan, current_idx, current_track, next_track,
+            )
+
+    def _maybe_emit_critic_warning(
+        self,
+        plan: LiveTransitionPlan | None,
+        current_idx: int,
+        current_track: dict,
+        next_track: dict,
+    ) -> None:
+        """CLI-side mirror of the browser engine's warning emitter.
+
+        Debounced via ``self._critic_warned_for_transition`` so the
+        event fires at most once per (current_idx, next_idx) pair, even
+        if the user skips back-and-forth and re-pre-stretches the same
+        transition. The agent loop in ``live_dj.py`` consumes the
+        event queue; logging this gives operators visible evidence
+        that "this transition won't be downbeat-locked, regenerate
+        the beatgrid".
+        """
+        next_idx = current_idx + 1
+        key = (current_idx, next_idx)
+        if self._critic_warned_for_transition == key:
+            return
+        self._critic_warned_for_transition = key
+
+        out_bg = current_track.get("beatgrid")
+        in_bg = next_track.get("beatgrid")
+        if not out_bg and not in_bg:
+            reason = "no_beatgrid_either_side"
+        elif not out_bg:
+            reason = "no_beatgrid_outgoing"
+        elif not in_bg:
+            reason = "no_beatgrid_incoming"
+        else:
+            reason = "no_phrase_anchor_in_window"
+
+        self._emit(
+            CRITIC_WARNING,
+            kind="phase_lock_fallback",
+            reason=reason,
+            outgoing_track={
+                "id": current_track.get("id"),
+                "display_name": current_track.get("display_name"),
+            },
+            incoming_track={
+                "id": next_track.get("id"),
+                "display_name": next_track.get("display_name"),
+            },
+            phrase_tier=(plan.phrase_tier if plan is not None else "fallback"),
+            message=_CRITIC_WARNING_MESSAGES.get(reason, reason),
+        )
+
     def _build_transition_plan_for_next(
         self,
         current_track: dict,
@@ -1008,6 +1105,13 @@ class LiveEngineBrowser:
         # the frontend can schedule sample-accurate WebAudio crossfades
         # against the same anchors the offline + terminal-live paths use.
         self._transition_plan: LiveTransitionPlan | None = None
+
+        # v3.0.1 — debounce for ``critic_warning`` so the engine fires
+        # AT MOST once per (current_idx, next_idx) transition pair.
+        # Without this, every position update (~4 Hz) would re-emit
+        # whenever the plan kept landing on "fallback" — visually
+        # equivalent to a stuck siren in the UI banner.
+        self._critic_warned_for_transition: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Public API (matches LiveEngineProtocol)
@@ -1675,6 +1779,71 @@ class LiveEngineBrowser:
         )
         with self._lock:
             self._transition_plan = plan
+
+        # v3.0.1 — emit a critic_warning when the planner couldn't land
+        # on a phrase boundary. The frontend reads ``critic_warning``
+        # events and surfaces them as a non-blocking banner so the DJ
+        # knows the upcoming transition will use the linear-fade legacy
+        # path (not phase-locked). Only fire ONCE per transition pair —
+        # ``_rebuild_transition_plan`` runs on every position update.
+        self._maybe_emit_critic_warning(plan, idx, current_track, next_track)
+
+    def _maybe_emit_critic_warning(
+        self,
+        plan: LiveTransitionPlan,
+        current_idx: int,
+        current_track: dict,
+        next_track: dict,
+    ) -> None:
+        """Emit ``critic_warning`` if the plan landed on the fallback tier.
+
+        Debounced via ``self._critic_warned_for_transition`` so the
+        event fires at most once per (current_idx, next_idx) pair —
+        without that guard a stalled-at-fallback session would emit a
+        warning on every position update (~4 Hz). The reason string is
+        chosen to match the most likely fix in the UI ("regenerate
+        beatgrid for X"), not just to describe the symptom.
+        """
+        if plan.phrase_tier != "fallback":
+            return
+        next_idx = current_idx + 1
+        key = (current_idx, next_idx)
+        if self._critic_warned_for_transition == key:
+            return
+        self._critic_warned_for_transition = key
+
+        out_bg = current_track.get("beatgrid")
+        in_bg = next_track.get("beatgrid")
+        if not out_bg and not in_bg:
+            reason = "no_beatgrid_either_side"
+        elif not out_bg:
+            reason = "no_beatgrid_outgoing"
+        elif not in_bg:
+            reason = "no_beatgrid_incoming"
+        else:
+            # Both grids exist but the phrase ladder still gave up —
+            # usually means the planner couldn't fit the requested
+            # xfade window inside the available bars (very short
+            # incoming track, or outgoing's tail too close to the end).
+            reason = "no_phrase_anchor_in_window"
+
+        self._emit(
+            CRITIC_WARNING,
+            kind="phase_lock_fallback",
+            reason=reason,
+            outgoing_track={
+                "id": current_track.get("id"),
+                "display_name": current_track.get("display_name"),
+            },
+            incoming_track={
+                "id": next_track.get("id"),
+                "display_name": next_track.get("display_name"),
+            },
+            phrase_tier=plan.phrase_tier,
+            # Human-readable fallback string the UI can show verbatim if
+            # it doesn't want to map the reason enum locally.
+            message=_CRITIC_WARNING_MESSAGES.get(reason, reason),
+        )
 
     def _phase_lock_payload(self) -> dict:
         """Serialise the current ``_transition_plan`` for the WS layer.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from agent.live_engine import (
     APPROACHING_CF,
+    CRITIC_WARNING,
     CROSSFADE_FINISHED,
     CROSSFADE_TRIGGERED,
     SESSION_ENDED,
@@ -549,6 +550,100 @@ class TestBrowserPhaseLockTempoMatching:
         engine.play([track_a, _v2_track("b", bpm=130.0)])
         payload = engine._phase_lock_payload()
         assert payload["incoming_rate"] == 1.0
+
+
+class TestBrowserCriticWarning:
+    """v3.0.1 — phase-lock fallback observability.
+
+    When the planner can't find a phrase boundary (typically because a
+    catalog entry is missing its beatgrid), the engine must emit
+    ``critic_warning`` exactly ONCE per (current, next) transition so
+    the UI can surface a banner. Without the once-per-transition
+    debounce, ``_rebuild_transition_plan`` would re-fire on every
+    position update (~4 Hz) and turn the banner into a strobe.
+    """
+
+    def test_emits_critic_warning_when_no_beatgrid_either_side(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        # ``_track`` (no v2 beatgrid) → both sides legacy → fallback tier.
+        engine.play([_track("a"), _track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["kind"] == "phase_lock_fallback"
+        assert w["reason"] == "no_beatgrid_either_side"
+        assert w["outgoing_track"]["id"] == "a"
+        assert w["incoming_track"]["id"] == "b"
+        # Human-readable message must be present so a UI that doesn't
+        # locally interpret the ``reason`` enum still has something to
+        # show.
+        assert "beatgrid" in w["message"].lower()
+
+    def test_emits_warning_with_outgoing_only_reason(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        # Outgoing has no beatgrid; incoming has v2.
+        engine.play([_track("a"), _v2_track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        # When only one side has a beatgrid, the planner can still
+        # synthesise a v1 grid for the other side via ``resolve_downbeats``
+        # — so an anchor IS found and the tier may NOT be "fallback".
+        # The test contract is just: if a warning IS emitted, it must
+        # be the right reason. (The presence assertion belongs in the
+        # both-sides-missing test above.)
+        if warnings:
+            assert warnings[0]["reason"] in {
+                "no_beatgrid_outgoing",
+                "no_phrase_anchor_in_window",
+            }
+
+    def test_no_warning_when_both_sides_have_v2_beatgrids(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        # Healthy catalog → no warning. If this fires unexpectedly the
+        # debounce or phrase-tier logic has regressed and the UI would
+        # cry wolf on a perfectly good transition.
+        assert warnings == []
+
+    def test_warning_debounced_across_repeated_rebuilds(self):
+        """``_rebuild_transition_plan`` is called from many places
+        (play, report_playback_pos, skip, etc.) — sometimes several
+        times during the same transition. The warning MUST fire at
+        most once per (current, next) pair."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_track("a"), _track("b")])
+        # Re-trigger the planner multiple times — simulating position
+        # updates that keep re-deriving the same transition.
+        for _ in range(5):
+            engine._rebuild_transition_plan()
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1, (
+            f"Expected exactly one critic_warning per transition; got "
+            f"{len(warnings)}. Debounce in _maybe_emit_critic_warning "
+            f"is broken — the UI banner would flash on every ~4 Hz "
+            f"position update."
+        )
+
+    def test_warning_fires_again_on_new_transition_pair(self):
+        """The debounce is per (current, next) tuple — advancing to
+        the next track must NOT prevent a fresh warning for the new
+        upcoming transition."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_track("a"), _track("b"), _track("c")])
+        rec.events.clear()
+        # Simulate cursor advancing to track b — now (b, c) is the
+        # active transition pair.
+        with engine._lock:
+            engine._idx = 1
+        engine._rebuild_transition_plan()
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1
+        assert warnings[0]["incoming_track"]["id"] == "c"
 
 
 class TestBrowserNoDeadlockOnReportPlaybackPos:

@@ -100,6 +100,35 @@ export interface DjChatEntry {
   ts: number;
 }
 
+/**
+ * v3.0.1 — phase-lock observability. Emitted by the backend when the
+ * upcoming transition's planner couldn't land on a phrase boundary
+ * (typically because one or both tracks lack a v2 beatgrid). The UI
+ * shows these as non-blocking warnings so the DJ knows the next
+ * transition will use the legacy linear-fade path AND knows which
+ * track to regenerate beatgrids for.
+ *
+ * ``reason`` is the machine-readable enum the frontend can branch on
+ * for tailored remediation copy. ``message`` is the human-readable
+ * fallback the backend ships pre-localised; the UI can show it
+ * verbatim instead of mapping ``reason`` if it prefers.
+ */
+export type CriticWarningReason =
+  | "no_beatgrid_either_side"
+  | "no_beatgrid_outgoing"
+  | "no_beatgrid_incoming"
+  | "no_phrase_anchor_in_window";
+
+export interface CriticWarning {
+  id: string;
+  ts: number;
+  kind: "phase_lock_fallback";
+  reason: CriticWarningReason;
+  message: string;
+  outgoingTrack: { id: string | null; displayName: string | null };
+  incomingTrack: { id: string | null; displayName: string | null };
+}
+
 export interface UseLiveSessionApi {
   state: LiveEngineState;
   connected: boolean;
@@ -121,6 +150,20 @@ export interface UseLiveSessionApi {
    * "DJ chat" panel so the audience sees rejection / acknowledgement text.
    */
   djChat: DjChatEntry[];
+  /**
+   * v3.0.1 — active phase-lock fallback warnings, oldest first. The UI
+   * surfaces these as a non-blocking banner ("upcoming transition will
+   * use a linear fade — regenerate beatgrid for Track X"). Capped at
+   * the most recent 10 entries so a long broken-catalog session
+   * doesn't accumulate dozens of stale warnings.
+   */
+  criticWarnings: CriticWarning[];
+  /**
+   * Drop a single warning from ``criticWarnings`` (typically wired to
+   * the X button on the banner). Safe to call with an id that no
+   * longer exists — no-op.
+   */
+  dismissCriticWarning: (id: string) => void;
   error: string | null;
   /** True when the browser blocked autoplay; the UI must surface a click-to-start. */
   autoplayBlocked: boolean;
@@ -332,6 +375,20 @@ interface ServerError {
   message: string;
 }
 
+// v3.0.1 — phase-lock fallback warning shape on the wire. Keys mirror
+// ``LiveEngineBrowser._maybe_emit_critic_warning``'s payload exactly;
+// the snake_case → camelCase mapping happens in the WS handler below
+// so the rest of the React tree consumes a clean ``CriticWarning``.
+interface ServerCriticWarning {
+  type: "critic_warning";
+  kind: "phase_lock_fallback";
+  reason: CriticWarningReason;
+  outgoing_track?: { id?: string; display_name?: string };
+  incoming_track?: { id?: string; display_name?: string };
+  phrase_tier?: string;
+  message?: string;
+}
+
 type ServerEvent =
   | ServerLiveStateMessage
   | ServerEngineEvent
@@ -340,6 +397,7 @@ type ServerEvent =
   | ServerDjChat
   | ServerEndlessModeMessage
   | ServerYouTubeStatusMessage
+  | ServerCriticWarning
   | ServerError;
 
 const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
@@ -348,6 +406,12 @@ const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
   more_energetic: "more energetic",
   wind_down: "wind down",
 };
+
+// v3.0.1 — upper bound on retained ``critic_warning`` entries. Anything
+// older falls off the head of the array on insert. 10 is generous: a
+// healthy catalog never emits any, and even a sloppy one rarely sees
+// more than 2-3 active at once.
+const CRITIC_WARNINGS_MAX = 10;
 
 function deriveWsBase(): string {
   const explicit = process.env.NEXT_PUBLIC_WS_BASE;
@@ -422,6 +486,9 @@ export function useLiveSession(
   const [playlistRemaining, setPlaylistRemaining] = useState(0);
   const [log, setLog] = useState<LiveCommandLogEntry[]>([]);
   const [djChat, setDjChat] = useState<DjChatEntry[]>([]);
+  // v3.0.1 — see ``CriticWarning`` type. Cap at 10 (CRITIC_WARNINGS_MAX
+  // below). The dismissCriticWarning callback drops by id.
+  const [criticWarnings, setCriticWarnings] = useState<CriticWarning[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [currentTrackTime, setCurrentTrackTime] = useState(0);
@@ -1098,6 +1165,36 @@ export function useLiveSession(
           return next.length > 200 ? next.slice(-200) : next;
         });
         break;
+      case "critic_warning": {
+        // v3.0.1 — phase-lock fallback notice. The backend already
+        // debounces per transition pair (one emit per (cur, next)
+        // index pair) so we don't need to dedup here, just append.
+        // Reshape the snake_case wire payload into the camelCase
+        // ``CriticWarning`` shape the rest of the React tree consumes.
+        const ts = Date.now();
+        const warning: CriticWarning = {
+          id: `cw-${ts}-${Math.random().toString(36).slice(2, 8)}`,
+          ts,
+          kind: evt.kind,
+          reason: evt.reason,
+          message: evt.message || evt.reason,
+          outgoingTrack: {
+            id: evt.outgoing_track?.id ?? null,
+            displayName: evt.outgoing_track?.display_name ?? null,
+          },
+          incomingTrack: {
+            id: evt.incoming_track?.id ?? null,
+            displayName: evt.incoming_track?.display_name ?? null,
+          },
+        };
+        setCriticWarnings((prev) => {
+          const next = [...prev, warning];
+          return next.length > CRITIC_WARNINGS_MAX
+            ? next.slice(-CRITIC_WARNINGS_MAX)
+            : next;
+        });
+        break;
+      }
       case "error":
         setError(evt.message || "Live session error");
         break;
@@ -1732,6 +1829,10 @@ export function useLiveSession(
     }
   }, []);
 
+  const dismissCriticWarning = useCallback((id: string) => {
+    setCriticWarnings((prev) => prev.filter((w) => w.id !== id));
+  }, []);
+
   return useMemo<UseLiveSessionApi>(
     () => ({
       state,
@@ -1746,6 +1847,8 @@ export function useLiveSession(
       currentTrackDuration,
       log,
       djChat,
+      criticWarnings,
+      dismissCriticWarning,
       error,
       autoplayBlocked,
       audioRef,
@@ -1776,6 +1879,8 @@ export function useLiveSession(
       currentTrackDuration,
       log,
       djChat,
+      criticWarnings,
+      dismissCriticWarning,
       error,
       autoplayBlocked,
       sendCommand,
