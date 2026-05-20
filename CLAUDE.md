@@ -39,6 +39,26 @@ npm run dev   # serves on :4010, proxies /api to :4020
 
 Requires an `.env` file — see `.env.example`.
 
+### Docker (dev stack)
+
+Alternative to the host-side `uv` / `npm` workflow above — both services
+in containers with hot reload. Requires Docker Desktop.
+
+```bash
+docker compose up --build       # first run / after dep changes
+docker compose up               # subsequent runs
+docker compose down             # stop, keep cached volumes
+docker compose down -v          # also wipe venv + node_modules caches
+```
+
+- `./tracks`, `./output`, `./artwork`, and `./agent` bind-mount from the
+  host so the catalog's relative paths resolve unchanged, new WAVs are
+  visible immediately, and generated mixes land back on the host.
+- `.env` is loaded via compose's `env_file` — same file the CLI uses.
+- One-off commands: `docker compose run --rm backend uv run pytest tests/`.
+- `--build-catalog` / `--fix-incomplete` need madmom — rebuild with
+  `docker compose build --build-arg INSTALL_BEATGRID=1 backend`.
+
 ## Project structure
 
 ```

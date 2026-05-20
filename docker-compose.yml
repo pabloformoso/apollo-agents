@@ -1,0 +1,104 @@
+# Apollo Agents — dev compose stack.
+#
+# Usage:
+#   docker compose up --build       # first run / after dep changes
+#   docker compose up               # subsequent runs
+#   docker compose down             # stop + remove containers (volumes survive)
+#   docker compose down -v          # also wipe named volumes (venv, node_modules)
+#
+# Frontend on http://localhost:4010, backend on http://localhost:4020.
+# The frontend proxies /api/* to the backend over the compose network.
+#
+# The host's ./tracks, ./output, ./artwork, ./agent (etc.) are bind-mounted
+# into the backend container so:
+#   - tracks.json's relative paths resolve unchanged inside the container,
+#   - new WAV files dropped into ./tracks/<genre>/ are visible immediately,
+#   - generated mixes in ./output/<session>/ land back on the host filesystem.
+#
+# Optional one-off commands (run from the host, NOT inside the container):
+#   docker compose run --rm backend uv run python main.py --build-catalog
+#   docker compose run --rm backend uv run pytest tests/
+#   docker compose run --rm frontend npm run test
+#
+# Catalog rebuild needs madmom — rebuild the image with the extra:
+#   docker compose build --build-arg INSTALL_BEATGRID=1 backend
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        # Default off — flip to "1" if you need ``--build-catalog`` /
+        # ``--fix-incomplete`` (the madmom downbeat tracker is 5 min /
+        # 200 MB to install and the web app doesn't need it at runtime).
+        INSTALL_BEATGRID: "0"
+    container_name: apollo-backend
+    # ``unless-stopped`` means: restart automatically on Docker Desktop /
+    # daemon / WSL restart, but stay down if YOU stopped it with
+    # ``docker compose stop`` / ``down``. Without this, a Docker Desktop
+    # restart (or a Windows hibernate / WSL reset) silently kills the
+    # stack with exit 255 and you have to ``docker compose up`` again
+    # to get it back.
+    restart: unless-stopped
+    ports:
+      - "4020:4020"
+    env_file:
+      # OPENAI_API_KEY, ANTHROPIC_API_KEY, etc. — same .env the CLI uses.
+      - .env
+    environment:
+      # Friendly defaults so the container has sane fallbacks even if
+      # .env is missing. Real keys must come from .env.
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Bind the project root so hot reload picks up edits to main.py,
+      # agent/, web/backend/, tests/, etc. immediately. The venv at
+      # /opt/venv is OUTSIDE this mount (see Dockerfile) so the host's
+      # .venv can't shadow it.
+      - ./:/app
+      # Persist the uv venv across container restarts (and skip the
+      # re-install cost when only source changes). Named so ``docker
+      # compose down -v`` can wipe it deliberately.
+      - apollo_backend_venv:/opt/venv
+    # tty + stdin_open keeps colours + Ctrl-C clean when attached.
+    tty: true
+    stdin_open: true
+
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: apollo-frontend
+    # Same self-healing policy as the backend.
+    restart: unless-stopped
+    ports:
+      - "4010:4010"
+    environment:
+      # next.config.ts already reads this — proxy /api/* into the
+      # compose network instead of localhost (which would resolve
+      # inside the frontend container, not on the host).
+      APOLLO_API_URL: "http://backend:4020"
+      # Next 16's HMR WS check rejects connections from origins the dev
+      # server didn't expect. Both localhost AND 127.0.0.1 work from
+      # the browser, but only ``allowedDevOrigins`` in next.config.ts
+      # handles the latter — keep an eye here if you start hitting
+      # blank pages on http://127.0.0.1:4010.
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      # Backend doesn't strictly need to be UP before Next starts (the
+      # proxy resolves lazily), but ``depends_on`` makes ``compose up``
+      # build them in the right order.
+      - backend
+    volumes:
+      # Bind the frontend source — but NOT the install artifacts. The
+      # anonymous volumes below shadow node_modules + .next inside the
+      # container so they keep using the Linux-built ones from the
+      # image, not whatever the host happens to have.
+      - ./web/frontend:/app
+      - /app/node_modules
+      - /app/.next
+    tty: true
+    stdin_open: true
+
+volumes:
+  apollo_backend_venv:
