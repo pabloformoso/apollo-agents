@@ -264,10 +264,17 @@ python main.py --regenerate-beatgrid --force   # re-analyse everything
 | Key | Required | Purpose |
 |-----|----------|---------|
 | `ANTHROPIC_API_KEY` | One of these | Claude (recommended, default: `claude-opus-4-6`) |
-| `OPENAI_API_KEY` | One of these | GPT-4o — also used for DALL-E 3 artwork |
+| `AZURE_OPENAI_API_KEY` | One of these | Azure OpenAI — agent fallback and DALL-E 3 artwork |
+| `AZURE_OPENAI_ENDPOINT` | With Azure | e.g. `https://<resource>.openai.azure.com/` |
+| `AZURE_OPENAI_DEPLOYMENT` | With Azure | Deployment name of the chat model (GPT-4o etc.) |
+| `AZURE_OPENAI_IMAGE_DEPLOYMENT` | For artwork | Image deployment (dall-e-3, gpt-image-1/2). Optional — artwork is skipped if unset |
+| `AZURE_OPENAI_IMAGE_ENDPOINT` | Optional | Image resource endpoint if different from chat; falls back to `AZURE_OPENAI_ENDPOINT` |
+| `AZURE_OPENAI_IMAGE_API_KEY` | Optional | Image resource key if different from chat; falls back to `AZURE_OPENAI_API_KEY` |
+| `AZURE_OPENAI_API_VERSION` | Optional | Chat API version (default `2024-10-21`) |
+| `AZURE_OPENAI_IMAGE_API_VERSION` | Optional | Image API version (default `2024-02-01`) |
 | `AGENT_PROVIDER=ollama` | One of these | Use a local Ollama model (default: `gemma4:4b`) |
 | `OLLAMA_BASE_URL` | Optional | Override Ollama endpoint (default: `http://localhost:11434/v1`) |
-| `AGENT_MODEL` | Optional | Override the model for any provider (e.g. `AGENT_MODEL=gpt-4o-mini`) |
+| `AGENT_MODEL` | Optional | Override the model for any provider |
 
 ---
 
