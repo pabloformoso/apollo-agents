@@ -32,7 +32,7 @@ from moviepy import (
     VideoFileClip,
     vfx,
 )
-from openai import OpenAI
+from openai import AzureOpenAI
 from PIL import Image, ImageFilter
 from pydub import AudioSegment
 from scipy.ndimage import gaussian_filter, gaussian_filter1d
@@ -124,7 +124,7 @@ SPECTRAL_PALETTE = np.array([
 # AI-generated artwork backgrounds
 ARTWORK_BLUR_RADIUS = 2
 ARTWORK_DARKEN_FACTOR = 0.85        # 15% darker
-ARTWORK_API_SIZE = "1792x1024"      # DALL-E 3 closest to 16:9
+ARTWORK_API_SIZE = "1536x1024"      # gpt-image-1/2 closest to 16:9 (3:2 actual)
 
 # Artwork prompt templates (keyed by artwork_style in session theme)
 ARTWORK_PROMPTS = {
@@ -344,6 +344,55 @@ _CAMELOT_MINOR = {
 # Krumhansl-Schmuckler tonal hierarchy profiles
 _KS_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
 _KS_MINOR = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+
+
+def _build_azure_chat_client():
+    """Build an AzureOpenAI client for chat completions.
+
+    Required env: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION (default 2024-10-21).
+    """
+    return AzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+    )
+
+
+def _build_azure_image_client():
+    """Build an AzureOpenAI client for image generation (DALL-E / gpt-image-*).
+
+    The image deployment often lives on a different Azure resource than chat,
+    so we read endpoint/key from AZURE_OPENAI_IMAGE_* with a fallback to the
+    chat env vars when only one resource is in use.
+
+    Required: AZURE_OPENAI_IMAGE_API_KEY (or AZURE_OPENAI_API_KEY),
+    AZURE_OPENAI_IMAGE_ENDPOINT (or AZURE_OPENAI_ENDPOINT),
+    AZURE_OPENAI_IMAGE_API_VERSION (default 2024-02-01).
+    """
+    return AzureOpenAI(
+        api_key=os.environ.get("AZURE_OPENAI_IMAGE_API_KEY") or os.environ["AZURE_OPENAI_API_KEY"],
+        azure_endpoint=os.environ.get("AZURE_OPENAI_IMAGE_ENDPOINT") or os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_version=os.getenv("AZURE_OPENAI_IMAGE_API_VERSION", "2024-02-01"),
+    )
+
+
+def _decode_image_response(response) -> bytes:
+    """Return raw image bytes from an OpenAI images.generate response.
+
+    Azure image deployments return either b64_json (DALL-E 3, gpt-image-*
+    default) or a presigned url. Handle both.
+    """
+    data0 = response.data[0]
+    b64 = getattr(data0, "b64_json", None)
+    if b64:
+        return base64.b64decode(b64)
+    url = getattr(data0, "url", None)
+    if url:
+        import urllib.request
+        with urllib.request.urlopen(url) as r:
+            return r.read()
+    raise ValueError("images.generate response had neither b64_json nor url")
 
 
 def _get_session_theme(session_config):
@@ -1396,7 +1445,7 @@ def _collision_groups(entries: list[dict]) -> list[tuple[str, str, list[dict]]]:
 def _llm_disambiguate(groups_payload: list[dict]) -> dict[str, str]:
     """Single-shot LLM call returning {track_id: new_display_name}.
 
-    Tries Anthropic first (Claude), then OpenAI. Returns {} on any failure.
+    Tries Anthropic first (Claude), then Azure OpenAI. Returns {} on any failure.
     """
     system = (
         "You rename Suno-generated tracks that share titles within a music genre. "
@@ -1432,11 +1481,11 @@ def _llm_disambiguate(groups_payload: list[dict]) -> dict[str, str]:
         except Exception as e:
             print(f"  [Anthropic disambiguation failed: {e}]")
 
-    if text is None and os.getenv("OPENAI_API_KEY"):
+    if text is None and os.getenv("AZURE_OPENAI_API_KEY"):
         try:
-            client = OpenAI()
+            client = _build_azure_chat_client()
             resp = client.chat.completions.create(
-                model="gpt-4o",
+                model=os.environ["AZURE_OPENAI_DEPLOYMENT"],
                 response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": system},
@@ -1445,7 +1494,7 @@ def _llm_disambiguate(groups_payload: list[dict]) -> dict[str, str]:
             )
             text = resp.choices[0].message.content
         except Exception as e:
-            print(f"  [OpenAI disambiguation failed: {e}]")
+            print(f"  [Azure OpenAI disambiguation failed: {e}]")
             return {}
 
     if not text:
@@ -3537,8 +3586,11 @@ def _generate_artwork(track_name, artwork_dir, theme=None):
         print(f"  Artwork cached: {cache_path}")
         return cache_path
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print(f"  Skipping artwork for '{track_name}' (no API key)")
+    if not os.environ.get("AZURE_OPENAI_API_KEY"):
+        print(f"  Skipping artwork for '{track_name}' (no AZURE_OPENAI_API_KEY)")
+        return None
+    if not os.environ.get("AZURE_OPENAI_IMAGE_DEPLOYMENT"):
+        print(f"  Skipping artwork for '{track_name}' (no AZURE_OPENAI_IMAGE_DEPLOYMENT)")
         return None
 
     # Select prompt template based on theme artwork_style
@@ -3550,16 +3602,16 @@ def _generate_artwork(track_name, artwork_dir, theme=None):
 
     print(f"  Generating artwork for '{track_name}' (style: {style})...")
     try:
-        client = OpenAI()
+        client = _build_azure_image_client()
+        # Minimal kwargs — gpt-image-1/2 reject DALL-E-3-only params like
+        # response_format and quality="standard"/"hd".
         response = client.images.generate(
-            model="dall-e-3",
+            model=os.environ["AZURE_OPENAI_IMAGE_DEPLOYMENT"],
             prompt=prompt,
             size=ARTWORK_API_SIZE,
-            quality="standard",
-            response_format="b64_json",
             n=1,
         )
-        image_data = base64.b64decode(response.data[0].b64_json)
+        image_data = _decode_image_response(response)
         img = Image.open(io.BytesIO(image_data))
         img = _cover_crop(img, VIDEO_SIZE[0], VIDEO_SIZE[1])
         img.save(cache_path)
@@ -4012,8 +4064,8 @@ def main():
         print("       python main.py --build-catalog")
         sys.exit(1)
 
-    if not os.environ.get("OPENAI_API_KEY"):
-        print("Warning: OPENAI_API_KEY not set. Artwork generation will be skipped.\n")
+    if not os.environ.get("AZURE_OPENAI_API_KEY"):
+        print("Warning: AZURE_OPENAI_API_KEY not set. Artwork generation will be skipped.\n")
 
     # Slugify name for use as folder name
     session_name = _slugify(args.name)

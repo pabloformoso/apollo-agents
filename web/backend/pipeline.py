@@ -64,18 +64,22 @@ from agent.tools import (  # noqa: E402
 # ---------------------------------------------------------------------------
 _PROVIDER_ENV = os.getenv("AGENT_PROVIDER", "")
 _HAS_ANTHROPIC = bool(os.getenv("ANTHROPIC_API_KEY"))
-_HAS_OPENAI = bool(os.getenv("OPENAI_API_KEY"))
+_HAS_AZURE = bool(os.getenv("AZURE_OPENAI_API_KEY"))
 
 if _PROVIDER_ENV == "anthropic" or (_HAS_ANTHROPIC and not _PROVIDER_ENV):
     _PROVIDER = "anthropic"
-elif _PROVIDER_ENV == "openai" or (_HAS_OPENAI and not _PROVIDER_ENV):
-    _PROVIDER = "openai"
+elif _PROVIDER_ENV == "azure" or (_HAS_AZURE and not _PROVIDER_ENV):
+    _PROVIDER = "azure"
 elif _PROVIDER_ENV == "ollama":
     _PROVIDER = "ollama"
 else:
     _PROVIDER = "anthropic"
 
-_DEFAULT_MODELS = {"anthropic": "claude-opus-4-6", "openai": "gpt-4o", "ollama": "gemma4:4b"}
+_DEFAULT_MODELS = {
+    "anthropic": "claude-opus-4-6",
+    "azure": os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
+    "ollama": "gemma4:4b",
+}
 _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODELS.get(_PROVIDER, "claude-opus-4-6"))
 
 # ---------------------------------------------------------------------------
@@ -540,6 +544,16 @@ async def _run_anthropic_streaming(
     return final_text
 
 
+def _build_async_azure_client():
+    """Build an AsyncAzureOpenAI client from AZURE_OPENAI_* env vars."""
+    from openai import AsyncAzureOpenAI  # noqa: PLC0415
+    return AsyncAzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+    )
+
+
 async def _run_openai_streaming(
     system: str,
     tool_fns: list[Callable],
@@ -549,10 +563,18 @@ async def _run_openai_streaming(
     max_turns: int,
     base_url: str | None = None,
 ) -> str:
-    import json as _json  # noqa: PLC0415
-    from openai import AsyncOpenAI  # noqa: PLC0415
+    """Streaming runner for OpenAI-compatible APIs.
 
-    client = AsyncOpenAI(base_url=base_url) if base_url else AsyncOpenAI()
+    When base_url is set, uses AsyncOpenAI (currently only Ollama).
+    Otherwise constructs an AsyncAzureOpenAI client.
+    """
+    import json as _json  # noqa: PLC0415
+
+    if base_url:
+        from openai import AsyncOpenAI  # noqa: PLC0415
+        client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+    else:
+        client = _build_async_azure_client()
     schemas = _build_openai_schemas(tool_fns)
     tool_index = {fn.__name__: fn for fn in tool_fns}
     final_text = ""

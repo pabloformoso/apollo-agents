@@ -44,7 +44,7 @@ services:
     ports:
       - "4020:4020"
     env_file:
-      # OPENAI_API_KEY, ANTHROPIC_API_KEY, etc. — same .env the CLI uses.
+      # ANTHROPIC_API_KEY, AZURE_OPENAI_*, etc. — same .env the CLI uses.
       - .env
     environment:
       # Friendly defaults so the container has sane fallbacks even if

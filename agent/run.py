@@ -10,10 +10,10 @@ Agents (in order):
   6. Editor REPL    — interactive editing until build
   7. Validator      — auto-triggered after build_session; analyses audio quality
 
-Supports Anthropic, OpenAI, and Ollama — auto-detected from .env:
-  ANTHROPIC_API_KEY → Claude (default: claude-opus-4-6)
-  OPENAI_API_KEY    → GPT   (default: gpt-4o)
-  AGENT_PROVIDER=ollama → local Ollama (default: gemma4:4b)
+Supports Anthropic, Azure OpenAI, and Ollama — auto-detected from .env:
+  ANTHROPIC_API_KEY       → Claude (default: claude-opus-4-6)
+  AZURE_OPENAI_API_KEY    → Azure OpenAI (deployment from AZURE_OPENAI_DEPLOYMENT)
+  AGENT_PROVIDER=ollama   → local Ollama (default: gemma4:4b)
 
 Override: AGENT_MODEL=gpt-4o-mini python agent/run.py
 """
@@ -79,14 +79,14 @@ def _ollama_running() -> bool:
 
 
 _HAS_ANTHROPIC = bool(os.getenv("ANTHROPIC_API_KEY"))
-_HAS_OPENAI = bool(os.getenv("OPENAI_API_KEY"))
+_HAS_AZURE = bool(os.getenv("AZURE_OPENAI_API_KEY"))
 
 _PROVIDER = os.getenv("AGENT_PROVIDER", "")
 if not _PROVIDER:
     if _HAS_ANTHROPIC:
         _PROVIDER = "anthropic"
-    elif _HAS_OPENAI:
-        _PROVIDER = "openai"
+    elif _HAS_AZURE:
+        _PROVIDER = "azure"
     elif os.getenv("OLLAMA_BASE_URL") or _ollama_running():
         _PROVIDER = "ollama"
     else:
@@ -94,7 +94,7 @@ if not _PROVIDER:
 
 _DEFAULT_MODEL = {
     "anthropic": "claude-opus-4-6",
-    "openai": "gpt-4o",
+    "azure": os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
     "ollama": "gemma4:4b",
 }.get(_PROVIDER, "claude-opus-4-6")
 _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODEL)
@@ -435,7 +435,7 @@ def run_agent(
         return _run_agent_anthropic(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
     if _PROVIDER == "ollama":
         return _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
-    return _run_agent_openai(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
+    return _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
 
 
 def _run_agent_anthropic(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns):
@@ -503,9 +503,22 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
     return final_text
 
 
-def _run_agent_openai(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns):
-    from openai import OpenAI
-    client = OpenAI()
+def _build_azure_client():
+    """Build a sync AzureOpenAI client from AZURE_OPENAI_* env vars.
+
+    Required env: AZURE_OPENAI_API_KEY, AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_VERSION (default 2024-10-21).
+    """
+    from openai import AzureOpenAI
+    return AzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+    )
+
+
+def _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns):
+    client = _build_azure_client()
     schemas = _build_openai_schemas(tool_fns)
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     final_text = ""
@@ -1069,8 +1082,8 @@ def _orchestrate() -> None:
 def run() -> None:
     if _PROVIDER == "ollama":
         print(f"[Provider: Ollama / {_MODEL}]")
-    elif not _HAS_ANTHROPIC and not _HAS_OPENAI:
-        print("Error: set ANTHROPIC_API_KEY, OPENAI_API_KEY, or AGENT_PROVIDER=ollama in .env")
+    elif not _HAS_ANTHROPIC and not _HAS_AZURE:
+        print("Error: set ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY, or AGENT_PROVIDER=ollama in .env")
         sys.exit(1)
     _orchestrate()
 
