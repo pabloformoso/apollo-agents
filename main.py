@@ -240,6 +240,11 @@ BPM_GENRE_RANGES = {
     # overlap on either side. Lower bound 102 catches the slower
     # nu-disco end; upper bound 126 stops short of standard club house.
     "cocktail house": (102, 126),
+    # Soul / jazz — covers slow-burn ballads through up-tempo acid-jazz
+    # and soul-jazz grooves. Lower bound 75 leaves room for smoky
+    # late-night ballads; upper bound 140 catches the faster fusion /
+    # acid-jazz end without colliding with deep house territory.
+    "soul jazz": (75, 140),
 }
 
 # Default themes per genre folder for smart-generated sessions
@@ -307,6 +312,21 @@ GENRE_THEMES = {
         "waveform_color": [232, 184, 108],
         "particle_color": [255, 210, 140],
         "bg_darken": 0.75,
+        "title_font_size": 32,
+    },
+    # Soul / jazz — warm analog feel, smoky club / golden-hour vinyl.
+    # Burnt-orange title on dark espresso backdrop, amber particles.
+    # Reuses ``organic-zen`` artwork preset (warm painterly, earth
+    # tones, golden hour) as the closest match on the existing DALL-E
+    # style list.
+    "soul jazz": {
+        "artwork_style": "organic-zen",
+        "title_color": "#D98E3B",
+        "title_stroke_color": "#2A140A",
+        "bg_color": [20, 12, 8],
+        "waveform_color": [217, 142, 59],
+        "particle_color": [240, 180, 100],
+        "bg_darken": 0.8,
         "title_font_size": 32,
     },
 }

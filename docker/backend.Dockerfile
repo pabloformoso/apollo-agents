@@ -54,12 +54,22 @@ WORKDIR /app
 
 # Install Python deps first (cached layer) — only invalidates when the
 # lockfile or pyproject change, not on every source edit.
+#
+# Groups:
+#   --group web      → FastAPI / Uvicorn / JWT / bcrypt — always needed.
+#   --group youtube  → google-api-python-client + google-auth — required
+#                      for the YouTube Live Chat ingest path (otherwise
+#                      ``youtube_runtime`` fails get_credentials with
+#                      ``ModuleNotFoundError: No module named 'google'``
+#                      and the poller silently never starts, leaving the
+#                      pill stuck on ``disconnected`` regardless of
+#                      whether the user has linked YouTube).
 COPY pyproject.toml uv.lock ./
 ARG INSTALL_BEATGRID=0
 RUN if [ "$INSTALL_BEATGRID" = "1" ]; then \
-        uv sync --group web --extra beatgrid --frozen ; \
+        uv sync --group web --group youtube --extra beatgrid --frozen ; \
     else \
-        uv sync --group web --frozen ; \
+        uv sync --group web --group youtube --frozen ; \
     fi
 
 # Source — overwritten by the bind mount at runtime, but COPY-ing it
