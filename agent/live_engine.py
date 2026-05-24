@@ -26,6 +26,7 @@ crossfade_now / get_state / stop). ``LiveEngine`` is kept as an alias for
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -115,7 +116,20 @@ _CRITIC_WARNING_MESSAGES = {
 ENDLESS_GRACE_SEC = 5.0
 # Hard cap on how many tracks a single endless session can add. Prevents
 # runaway behaviour from a misbehaving agent or LLM hallucinated loops.
-ENDLESS_APPEND_CAP = 100
+# Default of 10000 covers ~a week of streaming at ~1 min/track; override
+# via APOLLO_ENDLESS_APPEND_CAP for shorter or longer guardrails.
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 
 # ---------------------------------------------------------------------------
 # Audio constants
@@ -481,7 +495,7 @@ class LiveEngineLocal:
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
         if pick is None:
             self._emit(
                 ENDLESS_WARNING,
@@ -1551,7 +1565,7 @@ class LiveEngineBrowser:
             f"exclude_size={len(exclude)}",
             flush=True,
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
         if pick is None:
             print(
                 f"[engine _maybe_end_or_extend] DECISION: _autoplay_pick returned None — "
@@ -1951,6 +1965,8 @@ def _autoplay_pick(
     catalog: list[dict],
     genre: str | None,
     exclude_ids: set[str],
+    *,
+    allow_repeats: bool = False,
 ) -> dict | None:
     """Choose the best in-genre continuation track.
 
@@ -1961,6 +1977,11 @@ def _autoplay_pick(
     against ``current_track``. Returns the top candidate or ``None`` if
     nothing matches.
 
+    When ``allow_repeats=True`` and the exclude-filtered candidate set
+    is empty, recycle from the full in-genre catalog excluding only the
+    track currently playing — this is what makes a true 24/7 endless
+    stream possible once a small catalog has been fully cycled.
+
     Pure / module-level so the engine watchdog can call it without
     touching ``self``, and so tests can exercise it without spinning up
     an engine instance.
@@ -1970,6 +1991,7 @@ def _autoplay_pick(
     target_genre = (genre or "").strip().lower()
     cur_bpm = float((current_track or {}).get("bpm") or 0.0)
     cur_key = (current_track or {}).get("camelot_key")
+    cur_id = (current_track or {}).get("id")
 
     def in_genre(t: dict) -> bool:
         gf = (t.get("genre_folder") or t.get("genre") or "").strip().lower()
@@ -1979,6 +2001,14 @@ def _autoplay_pick(
         t for t in catalog
         if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
     ]
+    if not candidates and allow_repeats:
+        # Endless mode: catalog exhausted for this genre. Recycle any
+        # in-genre track that isn't the one currently playing so the
+        # stream stays alive — back-to-back repeats are still avoided.
+        candidates = [
+            t for t in catalog
+            if t.get("id") and t["id"] != cur_id and in_genre(t)
+        ]
     if not candidates:
         return None
     candidates.sort(
