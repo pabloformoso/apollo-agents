@@ -1,0 +1,86 @@
+# Everything here is excluded from the build context shipped to the
+# daemon. Bind mounts in compose IGNORE this file at RUNTIME — heavy
+# directories like ./tracks still show up in the container via the
+# volume mounts. The point of this list is to keep ``docker build``
+# fast: a ~12 GB project shouldn't transfer 12 GB to the daemon for
+# each rebuild.
+
+# --- VCS + editor ---
+.git/
+.github/
+.gitignore
+.gitattributes
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# --- Python build artifacts ---
+# Leading ``**/`` matches at any depth — without it, ``__pycache__/``
+# would only catch ``./__pycache__/`` at the context root and miss
+# ``./web/backend/__pycache__/`` etc. Same story for the patterns
+# below.
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/*.egg-info
+**/build
+**/dist
+
+# --- Python virtualenvs (host's is wrong-arch anyway) ---
+.venv/
+venv/
+env/
+
+# --- Node ---
+# Recursive ``**/`` matters MORE here — the actual node_modules sits at
+# web/frontend/node_modules (585 MB on this machine), and a non-recursive
+# ``node_modules/`` would only have caught a non-existent root-level
+# one. Same for the Next.js build dirs.
+**/node_modules
+**/.next
+**/.next-e2e
+**/out
+**/playwright-report
+**/playwright/.cache
+**/test-results
+
+# --- HEAVY runtime data — bind-mounted, never baked ---
+# These are the catalog, generated mixes, and AI artwork. On a real
+# laptop they add up to gigs. The bind mount in compose provides
+# them at /app/{tracks,output,artwork} at runtime.
+tracks/
+output/
+artwork/
+
+# Agent memory + session DB stay on the host so they persist across
+# rebuilds (the bind mount surfaces them inside the container).
+agent/memory.json
+agent/memory*.json
+
+# --- Secrets ---
+# .env IS read by compose's ``env_file`` directive — but must NOT be
+# baked into the image (it would leak via ``docker history``).
+.env
+.env.*
+!.env.example
+
+# --- Databases ---
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Logs / scratch ---
+*.log
+logs/
+.routines/
+.claude/
+
+# --- Docker self ---
+Dockerfile
+docker-compose*.yml
+docker/

@@ -26,6 +26,7 @@ crossfade_now / get_state / stop). ``LiveEngine`` is kept as an alias for
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 from pathlib import Path
@@ -78,13 +79,57 @@ SESSION_ENDED       = "session_ended"
 # in-genre continuation from the catalog.
 PLAYLIST_RUNNING_LOW = "playlist_running_low"
 ENDLESS_WARNING      = "endless_warning"
+# v3.0.1 — phase-lock observability. Fires once per (current → next)
+# transition when the planner couldn't land on a phrase boundary
+# (16/8/4-bar ladder all rejected) AND fell back to the legacy linear-
+# fade path. Surfaces in the UI as a "this transition didn't lock to a
+# downbeat — likely missing beatgrid" banner so the DJ knows whether to
+# regenerate beatgrids for the affected tracks. Carries the two track
+# ids + a ``reason`` enum so the frontend can give actionable guidance.
+CRITIC_WARNING       = "critic_warning"
+
+# Human-readable explanations for each ``critic_warning`` reason. The
+# UI can either show these verbatim or map the reason enum to its own
+# i18n strings — both paths are valid. Keys MUST match the literals in
+# ``_maybe_emit_critic_warning``.
+_CRITIC_WARNING_MESSAGES = {
+    "no_beatgrid_either_side": (
+        "Phase-lock unavailable — neither track has a beatgrid. "
+        "Run `--build-catalog --extra beatgrid` to regenerate."
+    ),
+    "no_beatgrid_outgoing": (
+        "Phase-lock unavailable — outgoing track is missing its beatgrid. "
+        "Regenerate it with `python main.py --fix-incomplete`."
+    ),
+    "no_beatgrid_incoming": (
+        "Phase-lock unavailable — incoming track is missing its beatgrid. "
+        "Regenerate it with `python main.py --fix-incomplete`."
+    ),
+    "no_phrase_anchor_in_window": (
+        "Phase-lock fell back — no phrase boundary fits the crossfade "
+        "window. The transition will use a linear fade."
+    ),
+}
 
 # Grace window the LLM gets to append a successor track before the
 # deterministic in-engine fallback kicks in.
 ENDLESS_GRACE_SEC = 5.0
 # Hard cap on how many tracks a single endless session can add. Prevents
 # runaway behaviour from a misbehaving agent or LLM hallucinated loops.
-ENDLESS_APPEND_CAP = 100
+# Default of 10000 covers ~a week of streaming at ~1 min/track; override
+# via APOLLO_ENDLESS_APPEND_CAP for shorter or longer guardrails.
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 
 # ---------------------------------------------------------------------------
 # Audio constants
@@ -187,6 +232,12 @@ class LiveEngineLocal:
         # Playlist tracking
         self._idx: int = 0
         self._extend_samples: int = 0  # extra samples before auto-crossfade
+
+        # v3.0.1 — debounce for ``critic_warning`` (one event per
+        # transition pair regardless of how many times the planner
+        # re-runs). Mirrors the browser engine's bookkeeping so the agent
+        # event log isn't spammed by re-pre-stretches on skip / extend.
+        self._critic_warned_for_transition: tuple[int, int] | None = None
 
         # Watchdog signals
         self._cf_just_finished: bool = False  # set by callback, cleared by watchdog
@@ -444,7 +495,7 @@ class LiveEngineLocal:
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
         if pick is None:
             self._emit(
                 ENDLESS_WARNING,
@@ -793,6 +844,66 @@ class LiveEngineLocal:
             self._transition_plan = plan
         self._prestretch_ready.set()
 
+        # v3.0.1 — surface phase-lock fallbacks to the agent's event
+        # log. ``plan is None`` covers the no-duration-data case
+        # ``_build_transition_plan_for_next`` returns early on; treat
+        # it like a fallback for warning purposes since the audible
+        # outcome (linear fade, no downbeat lock) is the same.
+        if plan is None or plan.phrase_tier == "fallback":
+            self._maybe_emit_critic_warning(
+                plan, current_idx, current_track, next_track,
+            )
+
+    def _maybe_emit_critic_warning(
+        self,
+        plan: LiveTransitionPlan | None,
+        current_idx: int,
+        current_track: dict,
+        next_track: dict,
+    ) -> None:
+        """CLI-side mirror of the browser engine's warning emitter.
+
+        Debounced via ``self._critic_warned_for_transition`` so the
+        event fires at most once per (current_idx, next_idx) pair, even
+        if the user skips back-and-forth and re-pre-stretches the same
+        transition. The agent loop in ``live_dj.py`` consumes the
+        event queue; logging this gives operators visible evidence
+        that "this transition won't be downbeat-locked, regenerate
+        the beatgrid".
+        """
+        next_idx = current_idx + 1
+        key = (current_idx, next_idx)
+        if self._critic_warned_for_transition == key:
+            return
+        self._critic_warned_for_transition = key
+
+        out_bg = current_track.get("beatgrid")
+        in_bg = next_track.get("beatgrid")
+        if not out_bg and not in_bg:
+            reason = "no_beatgrid_either_side"
+        elif not out_bg:
+            reason = "no_beatgrid_outgoing"
+        elif not in_bg:
+            reason = "no_beatgrid_incoming"
+        else:
+            reason = "no_phrase_anchor_in_window"
+
+        self._emit(
+            CRITIC_WARNING,
+            kind="phase_lock_fallback",
+            reason=reason,
+            outgoing_track={
+                "id": current_track.get("id"),
+                "display_name": current_track.get("display_name"),
+            },
+            incoming_track={
+                "id": next_track.get("id"),
+                "display_name": next_track.get("display_name"),
+            },
+            phrase_tier=(plan.phrase_tier if plan is not None else "fallback"),
+            message=_CRITIC_WARNING_MESSAGES.get(reason, reason),
+        )
+
     def _build_transition_plan_for_next(
         self,
         current_track: dict,
@@ -842,6 +953,9 @@ class LiveEngineLocal:
             incoming_audio_y=incoming_y,
             sample_rate=_SAMPLE_RATE,
             target_xfade_sec=float(self.crossfade_sec),
+            outgoing_bpm=float(current_track.get("bpm") or 0) or None,
+            incoming_bpm=float(next_track.get("bpm") or 0) or None,
+            bpm_match_threshold=_BPM_THRESHOLD,
         )
 
     # ------------------------------------------------------------------
@@ -1005,6 +1119,13 @@ class LiveEngineBrowser:
         # the frontend can schedule sample-accurate WebAudio crossfades
         # against the same anchors the offline + terminal-live paths use.
         self._transition_plan: LiveTransitionPlan | None = None
+
+        # v3.0.1 — debounce for ``critic_warning`` so the engine fires
+        # AT MOST once per (current_idx, next_idx) transition pair.
+        # Without this, every position update (~4 Hz) would re-emit
+        # whenever the plan kept landing on "fallback" — visually
+        # equivalent to a stuck siren in the UI banner.
+        self._critic_warned_for_transition: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Public API (matches LiveEngineProtocol)
@@ -1444,7 +1565,7 @@ class LiveEngineBrowser:
             f"exclude_size={len(exclude)}",
             flush=True,
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude)
+        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
         if pick is None:
             print(
                 f"[engine _maybe_end_or_extend] DECISION: _autoplay_pick returned None — "
@@ -1666,9 +1787,77 @@ class LiveEngineBrowser:
             incoming_audio_y=None,  # browser holds the bytes; backend doesn't
             sample_rate=_SAMPLE_RATE,
             target_xfade_sec=float(self.crossfade_sec),
+            outgoing_bpm=float(current_track.get("bpm") or 0) or None,
+            incoming_bpm=float(next_track.get("bpm") or 0) or None,
+            bpm_match_threshold=_BPM_THRESHOLD,
         )
         with self._lock:
             self._transition_plan = plan
+
+        # v3.0.1 — emit a critic_warning when the planner couldn't land
+        # on a phrase boundary. The frontend reads ``critic_warning``
+        # events and surfaces them as a non-blocking banner so the DJ
+        # knows the upcoming transition will use the linear-fade legacy
+        # path (not phase-locked). Only fire ONCE per transition pair —
+        # ``_rebuild_transition_plan`` runs on every position update.
+        self._maybe_emit_critic_warning(plan, idx, current_track, next_track)
+
+    def _maybe_emit_critic_warning(
+        self,
+        plan: LiveTransitionPlan,
+        current_idx: int,
+        current_track: dict,
+        next_track: dict,
+    ) -> None:
+        """Emit ``critic_warning`` if the plan landed on the fallback tier.
+
+        Debounced via ``self._critic_warned_for_transition`` so the
+        event fires at most once per (current_idx, next_idx) pair —
+        without that guard a stalled-at-fallback session would emit a
+        warning on every position update (~4 Hz). The reason string is
+        chosen to match the most likely fix in the UI ("regenerate
+        beatgrid for X"), not just to describe the symptom.
+        """
+        if plan.phrase_tier != "fallback":
+            return
+        next_idx = current_idx + 1
+        key = (current_idx, next_idx)
+        if self._critic_warned_for_transition == key:
+            return
+        self._critic_warned_for_transition = key
+
+        out_bg = current_track.get("beatgrid")
+        in_bg = next_track.get("beatgrid")
+        if not out_bg and not in_bg:
+            reason = "no_beatgrid_either_side"
+        elif not out_bg:
+            reason = "no_beatgrid_outgoing"
+        elif not in_bg:
+            reason = "no_beatgrid_incoming"
+        else:
+            # Both grids exist but the phrase ladder still gave up —
+            # usually means the planner couldn't fit the requested
+            # xfade window inside the available bars (very short
+            # incoming track, or outgoing's tail too close to the end).
+            reason = "no_phrase_anchor_in_window"
+
+        self._emit(
+            CRITIC_WARNING,
+            kind="phase_lock_fallback",
+            reason=reason,
+            outgoing_track={
+                "id": current_track.get("id"),
+                "display_name": current_track.get("display_name"),
+            },
+            incoming_track={
+                "id": next_track.get("id"),
+                "display_name": next_track.get("display_name"),
+            },
+            phrase_tier=plan.phrase_tier,
+            # Human-readable fallback string the UI can show verbatim if
+            # it doesn't want to map the reason enum locally.
+            message=_CRITIC_WARNING_MESSAGES.get(reason, reason),
+        )
 
     def _phase_lock_payload(self) -> dict:
         """Serialise the current ``_transition_plan`` for the WS layer.
@@ -1678,6 +1867,14 @@ class LiveEngineBrowser:
         the signal to take its legacy linear-fade path. Keeping the
         empty case explicitly empty (rather than a structure-with-nulls)
         keeps the frontend branch concise: ``if (payload?.xfade_sec) {…}``.
+
+        v3.1 — ``incoming_rate`` / ``outgoing_rate`` carry the tempo-match
+        playback rate. The frontend applies ``incoming_rate`` as
+        ``HTMLMediaElement.playbackRate`` (with ``preservesPitch=true``)
+        on the incoming deck so its BPM matches the outgoing's during the
+        crossfade, mirroring the pyrubberband pre-stretch the CLI engine
+        runs. ``1.0`` means "no rate change" (BPMs already within
+        threshold, or one of them was missing from the catalog).
         """
         plan = self._transition_plan
         if plan is None or plan.phrase_tier == "fallback":
@@ -1690,6 +1887,8 @@ class LiveEngineBrowser:
             "incoming_pickup_skipped": plan.incoming_pickup_skipped,
             "edge_guard_samples": XFADE_EDGE_GUARD_SAMPLES,
             "sample_rate": plan.sample_rate,
+            "incoming_rate": round(plan.incoming_rate, 6),
+            "outgoing_rate": round(plan.outgoing_rate, 6),
         }
 
     def _emit(self, type_: str, **kwargs) -> None:
@@ -1766,6 +1965,8 @@ def _autoplay_pick(
     catalog: list[dict],
     genre: str | None,
     exclude_ids: set[str],
+    *,
+    allow_repeats: bool = False,
 ) -> dict | None:
     """Choose the best in-genre continuation track.
 
@@ -1776,6 +1977,11 @@ def _autoplay_pick(
     against ``current_track``. Returns the top candidate or ``None`` if
     nothing matches.
 
+    When ``allow_repeats=True`` and the exclude-filtered candidate set
+    is empty, recycle from the full in-genre catalog excluding only the
+    track currently playing — this is what makes a true 24/7 endless
+    stream possible once a small catalog has been fully cycled.
+
     Pure / module-level so the engine watchdog can call it without
     touching ``self``, and so tests can exercise it without spinning up
     an engine instance.
@@ -1785,6 +1991,7 @@ def _autoplay_pick(
     target_genre = (genre or "").strip().lower()
     cur_bpm = float((current_track or {}).get("bpm") or 0.0)
     cur_key = (current_track or {}).get("camelot_key")
+    cur_id = (current_track or {}).get("id")
 
     def in_genre(t: dict) -> bool:
         gf = (t.get("genre_folder") or t.get("genre") or "").strip().lower()
@@ -1794,6 +2001,14 @@ def _autoplay_pick(
         t for t in catalog
         if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
     ]
+    if not candidates and allow_repeats:
+        # Endless mode: catalog exhausted for this genre. Recycle any
+        # in-genre track that isn't the one currently playing so the
+        # stream stays alive — back-to-back repeats are still avoided.
+        candidates = [
+            t for t in catalog
+            if t.get("id") and t["id"] != cur_id and in_genre(t)
+        ]
     if not candidates:
         return None
     candidates.sort(

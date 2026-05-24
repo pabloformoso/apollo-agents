@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from agent.live_engine import (
     APPROACHING_CF,
+    CRITIC_WARNING,
     CROSSFADE_FINISHED,
     CROSSFADE_TRIGGERED,
     SESSION_ENDED,
@@ -456,6 +457,9 @@ class TestBrowserPhaseLockPayloadShape:
             "incoming_pickup_skipped",
             "edge_guard_samples",
             "sample_rate",
+            # v3.1 — tempo-match rates for the browser playbackRate path.
+            "incoming_rate",
+            "outgoing_rate",
         }
 
     def test_payload_empty_dict_when_no_plan(self):
@@ -471,6 +475,175 @@ class TestBrowserPhaseLockPayloadShape:
         engine = LiveEngineBrowser(crossfade_sec=12)
         engine.play([_track("a"), _track("b")])  # no beatgrid → fallback
         assert engine._phase_lock_payload() == {}
+
+
+class TestBrowserPhaseLockTempoMatching:
+    """v3.1 — tempo-match playback rate.
+
+    The browser path can't run pyrubberband, so it mimics CLI behaviour by
+    setting ``HTMLMediaElement.playbackRate`` on the incoming deck before
+    play. The backend pre-computes the rate so all three paths (offline /
+    CLI / browser) make the same stretch decision."""
+
+    def test_incoming_rate_is_one_when_bpms_match(self):
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=128.0), _v2_track("b", bpm=128.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+    def test_incoming_rate_is_one_when_delta_within_threshold(self):
+        """5-BPM delta is the threshold — exactly equal still counts as
+        "no audible benefit from stretching" (mirrors CLI behaviour)."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=128.0), _v2_track("b", bpm=124.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+    def test_incoming_rate_scales_when_delta_exceeds_threshold(self):
+        """120 BPM outgoing → 130 BPM incoming: incoming must be slowed
+        to 120/130 ≈ 0.923 so the two tracks crossfade at the same BPM.
+        Sign convention matches the CLI ``_time_stretch`` (and main's
+        compute_transition_bpm "match outgoing" branch): ratio
+        = outgoing / incoming."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=120.0), _v2_track("b", bpm=130.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == round(120.0 / 130.0, 6)
+
+    def test_incoming_rate_clamped_to_stretch_max(self):
+        """A huge BPM jump (60 → 180) would otherwise produce a 0.333
+        rate that's both unmusical and crashes browsers. Clamp keeps it
+        at 1/1.5 ≈ 0.667 — same safety bound as CLI's _STRETCH_MIN."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=60.0), _v2_track("b", bpm=180.0)]
+        )
+        payload = engine._phase_lock_payload()
+        from agent.phase_lock import STRETCH_RATIO_MIN
+        assert payload["incoming_rate"] == round(STRETCH_RATIO_MIN, 6)
+
+    def test_outgoing_rate_is_always_one_today(self):
+        """Phase 1 ships with ``outgoing_rate == 1.0`` for both small and
+        large BPM deltas. Meet-in-middle stretching on the outgoing deck
+        is reserved for Phase 2 (alongside backend pre-stretching for
+        large ratios where playbackRate quality degrades)."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=120.0), _v2_track("b", bpm=130.0)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["outgoing_rate"] == 1.0
+
+    def test_incoming_rate_is_one_when_outgoing_bpm_missing(self):
+        """Legacy catalog entries with no BPM must not crash or produce a
+        runaway rate. The backend treats missing BPM as "skip the stretch"
+        — frontend keeps playbackRate at 1.0."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        track_a = _v2_track("a", bpm=120.0)
+        track_a["bpm"] = 0  # simulate missing/invalid BPM in catalog
+        engine.play([track_a, _v2_track("b", bpm=130.0)])
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+
+class TestBrowserCriticWarning:
+    """v3.0.1 — phase-lock fallback observability.
+
+    When the planner can't find a phrase boundary (typically because a
+    catalog entry is missing its beatgrid), the engine must emit
+    ``critic_warning`` exactly ONCE per (current, next) transition so
+    the UI can surface a banner. Without the once-per-transition
+    debounce, ``_rebuild_transition_plan`` would re-fire on every
+    position update (~4 Hz) and turn the banner into a strobe.
+    """
+
+    def test_emits_critic_warning_when_no_beatgrid_either_side(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        # ``_track`` (no v2 beatgrid) → both sides legacy → fallback tier.
+        engine.play([_track("a"), _track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1
+        w = warnings[0]
+        assert w["kind"] == "phase_lock_fallback"
+        assert w["reason"] == "no_beatgrid_either_side"
+        assert w["outgoing_track"]["id"] == "a"
+        assert w["incoming_track"]["id"] == "b"
+        # Human-readable message must be present so a UI that doesn't
+        # locally interpret the ``reason`` enum still has something to
+        # show.
+        assert "beatgrid" in w["message"].lower()
+
+    def test_emits_warning_with_outgoing_only_reason(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        # Outgoing has no beatgrid; incoming has v2.
+        engine.play([_track("a"), _v2_track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        # When only one side has a beatgrid, the planner can still
+        # synthesise a v1 grid for the other side via ``resolve_downbeats``
+        # — so an anchor IS found and the tier may NOT be "fallback".
+        # The test contract is just: if a warning IS emitted, it must
+        # be the right reason. (The presence assertion belongs in the
+        # both-sides-missing test above.)
+        if warnings:
+            assert warnings[0]["reason"] in {
+                "no_beatgrid_outgoing",
+                "no_phrase_anchor_in_window",
+            }
+
+    def test_no_warning_when_both_sides_have_v2_beatgrids(self):
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        # Healthy catalog → no warning. If this fires unexpectedly the
+        # debounce or phrase-tier logic has regressed and the UI would
+        # cry wolf on a perfectly good transition.
+        assert warnings == []
+
+    def test_warning_debounced_across_repeated_rebuilds(self):
+        """``_rebuild_transition_plan`` is called from many places
+        (play, report_playback_pos, skip, etc.) — sometimes several
+        times during the same transition. The warning MUST fire at
+        most once per (current, next) pair."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_track("a"), _track("b")])
+        # Re-trigger the planner multiple times — simulating position
+        # updates that keep re-deriving the same transition.
+        for _ in range(5):
+            engine._rebuild_transition_plan()
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1, (
+            f"Expected exactly one critic_warning per transition; got "
+            f"{len(warnings)}. Debounce in _maybe_emit_critic_warning "
+            f"is broken — the UI banner would flash on every ~4 Hz "
+            f"position update."
+        )
+
+    def test_warning_fires_again_on_new_transition_pair(self):
+        """The debounce is per (current, next) tuple — advancing to
+        the next track must NOT prevent a fresh warning for the new
+        upcoming transition."""
+        rec = _Recorder()
+        engine = LiveEngineBrowser(emitter=rec, crossfade_sec=12)
+        engine.play([_track("a"), _track("b"), _track("c")])
+        rec.events.clear()
+        # Simulate cursor advancing to track b — now (b, c) is the
+        # active transition pair.
+        with engine._lock:
+            engine._idx = 1
+        engine._rebuild_transition_plan()
+        warnings = [e for e in rec.events if e["type"] == CRITIC_WARNING]
+        assert len(warnings) == 1
+        assert warnings[0]["incoming_track"]["id"] == "c"
 
 
 class TestBrowserNoDeadlockOnReportPlaybackPos:

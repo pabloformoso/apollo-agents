@@ -149,6 +149,93 @@ def test_autoplay_pick_returns_none_on_empty_catalog():
 
 
 # ---------------------------------------------------------------------------
+# _autoplay_pick — allow_repeats fallback (24/7 streaming)
+# ---------------------------------------------------------------------------
+
+def test_autoplay_pick_returns_none_when_all_in_genre_excluded_without_allow_repeats():
+    """Default behaviour: exclude_ids covers every in-genre track →
+    no candidate. This is what kills a session without endless mode's
+    recycle fallback."""
+    catalog = [
+        _track("a", genre_folder="lofi - ambient", bpm=76),
+        _track("b", genre_folder="lofi - ambient", bpm=80),
+    ]
+    current = _track("playing", bpm=78, genre_folder="lofi - ambient")
+    pick = _autoplay_pick(current, catalog, "lofi - ambient", {"a", "b"})
+    assert pick is None
+
+
+def test_autoplay_pick_with_allow_repeats_recycles_excluded_tracks():
+    """allow_repeats: when the exclude filter eats the whole pool, fall
+    back to the full in-genre catalog so the stream keeps going."""
+    catalog = [
+        _track("a", genre_folder="lofi - ambient", bpm=76),
+        _track("b", genre_folder="lofi - ambient", bpm=80),
+    ]
+    current = _track("playing", bpm=78, genre_folder="lofi - ambient")
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", {"a", "b"}, allow_repeats=True
+    )
+    # Either 'a' or 'b' is fine — both are equidistant in BPM. The
+    # important assertion is that we got SOMETHING back.
+    assert pick is not None
+    assert pick["id"] in {"a", "b"}
+
+
+def test_autoplay_pick_with_allow_repeats_avoids_current_track():
+    """Even on a recycle, never pick the track that just finished —
+    back-to-back repeats sound broken."""
+    catalog = [
+        _track("currently-playing", genre_folder="lofi - ambient", bpm=76),
+        _track("other", genre_folder="lofi - ambient", bpm=120),
+    ]
+    current = _track("currently-playing", bpm=76, genre_folder="lofi - ambient")
+    # Both ids excluded → recycle path. Should pick the non-current one
+    # even though 'currently-playing' is a much better BPM match.
+    pick = _autoplay_pick(
+        current,
+        catalog,
+        "lofi - ambient",
+        {"currently-playing", "other"},
+        allow_repeats=True,
+    )
+    assert pick is not None and pick["id"] == "other"
+
+
+def test_autoplay_pick_with_allow_repeats_returns_none_when_only_current_in_genre():
+    """If the only in-genre track is the one currently playing, the
+    recycle can't pick anything safe — return None and let the engine
+    end the session cleanly."""
+    catalog = [
+        _track("currently-playing", genre_folder="lofi - ambient", bpm=76),
+        _track("wrong-genre", genre_folder="techno", bpm=130),
+    ]
+    current = _track("currently-playing", bpm=76, genre_folder="lofi - ambient")
+    pick = _autoplay_pick(
+        current,
+        catalog,
+        "lofi - ambient",
+        {"currently-playing"},
+        allow_repeats=True,
+    )
+    assert pick is None
+
+
+def test_autoplay_pick_allow_repeats_noop_when_fresh_candidate_exists():
+    """allow_repeats must not change behaviour when a non-excluded
+    in-genre track is still available — the fresh pick wins."""
+    catalog = [
+        _track("a", genre_folder="lofi - ambient", bpm=76),
+        _track("b", genre_folder="lofi - ambient", bpm=80),
+    ]
+    current = _track("playing", bpm=78, genre_folder="lofi - ambient")
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", {"a"}, allow_repeats=True
+    )
+    assert pick is not None and pick["id"] == "b"
+
+
+# ---------------------------------------------------------------------------
 # append_track — Browser engine
 # ---------------------------------------------------------------------------
 
@@ -286,6 +373,82 @@ def test_endless_on_grace_elapsed_with_candidate_appends_and_continues(monkeypat
     types = rec.types()
     assert SESSION_ENDED not in types
     assert ENDLESS_WARNING not in types
+
+
+def test_endless_on_exhausted_in_genre_recycles_and_keeps_streaming(monkeypatch):
+    """The 24/7 streaming case: every in-genre track in the catalog is
+    already in the playlist, so the LLM has nothing fresh to append.
+    Endless mode must still continue by recycling a previously-played
+    track instead of emitting ENDLESS_WARNING + SESSION_ENDED."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec)
+    engine.play([
+        _track("a", genre_folder="lofi - ambient", bpm=76),
+        _track("b", genre_folder="lofi - ambient", bpm=80),
+    ])
+    engine._endless_mode = True
+    # Advance to the last track so remaining_after == 0 and the
+    # fallback path actually fires.
+    engine._idx = 1
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    # The catalog matches the playlist exactly — no fresh tracks left.
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [
+            _track("a", genre_folder="lofi - ambient", bpm=76),
+            _track("b", genre_folder="lofi - ambient", bpm=80),
+        ],
+    )
+    rec.events.clear()
+    # Pretend 'b' just finished — recycle must avoid 'b' and pick 'a'.
+    current = _track("b", genre_folder="lofi - ambient", bpm=80)
+    assert engine._maybe_end_or_extend(current) is False
+    assert engine.playlist[-1]["id"] == "a"
+    types = rec.types()
+    assert SESSION_ENDED not in types
+    assert ENDLESS_WARNING not in types
+
+
+# ---------------------------------------------------------------------------
+# ENDLESS_APPEND_CAP — env override
+# ---------------------------------------------------------------------------
+
+def test_endless_append_cap_default_supports_long_streams():
+    """Default cap must comfortably exceed a multi-day stream. At
+    ~1 min/track, 10000 covers about a week."""
+    from agent.live_engine import ENDLESS_APPEND_CAP
+    assert ENDLESS_APPEND_CAP >= 10000
+
+
+def test_endless_append_cap_overridable_via_env_var(monkeypatch):
+    """Operators can tighten or loosen the runaway guard without code
+    changes via APOLLO_ENDLESS_APPEND_CAP."""
+    monkeypatch.setenv("APOLLO_ENDLESS_APPEND_CAP", "42")
+    import importlib
+
+    import agent.live_engine as engine_mod
+    importlib.reload(engine_mod)
+    try:
+        assert engine_mod.ENDLESS_APPEND_CAP == 42
+    finally:
+        # Reset the module so other tests see the default again.
+        monkeypatch.delenv("APOLLO_ENDLESS_APPEND_CAP", raising=False)
+        importlib.reload(engine_mod)
+
+
+def test_endless_append_cap_env_var_ignores_garbage(monkeypatch):
+    """A malformed env value must not blow up engine import — fall
+    back to the default instead."""
+    monkeypatch.setenv("APOLLO_ENDLESS_APPEND_CAP", "not-a-number")
+    import importlib
+
+    import agent.live_engine as engine_mod
+    importlib.reload(engine_mod)
+    try:
+        assert engine_mod.ENDLESS_APPEND_CAP == 10000
+    finally:
+        monkeypatch.delenv("APOLLO_ENDLESS_APPEND_CAP", raising=False)
+        importlib.reload(engine_mod)
 
 
 # ---------------------------------------------------------------------------

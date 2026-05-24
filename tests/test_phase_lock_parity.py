@@ -25,8 +25,10 @@ from agent.phase_lock import (
     PhaseLockPlan,
     build_live_transition_plan,
     compute_phase_lock,
+    compute_tempo_match_rate,
     resolve_downbeats,
 )
+from main import compute_transition_bpm
 
 
 # ---------------------------------------------------------------------------
@@ -275,3 +277,106 @@ class TestV1SynthParity:
             for db in offline_dbs
         )
         assert offline_bpb == 4
+
+
+# ---------------------------------------------------------------------------
+# v3.1 Tempo-match rate parity — incoming-rate decision agrees across paths
+# ---------------------------------------------------------------------------
+
+class TestTempoMatchRateParity:
+    """v3.1 — tempo matching parity.
+
+    The browser path can't run pyrubberband, so it applies the equivalent
+    tempo correction via ``HTMLMediaElement.playbackRate``. The decision
+    *whether* to stretch and *what factor* to use MUST agree with the CLI
+    engine's ``_time_stretch`` and the offline mixer's "match outgoing"
+    branch — otherwise the same playlist would still sound differently on
+    /live vs the rendered YouTube mix, defeating the v3 unification."""
+
+    @pytest.mark.parametrize("out_bpm,in_bpm", [
+        (128.0, 128.0),    # equal → no stretch
+        (128.0, 124.0),    # 4 BPM delta → within threshold
+        (128.0, 123.0),    # 5 BPM delta exactly → still within threshold
+        (120.0, 130.0),    # 10 BPM delta → slow incoming to 120
+        (130.0, 120.0),    # 10 BPM delta → speed incoming to 130
+        (140.0, 100.0),    # 40 BPM delta → 1.4 ratio (under clamp ceiling)
+        (180.0, 60.0),     # 3.0 raw ratio → clamped to STRETCH_RATIO_MAX
+        (60.0, 180.0),     # 0.333 raw ratio → clamped to STRETCH_RATIO_MIN
+    ])
+    def test_browser_rate_matches_cli_time_stretch_ratio(self, out_bpm, in_bpm):
+        """The CLI engine derives its stretch ratio from
+        ``_time_stretch``: ``ratio = to_bpm / from_bpm`` clamped to
+        ``[_STRETCH_MIN, _STRETCH_MAX]`` and gated on
+        ``abs(from - to) > _BPM_THRESHOLD``. The browser path's
+        ``incoming_rate`` MUST produce the same number — that's the
+        whole parity claim. Compute both and assert equality."""
+        from agent.live_engine import (
+            _BPM_THRESHOLD,
+            _STRETCH_MAX,
+            _STRETCH_MIN,
+        )
+
+        # Simulate CLI _time_stretch exactly (without invoking pyrubberband).
+        if abs(out_bpm - in_bpm) <= _BPM_THRESHOLD:
+            cli_ratio = 1.0
+        else:
+            cli_ratio = max(_STRETCH_MIN, min(_STRETCH_MAX, out_bpm / in_bpm))
+
+        # Browser path goes through compute_tempo_match_rate.
+        browser_rate = compute_tempo_match_rate(out_bpm, in_bpm)
+
+        assert browser_rate == pytest.approx(cli_ratio), (
+            f"Tempo-match parity broken for {out_bpm}→{in_bpm} BPM: "
+            f"CLI would stretch by {cli_ratio}, browser would playbackRate "
+            f"at {browser_rate}. Same playlist would sound different on "
+            f"/live (CLI) vs /live (browser) — defeating v3 phase-lock parity."
+        )
+
+    def test_offline_match_outgoing_branch_agrees_with_browser_rate(self):
+        """The offline pipeline's small-delta branch
+        (``compute_transition_bpm`` returning ``bpm_out``) implicitly
+        plays the incoming track at ``bpm_out`` via pyrubberband — i.e.
+        the same target the browser's playbackRate aims at. Pin that
+        the rate the browser applies equals the implicit rate the
+        offline mixer applies to the incoming track for the "match
+        outgoing" case (small delta)."""
+        out_bpm, in_bpm = 128.0, 124.0  # delta = 4 → within threshold
+        trans_bpm = compute_transition_bpm(out_bpm, in_bpm)
+        # Match-outgoing branch: trans_bpm equals out_bpm.
+        assert trans_bpm == out_bpm
+        # Browser rate is 1.0 because the delta is below the threshold;
+        # offline pyrubberband would also be a near-1.0 ratio
+        # (out_bpm / in_bpm = 1.032 — but the threshold gate keeps both
+        # paths at 1.0). Parity preserved.
+        assert compute_tempo_match_rate(out_bpm, in_bpm) == 1.0
+
+    def test_browser_engine_payload_carries_parity_rate_to_frontend(self):
+        """End-to-end: build a 2-track playlist with a BPM mismatch,
+        confirm the engine's serialised phase_lock payload carries the
+        same rate ``compute_tempo_match_rate`` returns. This is the wire
+        contract the frontend reads — if it drifts the frontend would
+        apply a different ``playbackRate`` than the parity proof above
+        guarantees."""
+        track_a = {
+            "id": "a",
+            "display_name": "A",
+            "duration_sec": 60.0,
+            "bpm": 120.0,
+            "camelot_key": "8A",
+            "hot_cues": [],
+            "beatgrid": _v2_beatgrid(60.0, bpm=120.0),
+        }
+        track_b = {
+            "id": "b",
+            "display_name": "B",
+            "duration_sec": 60.0,
+            "bpm": 130.0,
+            "camelot_key": "8A",
+            "hot_cues": [],
+            "beatgrid": _v2_beatgrid(60.0, bpm=130.0),
+        }
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([track_a, track_b])
+        payload = engine._phase_lock_payload()
+        expected = round(compute_tempo_match_rate(120.0, 130.0), 6)
+        assert payload["incoming_rate"] == expected
