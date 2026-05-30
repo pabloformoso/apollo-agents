@@ -36,6 +36,9 @@ tracks/.DS_Store
 # Claude project config
 .claude/
 
+# CodeGraph local index (per-machine SQLite DB)
+.codegraph/
+
 # Agent session memory (personal history)
 agent/memory.json
 apolloagents_paper.pdf

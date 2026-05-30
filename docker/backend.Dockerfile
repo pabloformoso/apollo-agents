@@ -54,12 +54,22 @@ WORKDIR /app
 
 # Install Python deps first (cached layer) — only invalidates when the
 # lockfile or pyproject change, not on every source edit.
+#
+# Groups:
+#   --group web      → FastAPI / Uvicorn / JWT / bcrypt — always needed.
+#   --group youtube  → google-api-python-client + google-auth — required
+#                      for the YouTube Live Chat ingest path (otherwise
+#                      ``youtube_runtime`` fails get_credentials with
+#                      ``ModuleNotFoundError: No module named 'google'``
+#                      and the poller silently never starts, leaving the
+#                      pill stuck on ``disconnected`` regardless of
+#                      whether the user has linked YouTube).
 COPY pyproject.toml uv.lock ./
 ARG INSTALL_BEATGRID=0
 RUN if [ "$INSTALL_BEATGRID" = "1" ]; then \
-        uv sync --group web --extra beatgrid --frozen ; \
+        uv sync --group web --group youtube --extra beatgrid --frozen ; \
     else \
-        uv sync --group web --frozen ; \
+        uv sync --group web --group youtube --frozen ; \
     fi
 
 # Source — overwritten by the bind mount at runtime, but COPY-ing it
@@ -70,7 +80,16 @@ COPY . .
 EXPOSE 4020
 
 # --host 0.0.0.0 so the port is reachable from the compose network.
-# --reload is fine for dev; for prod, override the command in compose.
+# --reload watches backend source only — without these excludes the
+# watcher reloads on every catalog/audio/__pycache__ write and tears
+# down live WebSocket sessions mid-mix (see RCA: 49 reloads + 2
+# watchfiles crashes during a build-catalog run). Scope = web/ so
+# tracks/, output/, artwork/, and the python bytecode cache are
+# invisible to the watcher.
 CMD ["uv", "run", "uvicorn", "backend.app:app", \
      "--host", "0.0.0.0", "--port", "4020", \
-     "--app-dir", "web", "--reload"]
+     "--app-dir", "web", "--reload", \
+     "--reload-dir", "/app/web", \
+     "--reload-dir", "/app/agent", \
+     "--reload-exclude", "*__pycache__*", \
+     "--reload-exclude", "*.pyc"]
