@@ -29,10 +29,14 @@ services:
       context: .
       dockerfile: docker/backend.Dockerfile
       args:
-        # Default off — flip to "1" if you need ``--build-catalog`` /
-        # ``--fix-incomplete`` (the madmom downbeat tracker is 5 min /
-        # 200 MB to install and the web app doesn't need it at runtime).
-        INSTALL_BEATGRID: "0"
+        # Default ON since v3.2 — madmom is mandatory for usable beat
+        # matching on percussive genres (deep house, techno). The
+        # librosa fallback locks downbeats onto the first onset (often
+        # a hi-hat / riser, not the kick), giving the engine a half-bar
+        # offset grid and audibly broken transitions in 4/4 dance
+        # music. Costs ~5 min build time + ~200 MB image size, paid
+        # once per rebuild — non-negotiable for streaming quality.
+        INSTALL_BEATGRID: "1"
     container_name: apollo-backend
     # ``unless-stopped`` means: restart automatically on Docker Desktop /
     # daemon / WSL restart, but stay down if YOU stopped it with
