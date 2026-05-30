@@ -80,7 +80,16 @@ COPY . .
 EXPOSE 4020
 
 # --host 0.0.0.0 so the port is reachable from the compose network.
-# --reload is fine for dev; for prod, override the command in compose.
+# --reload watches backend source only — without these excludes the
+# watcher reloads on every catalog/audio/__pycache__ write and tears
+# down live WebSocket sessions mid-mix (see RCA: 49 reloads + 2
+# watchfiles crashes during a build-catalog run). Scope = web/ so
+# tracks/, output/, artwork/, and the python bytecode cache are
+# invisible to the watcher.
 CMD ["uv", "run", "uvicorn", "backend.app:app", \
      "--host", "0.0.0.0", "--port", "4020", \
-     "--app-dir", "web", "--reload"]
+     "--app-dir", "web", "--reload", \
+     "--reload-dir", "/app/web", \
+     "--reload-dir", "/app/agent", \
+     "--reload-exclude", "*__pycache__*", \
+     "--reload-exclude", "*.pyc"]
