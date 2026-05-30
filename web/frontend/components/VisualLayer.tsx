@@ -58,8 +58,19 @@ import {
 
 export type VisualEffectKind = "particles" | "strobe" | "fractal";
 
+/**
+ * v3.4 — accept either an HTMLAudioElement or the BufferDeck shim
+ * exposed by useLiveSession (``VisualAudioShim`` in lib/live.ts).
+ * Both surface a numeric ``currentTime`` field; that's all this
+ * component reads. The type widening lets the shim be passed
+ * without an unsafe cast.
+ */
+interface AudioTimeSource {
+  currentTime: number;
+}
+
 interface VisualLayerProps {
-  audioRef: React.RefObject<HTMLAudioElement | null>;
+  audioRef: React.RefObject<AudioTimeSource | null>;
   currentTrack: LiveTrackSummary | null;
 }
 
