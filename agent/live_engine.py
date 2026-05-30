@@ -41,6 +41,7 @@ from agent.phase_lock import (
     LiveTransitionPlan,
     build_live_transition_plan,
 )
+from agent.transition_styles import serialise_choice
 
 # sounddevice requires PortAudio — guarded so the module can be imported in
 # headless / CI environments without audio hardware.
@@ -1879,7 +1880,7 @@ class LiveEngineBrowser:
         plan = self._transition_plan
         if plan is None or plan.phrase_tier == "fallback":
             return {}
-        return {
+        payload = {
             "outgoing_anchor_sec": round(plan.plan.outgoing_anchor_catalog_sec, 4),
             "incoming_anchor_sec": round(plan.plan.incoming_anchor_catalog_sec, 4),
             "xfade_sec": round(plan.plan.xfade_catalog_sec, 4),
@@ -1890,6 +1891,13 @@ class LiveEngineBrowser:
             "incoming_rate": round(plan.incoming_rate, 6),
             "outgoing_rate": round(plan.outgoing_rate, 6),
         }
+        # v3.3 — name + automation params for the chosen crossfade move.
+        # Always present (defaults to {"transition_style": "smooth_blend"}
+        # so the frontend can branch on a guaranteed key instead of
+        # `?.transition_style`). The bass_swap sub-block is included only
+        # when the picker chose BASS_SWAP, keeping the contract narrow.
+        payload.update(serialise_choice(plan.transition_style))
+        return payload
 
     def _emit(self, type_: str, **kwargs) -> None:
         try:
@@ -2021,11 +2029,35 @@ def _autoplay_pick(
 
 
 def _track_summary(track: dict | None) -> dict | None:
+    """Pack the subset of a catalog entry that crosses the WS to the frontend.
+
+    Only the fields the UI actually reads — full beatgrids contain a
+    100+ float downbeats array per track and would inflate every
+    track_started / live_state message. The frontend's VisualLayer only
+    needs ``beatgrid.bpm`` + ``first_beat_sec`` for its sample-accurate
+    beat clock; phase-lock anchors travel separately in the
+    ``phase_lock`` payload, so the heavy downbeats array stays
+    backend-side. Without this slim ``beatgrid`` block the UI's
+    "Degraded sync — this track has no beatgrid" banner fires on EVERY
+    track even when the catalog has full madmom data, because the
+    TypeScript ``LiveTrackSummary.beatgrid`` contract was declared but
+    never populated by this function.
+    """
     if not track:
         return None
+    bg_full = track.get("beatgrid") or {}
+    bg_slim: dict | None
+    if bg_full.get("bpm") is not None and bg_full.get("first_beat_sec") is not None:
+        bg_slim = {
+            "bpm": bg_full["bpm"],
+            "first_beat_sec": bg_full["first_beat_sec"],
+        }
+    else:
+        bg_slim = None
     return {
         "display_name": track.get("display_name", "?"),
         "bpm": track.get("bpm", 0),
         "camelot_key": track.get("camelot_key", "?"),
         "hot_cues": track.get("hot_cues", []),
+        "beatgrid": bg_slim,
     }

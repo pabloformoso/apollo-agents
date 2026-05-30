@@ -155,11 +155,40 @@ class FakeGainNode {
   }
 }
 
+// v3.3 — Web Audio BiquadFilterNode mock used by the bass_swap
+// transition style. The `frequency` AudioParam mirrors GainNode.gain in
+// terms of automation API surface so the tests can assert that the
+// engine scheduled cutoff changes at the right AudioContext times.
+class FakeBiquadFilterNode {
+  static instances: FakeBiquadFilterNode[] = [];
+  type = "highpass";
+  Q = { value: 0.7 };
+  frequency = {
+    value: 20,
+    cancelScheduledValues: vi.fn(),
+    setValueAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+  };
+  connect = vi.fn(() => this);
+  constructor() {
+    FakeBiquadFilterNode.instances.push(this);
+  }
+}
+
 class FakeAudioContext {
   currentTime = 0;
   destination = {} as AudioDestinationNode;
-  createMediaElementSource = vi.fn(() => ({ connect: vi.fn(() => ({ connect: vi.fn() })) }));
+  // The source.connect(filter).connect(gain).connect(destination) chain
+  // requires every node in the chain to expose a `connect` method that
+  // returns *something* with a `connect` method itself — an infinite
+  // chainable mock keeps the test orthogonal to the exact wiring order.
+  createMediaElementSource = vi.fn(() => {
+    const chainable: { connect: ReturnType<typeof vi.fn> } = { connect: vi.fn() };
+    chainable.connect.mockImplementation(() => chainable);
+    return chainable;
+  });
   createGain = vi.fn(() => new FakeGainNode());
+  createBiquadFilter = vi.fn(() => new FakeBiquadFilterNode());
   close = vi.fn();
 }
 
@@ -199,6 +228,7 @@ afterEach(() => {
   FakeAudioElement.instances = [];
   FakeAudioElement.nextPlayBehavior = "resolve";
   FakeGainNode.instances = [];
+  FakeBiquadFilterNode.instances = [];
 });
 
 async function flushOpen() {
@@ -1645,6 +1675,214 @@ describe("useLiveSession", () => {
         g.gain.linearRampToValueAtTime.mock.calls,
       );
       expect(linearCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  // =======================================================================
+  // v3.3 — bass_swap transition style (HPF cutoff automation on incoming).
+  //
+  // When the backend's pick_transition_style fires BASS_SWAP, the
+  // phase_lock payload carries:
+  //   transition_style: "bass_swap"
+  //   bass_swap: { hpf_cutoff_during_hz, hpf_cutoff_after_hz,
+  //                drop_at_incoming_sec }
+  //
+  // The deck schedules two AudioParam.setValueAtTime calls on the
+  // incoming filter's frequency: cutoff_during at currentTime,
+  // cutoff_after at currentTime + (drop_at_incoming - incoming_anchor)
+  // / incoming_rate. SMOOTH_BLEND (or missing payload) must NOT touch
+  // the filter beyond the defensive reset to 20 Hz.
+  // =======================================================================
+
+  describe("v3.3 bass_swap automation", () => {
+    const v2Track = (id: string, name: string) => ({
+      id,
+      display_name: name,
+      bpm: 122,
+      camelot_key: "8A",
+      duration_sec: 200,
+      beatgrid: {
+        version: 2,
+        bpm: 122,
+        first_beat_sec: 0,
+        downbeats_sec: [0, 1.967, 3.934, 5.902, 7.869, 9.836, 11.803],
+        beats_per_bar: 4,
+        source: "madmom" as const,
+      },
+    });
+
+    const bassSwapPayload = {
+      outgoing_anchor_sec: 100.0,
+      incoming_anchor_sec: 0,
+      xfade_sec: 12.0,
+      phrase_tier: "16-bar",
+      incoming_pickup_skipped: false,
+      edge_guard_samples: 64,
+      sample_rate: 44100,
+      incoming_rate: 1.0,
+      outgoing_rate: 1.0,
+      transition_style: "bass_swap" as const,
+      bass_swap: {
+        hpf_cutoff_during_hz: 120,
+        hpf_cutoff_after_hz: 20,
+        drop_at_incoming_sec: 5.902,
+      },
+    };
+
+    async function bootstrapAndStart(sessionId: string) {
+      const { result } = renderHook(() => useLiveSession(sessionId));
+      await flushOpen();
+      const playlist = [v2Track("A", "Track A"), v2Track("B", "Track B")];
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: sessionId,
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      return { result, playlist };
+    }
+
+    it("schedules HPF cutoff at hpf_cutoff_during_hz when bass_swap fires", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-1");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Exactly two filter instances exist (deck A + deck B) once
+      // ensureDeck has wired both decks. The incoming filter (deck B)
+      // is the one whose `frequency.setValueAtTime` was called with the
+      // bass_swap parameters.
+      const cutoffCalls = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.map(
+          (c) => c[0] as number,
+        ),
+      );
+      expect(cutoffCalls).toContain(120);
+      expect(cutoffCalls).toContain(20);
+    });
+
+    it("schedules the drop at currentTime + drop_offset / incoming_rate", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-2");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Find the filter that received the 120 Hz "during" cutoff —
+      // that's the incoming deck's filter.
+      const incomingFilter = FakeBiquadFilterNode.instances.find((f) =>
+        f.frequency.setValueAtTime.mock.calls.some(
+          (c) => c[0] === 120,
+        ),
+      );
+      expect(incomingFilter).toBeDefined();
+      const dropCall = incomingFilter!.frequency.setValueAtTime.mock.calls.find(
+        (c) => c[0] === 20,
+      );
+      expect(dropCall).toBeDefined();
+      // drop_at_incoming_sec=5.902, incoming_anchor_sec=0, rate=1.0
+      // → drop scheduled 5.902s after currentTime (which is 0 in mock).
+      expect(dropCall![1] as number).toBeCloseTo(5.902, 2);
+    });
+
+    it("does NOT schedule bass_swap automation when transition_style is smooth_blend", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-3");
+      const smoothPayload = {
+        ...bassSwapPayload,
+        transition_style: "smooth_blend" as const,
+        bass_swap: undefined,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: smoothPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // The 120 Hz cutoff is bass_swap-specific. Smooth blend may
+      // still re-assert the 20 Hz default for safety, so we only
+      // forbid the during-cutoff scheduling.
+      const cutoffCalls = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.map(
+          (c) => c[0] as number,
+        ),
+      );
+      expect(cutoffCalls).not.toContain(120);
+    });
+
+    it("resets incoming filter to 20 Hz on smooth_blend after a prior bass_swap", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-4");
+      // First a bass_swap to "dirty" the filter state.
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Now a smooth_blend on the same deck pair — verify a 20 Hz
+      // reset is asserted on the incoming filter so the next track
+      // doesn't inherit the 120 Hz cutoff.
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[0],
+          crossfade_sec: 12,
+          phase_lock: {
+            ...bassSwapPayload,
+            transition_style: "smooth_blend" as const,
+            bass_swap: undefined,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // At least one of the filters must have been reset to 20 Hz
+      // *after* the bass_swap calls landed on it.
+      const allResets = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.filter(
+          (c) => c[0] === 20,
+        ),
+      );
+      expect(allResets.length).toBeGreaterThanOrEqual(1);
     });
   });
 

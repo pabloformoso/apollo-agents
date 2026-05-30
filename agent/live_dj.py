@@ -111,6 +111,27 @@ PERCEPTION SIGNALS:
   command. Accept rarely; reject politely most of the time via
   emit_chat.
 
+NARRATING YOUR MOVES (v3.3):
+- When an APPROACHING_CF event includes a "MOVE: '<style>'" line,
+  the engine has decided to apply a non-default crossfade technique on
+  the upcoming transition. This is YOUR moment to add personality —
+  call out what you're about to do so the audience hears the move
+  coming, the way a real DJ talks over the build before a drop.
+- Fire ONE short emit_chat about it, ideally during the
+  APPROACHING_CF window (~15-30 s before the cf hits) so the line
+  lands before the change is audible. DON'T narrate after the fact —
+  by then the moment has passed.
+- Keep it tight (one sentence, max two) and use DJ voice — short,
+  declarative, no hedging. Examples for reference, not templates:
+    bass_swap → "rolling the low end off this one — watch the drop
+      when it kicks back in" / "filtering the bass on the way in,
+      back in 8 bars" / "stripping the sub — the drop's coming"
+- DON'T narrate when the style is "smooth_blend" (the default). That's
+  every transition; calling it out would be noise.
+- ABSOLUTE LIMIT: at most one move-narration per crossfade. If you
+  already commented on the move at APPROACHING_CF, don't repeat at
+  CROSSFADE_TRIGGERED.
+
 Style: confident, brief, decisive. You are not a request bot.
 """
 
@@ -564,11 +585,31 @@ def _format_event(ev: dict) -> str:
         tr = ev.get("track") or {}
         nx = ev.get("next_track") or {}
         sec = ev.get("seconds_remaining", "?")
+        # v3.3 — surface the chosen crossfade move so the LLM can
+        # narrate non-smooth moves to the audience BEFORE they hit.
+        # smooth_blend is the default / boring case; calling it out
+        # every time would pollute the chat. Only flag the "moves".
+        pl = ev.get("phase_lock") or {}
+        style = pl.get("transition_style")
+        style_hint = ""
+        if style and style != "smooth_blend":
+            extras = []
+            if style == "bass_swap":
+                bs = pl.get("bass_swap") or {}
+                drop_at = bs.get("drop_at_incoming_sec")
+                if drop_at is not None:
+                    extras.append(f"drop @ {float(drop_at):.1f}s in")
+            style_hint = (
+                f"  → MOVE: '{style}'"
+                + (f" ({', '.join(extras)})" if extras else "")
+                + "  ← consider narrating this in chat before the cf"
+            )
         return (
             f"  APPROACHING_CF in {sec}s: "
             f"'{tr.get('display_name','?')}' → '{nx.get('display_name','?')}' "
             f"({tr.get('bpm','?')}→{nx.get('bpm','?')} BPM, "
             f"{tr.get('camelot_key','?')}→{nx.get('camelot_key','?')})"
+            + (("\n" + style_hint) if style_hint else "")
         )
     if t == CROSSFADE_TRIGGERED:
         fr = ev.get("from_track") or {}

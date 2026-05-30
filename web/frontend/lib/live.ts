@@ -265,6 +265,30 @@ export interface PhaseLockPayload {
    * outgoing deck. Always ``1.0`` today.
    */
   outgoing_rate?: number;
+  /**
+   * v3.3 — which crossfade move the engine picked. ``smooth_blend`` is
+   * the legacy equal-power overlay-add (no EQ touch); ``bass_swap``
+   * adds a high-pass filter automation to the incoming deck, snapping
+   * the cutoff back down on a phrase-boundary downbeat for a
+   * tension/release "drop" feel. Always present when ``xfade_sec`` is
+   * set so the deck can branch on it without optional chaining.
+   */
+  transition_style?: "smooth_blend" | "bass_swap";
+  /**
+   * v3.3 — automation envelope for the ``bass_swap`` style. Present iff
+   * ``transition_style === "bass_swap"``. The deck reads:
+   *
+   *   - ``hpf_cutoff_during_hz``: cutoff applied at xfade start.
+   *   - ``hpf_cutoff_after_hz``: cutoff applied at the drop downbeat.
+   *   - ``drop_at_incoming_sec``: catalog-time position in the incoming
+   *     track where the cutoff snaps from "during" to "after". Convert
+   *     to AudioContext time using the deck's currentTime offset.
+   */
+  bass_swap?: {
+    hpf_cutoff_during_hz: number;
+    hpf_cutoff_after_hz: number;
+    drop_at_incoming_sec: number;
+  };
 }
 
 interface ServerEngineCommand {
@@ -472,6 +496,13 @@ export function useLiveSession(
   const audioCtxRef = useRef<AudioContext | null>(null);
   const gainARef = useRef<GainNode | null>(null);
   const gainBRef = useRef<GainNode | null>(null);
+  // v3.3 — per-deck high-pass filter that the bass_swap transition style
+  // automates. Inserted between the source and the gain so its output is
+  // still subject to the gain crossfade ramps. Defaults to a 20 Hz
+  // cutoff (effectively "filter off") so SMOOTH_BLEND transitions get
+  // their legacy full-range behaviour for free.
+  const filterARef = useRef<BiquadFilterNode | null>(null);
+  const filterBRef = useRef<BiquadFilterNode | null>(null);
   // Stable handle the visualizer can subscribe to. Always points at the
   // currently active deck, swapping atomically on crossfade.
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -760,9 +791,31 @@ export function useLiveSession(
           const source = ctx.createMediaElementSource(el);
           const gain = ctx.createGain();
           gain.gain.value = which === "a" ? 1 : 0;
-          source.connect(gain).connect(ctx.destination);
-          if (which === "a") gainARef.current = gain;
-          else gainBRef.current = gain;
+          // v3.3 — insert a HPF biquad between source and gain so the
+          // bass_swap transition style can automate its cutoff. Default
+          // 20 Hz is below the audible spectrum / typical playback
+          // rolloff, so SMOOTH_BLEND transitions get the legacy
+          // full-range behaviour for free without conditional wiring.
+          let filter: BiquadFilterNode | null = null;
+          try {
+            filter = ctx.createBiquadFilter();
+            filter.type = "highpass";
+            filter.frequency.value = 20;
+            filter.Q.value = 0.7;
+            source.connect(filter).connect(gain).connect(ctx.destination);
+          } catch {
+            // Older AudioContext implementations or test mocks may
+            // lack createBiquadFilter — fall back to the legacy direct
+            // wiring so playback still works.
+            source.connect(gain).connect(ctx.destination);
+          }
+          if (which === "a") {
+            gainARef.current = gain;
+            filterARef.current = filter;
+          } else {
+            gainBRef.current = gain;
+            filterBRef.current = filter;
+          }
         } catch {
           // Some test environments don't implement Web Audio fully —
           // playback still works through the <audio> element directly.
@@ -805,6 +858,21 @@ export function useLiveSession(
         try {
           gain.gain.cancelScheduledValues(ctx.currentTime);
           gain.gain.setValueAtTime(1, ctx.currentTime);
+        } catch {
+          /* ignore */
+        }
+      }
+      // v3.3 — restore the deck's HPF to the pass-through 20 Hz cutoff
+      // in case a prior bass_swap left a tail of scheduled values on
+      // this deck's filter. Without this reset, a track loaded after a
+      // bass_swap (skip, track_ended, hard cut) would inherit the
+      // 120 Hz cutoff and play with a thin low end until the next
+      // crossfade re-armed the filter.
+      const filter = which === "a" ? filterARef.current : filterBRef.current;
+      if (ctx && filter) {
+        try {
+          filter.frequency.cancelScheduledValues(ctx.currentTime);
+          filter.frequency.setValueAtTime(20, ctx.currentTime);
         } catch {
           /* ignore */
         }
@@ -928,6 +996,55 @@ export function useLiveSession(
           setAutoplayBlocked(true);
         } else {
           console.warn("[live] play() failed on crossfade (non-recoverable):", err);
+        }
+      }
+
+      // v3.3 — bass_swap: schedule the HPF cutoff envelope on the
+      // incoming deck's filter. The crossfade begins at AudioContext
+      // ``now`` (the same reference the gain ramps below use), so the
+      // drop time is computed in the same frame: it's the catalog-time
+      // offset between the bass_swap drop and the incoming anchor,
+      // scaled by ``incomingRate`` because the deck plays back at that
+      // rate. SMOOTH_BLEND skips this block — the filter sits at the
+      // default 20 Hz "filter off" cutoff from ensureDeck.
+      const filterTo = toWhich === "a" ? filterARef.current : filterBRef.current;
+      if (
+        ctx &&
+        filterTo &&
+        phaseLock?.transition_style === "bass_swap" &&
+        phaseLock.bass_swap
+      ) {
+        const now = ctx.currentTime;
+        const dropOffsetCatalogSec =
+          phaseLock.bass_swap.drop_at_incoming_sec - incomingAnchorSec;
+        const dropDelaySec = Math.max(
+          0,
+          dropOffsetCatalogSec / Math.max(0.0001, incomingRate),
+        );
+        try {
+          filterTo.frequency.cancelScheduledValues(now);
+          filterTo.frequency.setValueAtTime(
+            phaseLock.bass_swap.hpf_cutoff_during_hz,
+            now,
+          );
+          filterTo.frequency.setValueAtTime(
+            phaseLock.bass_swap.hpf_cutoff_after_hz,
+            now + dropDelaySec,
+          );
+        } catch {
+          /* BiquadFilter scheduling unavailable — fall back to no
+             automation (legacy smooth-blend behaviour) silently. */
+        }
+      } else if (ctx && filterTo) {
+        // SMOOTH_BLEND or no payload — make sure the filter is in its
+        // pass-through state in case a previous bass_swap left a
+        // pending scheduled value on this deck.
+        try {
+          const now = ctx.currentTime;
+          filterTo.frequency.cancelScheduledValues(now);
+          filterTo.frequency.setValueAtTime(20, now);
+        } catch {
+          /* ignore */
         }
       }
 
