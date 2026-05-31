@@ -4,30 +4,36 @@ import { expectPhase } from "./fixtures/phase";
 
 /**
  * v2.5.0.1 — Track-transition reliability regression.
+ * v3.4 update — adapted for AudioBufferSourceNode substrate.
  *
- * The user reported (v2.5.0 final): live session plays the first track
- * cleanly, but at end-of-track audio just stops — no crossfade, no next
- * track. Backend logs showed the second track's ``/api/tracks/.../stream``
+ * Original failure (v2.5.0): live session plays the first track cleanly,
+ * but at end-of-track audio just stops — no crossfade, no next track.
+ * Backend logs showed the second track's ``/api/tracks/.../stream``
  * was never requested.
  *
- * Root cause: the engine's watchdog is event-sourced from the browser's
- * ``playback_pos`` ping. When ``<audio>`` finishes naturally it pauses
- * and freezes ``currentTime`` — the ping value flatlines, the threshold
- * is never crossed, the engine never advances.
+ * Original root cause: the engine's watchdog is event-sourced from the
+ * browser's ``playback_pos`` ping. When ``<audio>`` finished naturally
+ * it paused and froze ``currentTime`` — the ping value flatlined, the
+ * threshold was never crossed, the engine never advanced.
  *
- * Fix: forward the ``<audio>`` element's natural ``ended`` event as a
- * synthetic ``{type: track_ended}`` WS message. The backend's
+ * Original fix: forward the ``<audio>`` element's natural ``ended``
+ * event as a synthetic ``{type: track_ended}`` WS message. The backend's
  * ``LiveEngineBrowser.report_track_ended`` advances the cursor and emits
- * ``track_started`` for the next track. There's also a backend-side
- * "endgame safeguard" inside ``report_playback_pos`` that fires the same
- * advance when ``current_time`` lands within the last 2 s of the track —
- * belt-and-braces in case the ``ended`` event is lost.
+ * ``track_started`` for the next track. Backend "endgame safeguard"
+ * inside ``report_playback_pos`` also fires the same advance when
+ * ``current_time`` lands within the last 2 s of the track.
  *
- * This spec drives the UI through the planning flow → live page, then
- * monitors the network for the second track's ``/stream`` request after
- * the first track's natural end. The mock backend serves a 1 s silence
- * WAV per track, so end-of-track happens deterministically inside the
- * first ~2 s of the live session.
+ * v3.4 — playback substrate moved to AudioBufferSourceNode. The
+ * end-of-track signal is now ``source.onended`` (a callback on the
+ * source instance) rather than an ``ended`` event on a DOM element.
+ * Forwarding still happens the same way (synthetic ``track_ended`` WS
+ * message); only the test harness's way of *firing* the end changes —
+ * we patch ``AudioContext.prototype.createBufferSource`` to register
+ * every created source and then invoke ``onended`` directly on the
+ * active one. Stream URL network proof is unchanged because v3.4
+ * still hits the same ``/api/tracks/.../stream`` endpoint to fetch
+ * MP3 bytes before decoding (the URL is the load mechanism; decode is
+ * what changed).
  */
 
 test.describe("v2.5.0.1 — track transition advances on natural end", () => {
@@ -35,24 +41,29 @@ test.describe("v2.5.0.1 — track transition advances on natural end", () => {
     page,
     request,
   }) => {
-    // Register the Audio constructor wrapper *before* any page script
-    // runs so the hook's ``new Audio()`` calls land in our registry.
-    // We can then ``dispatchEvent('ended')`` from the test process.
+    // v3.4 — register every AudioBufferSourceNode the page creates
+    // before any page script runs. The hook's BufferDeck.scheduleSource
+    // creates a fresh source per play via ``audioCtx.createBufferSource()``
+    // — we wrap the prototype method so we can find the active source
+    // later and fire its onended directly.
     await page.addInitScript(() => {
-      const OrigAudio = window.Audio;
-      const audios: HTMLAudioElement[] = [];
-      // Replace the constructor with a thin wrapper that pushes into
-      // the registry and otherwise delegates.
-      class TrackedAudio extends OrigAudio {
-        constructor(...args: ConstructorParameters<typeof Audio>) {
-          super(...args);
-          audios.push(this);
-        }
-      }
-      window.Audio = TrackedAudio as unknown as typeof Audio;
+      // Some browsers expose both AudioContext and webkitAudioContext;
+      // wrap whichever is present.
+      type Ctx = typeof AudioContext;
+      const Ctor: Ctx | undefined =
+        (window as unknown as { AudioContext?: Ctx }).AudioContext ??
+        (window as unknown as { webkitAudioContext?: Ctx }).webkitAudioContext;
+      if (!Ctor) return;
+      const origCreate = Ctor.prototype.createBufferSource;
+      const sources: AudioBufferSourceNode[] = [];
+      Ctor.prototype.createBufferSource = function () {
+        const src = origCreate.call(this);
+        sources.push(src);
+        return src;
+      };
       (
-        window as unknown as { __apolloE2EAudios?: HTMLAudioElement[] }
-      ).__apolloE2EAudios = audios;
+        window as unknown as { __apolloE2ESources?: AudioBufferSourceNode[] }
+      ).__apolloE2ESources = sources;
     });
 
     const e2eUser = await signedInOnDashboard(page, request);
@@ -94,21 +105,38 @@ test.describe("v2.5.0.1 — track transition advances on natural end", () => {
       await expect(page.getByTestId("live-autoplay-overlay")).toHaveCount(0);
     }
 
-    // The mock backend serves a 1 s silence WAV. Fire the ``ended`` event
-    // explicitly via the registry we set up in addInitScript so the spec
-    // is robust to headless audio quirks and runs in milliseconds.
+    // v3.4 — fire the active source's onended directly. The hook
+    // wraps the user-supplied onended around the source's natural one
+    // (the wrapper clears the deck's source ref and forwards the
+    // synthetic ``track_ended`` WS message). The active source is the
+    // one with an onended set — BufferDeck assigns it on every
+    // scheduleSource() call. Be defensive: BufferDeck may need a beat
+    // to actually create the source after the autoplay overlay
+    // dismissal, so poll briefly.
+    await page.waitForFunction(
+      () => {
+        const sources = (
+          window as unknown as { __apolloE2ESources?: AudioBufferSourceNode[] }
+        ).__apolloE2ESources;
+        return !!sources && sources.some((s) => typeof s.onended === "function");
+      },
+      { timeout: 5000 },
+    );
     await page.evaluate(() => {
-      const audios = (
-        window as unknown as { __apolloE2EAudios?: HTMLAudioElement[] }
-      ).__apolloE2EAudios;
-      if (!audios || audios.length === 0) return;
-      // The active deck is whichever element is non-paused with a
-      // src set. Fall back to the latest if none qualify.
-      const active =
-        audios.find((a) => !a.paused && a.src) ??
-        audios.find((a) => a.src) ??
-        audios[audios.length - 1];
-      active.dispatchEvent(new Event("ended"));
+      const sources = (
+        window as unknown as { __apolloE2ESources?: AudioBufferSourceNode[] }
+      ).__apolloE2ESources;
+      if (!sources || sources.length === 0) return;
+      // The active source is the most recently created one with a live
+      // onended handler — BufferDeck.stop() clears the prior source's
+      // onended before stop()ping it, so only the active source still
+      // has a callable handler.
+      const active = [...sources]
+        .reverse()
+        .find((s) => typeof s.onended === "function");
+      if (active && active.onended) {
+        active.onended.call(active, new Event("ended"));
+      }
     });
 
     // 3. Assert the UI now shows Track 2 (regardless of which path —
