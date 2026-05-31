@@ -41,19 +41,69 @@ test.describe("v2.5.0.1 — track transition advances on natural end", () => {
     page,
     request,
   }) => {
-    // v3.4 — register every AudioBufferSourceNode the page creates
-    // before any page script runs. The hook's BufferDeck.scheduleSource
-    // creates a fresh source per play via ``audioCtx.createBufferSource()``
-    // — we wrap the prototype method so we can find the active source
-    // later and fire its onended directly.
+    // v3.4 — three init-script patches make the test self-contained
+    // against the v3.4 substrate without needing the E2E backend to
+    // actually serve a valid audio file:
+    //
+    // (1) Wrap fetch to short-circuit stream URLs with a synthetic OK
+    //     response. We ALSO fire the real underlying request via the
+    //     original fetch (and discard the result) so Playwright's
+    //     page.on("request") still captures the URL — the existing
+    //     network-proof assertion ("both stream URLs requested") keeps
+    //     working unchanged.
+    // (2) Stub AudioContext.decodeAudioData to return a 1 s silent
+    //     PCM buffer regardless of input. The synthetic empty
+    //     ArrayBuffer from (1) won't decode for real, so we bypass
+    //     decoding entirely and hand the deck a working buffer.
+    // (3) Wrap AudioContext.createBufferSource to register every
+    //     source in window.__apolloE2ESources so the test can later
+    //     find the active one and fire its onended directly (the v3.4
+    //     analogue of dispatching "ended" on a DOM element).
     await page.addInitScript(() => {
-      // Some browsers expose both AudioContext and webkitAudioContext;
-      // wrap whichever is present.
+      // (1) — fetch shim for /api/tracks/*/stream
+      const origFetch = window.fetch;
+      window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url =
+          typeof input === "string"
+            ? input
+            : input instanceof URL
+              ? input.toString()
+              : input.url;
+        if (/\/api\/tracks\/[^/]+\/stream/.test(url)) {
+          // Fire-and-forget the real request so the page.on("request")
+          // listener captures the URL; we discard its (potentially
+          // 404) response.
+          try {
+            origFetch(input, init).catch(() => {});
+          } catch {
+            /* ignore */
+          }
+          return new Response(new ArrayBuffer(8), {
+            status: 200,
+            statusText: "OK",
+          });
+        }
+        return origFetch(input, init);
+      };
+
       type Ctx = typeof AudioContext;
       const Ctor: Ctx | undefined =
         (window as unknown as { AudioContext?: Ctx }).AudioContext ??
         (window as unknown as { webkitAudioContext?: Ctx }).webkitAudioContext;
       if (!Ctor) return;
+
+      // (2) — stub decodeAudioData to return a 1 s silent stereo buffer.
+      Ctor.prototype.decodeAudioData = function (
+        _arrayBuffer: ArrayBuffer,
+        success?: (buf: AudioBuffer) => void,
+        _error?: (e: Error) => void,
+      ): Promise<AudioBuffer> {
+        const buf = this.createBuffer(2, 44100, 44100);
+        if (success) success(buf);
+        return Promise.resolve(buf);
+      };
+
+      // (3) — register every AudioBufferSourceNode.
       const origCreate = Ctor.prototype.createBufferSource;
       const sources: AudioBufferSourceNode[] = [];
       Ctor.prototype.createBufferSource = function () {
