@@ -1,30 +1,37 @@
 "use client";
 /**
- * useLiveSession — bridge between the browser audio elements and the
+ * useLiveSession — bridge between the browser audio decks and the
  * v2.5.1 ``/ws/live/{id}`` backend WebSocket.
  *
  * The backend's ``LiveEngineBrowser`` maintains the playlist state machine
  * but never reads or writes audio — it relies on the browser to drive
  * playback. This hook owns:
  *
- *   - Two ``HTMLAudioElement`` "decks" (deck A / deck B). The active deck
- *     plays the current track; the inactive deck is loaded with the next
- *     track ahead of time so a crossfade is just a gain ramp.
- *   - A single ``AudioContext`` with two ``GainNode``s wired to it so the
- *     crossfade is sample-accurate without having to swap audio elements
- *     mid-blend.
+ *   - Two ``BufferDeck`` instances (deck A / deck B) — v3.4 replaced the
+ *     prior HTMLAudioElement substrate with AudioBufferSourceNode-based
+ *     decks scheduled on the dedicated audio rendering thread. The
+ *     active deck plays the current track; the inactive deck is preloaded
+ *     with the next track's PCM AudioBuffer so a crossfade is just a
+ *     sample-accurate start(when) plus a gain ramp scheduled at the
+ *     SAME ``when`` — eliminating the 10–50 ms "cabalgar" / phase walk
+ *     the MediaElementAudioSourceNode + MP3 frame-quantised seek used
+ *     to cause.
+ *   - A ``BufferCache`` keyed by stream URL so the next track's decode
+ *     (~0.5–2 s) is amortised across the APPROACHING_CF window and the
+ *     actual transition scheduling is synchronous.
  *   - State derived from server engine events (``track_started`` /
  *     ``approaching_crossfade`` / ``crossfade_*`` / ``track_ended`` /
  *     ``session_ended``) plus the running countdown to the next crossfade
- *     based on the active deck's ``currentTime``.
+ *     based on the active deck's virtual position.
  *   - A throttled ``playback_pos`` ping back to the server every ~250 ms
  *     so the engine knows where the browser is in the track. The interval
  *     is set up in a ``useEffect`` cleanup pair (canonical v2.4 pattern —
  *     no setState inside the effect, no ref writes during render).
  *
- * The active deck's ``audioRef`` is exposed as a stable ref so the
- * v2.5.3 ``<VisualLayer>`` can subscribe to the same audio element without
- * prop drilling through a tower of providers.
+ * The active deck's virtual position is exposed via the ``audioRef``
+ * compatibility shim (a synthetic object with a ``currentTime`` field
+ * updated on every tick) so the v2.5.3 ``<VisualLayer>`` keeps its
+ * existing read pattern without API changes.
  */
 
 import {
@@ -37,6 +44,27 @@ import {
 } from "react";
 import { getToken } from "./auth";
 import { streamUrl } from "./api";
+import {
+  BufferCache,
+  BufferDeck,
+  SCHEDULE_LOOKAHEAD_SEC,
+} from "./audio_buffer_decks";
+
+/**
+ * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
+ * beat clock. The previous substrate exposed the active HTMLAudioElement
+ * directly; with BufferDeck we read the deck's virtual position once
+ * per playback_pos tick and write it onto this object so VisualLayer's
+ * existing ``audio.currentTime`` access pattern keeps working without
+ * a prop-API change. ``duration`` mirrors the buffer's duration for the
+ * UI progress bar; ``paused`` reflects whether a source is currently
+ * scheduled.
+ */
+export interface VisualAudioShim {
+  currentTime: number;
+  duration: number;
+  paused: boolean;
+}
 
 export type LiveEngineState = "idle" | "playing" | "crossfading" | "ended";
 
@@ -167,8 +195,19 @@ export interface UseLiveSessionApi {
   error: string | null;
   /** True when the browser blocked autoplay; the UI must surface a click-to-start. */
   autoplayBlocked: boolean;
-  /** Active deck — exposed as a stable ref for the future `<VisualLayer>`. */
-  audioRef: React.RefObject<HTMLAudioElement | null>;
+  /**
+   * Active deck — exposed as a stable ref for `<VisualLayer>`.
+   *
+   * v3.4 — type widened from HTMLAudioElement to VisualAudioShim |
+   * HTMLAudioElement so the BufferDeck substrate (which has no DOM
+   * element) can provide the same ``currentTime`` / ``duration`` /
+   * ``paused`` shape VisualLayer reads. The shim is updated on every
+   * playback_pos tick from the active BufferDeck's virtual position;
+   * VisualLayer's beat clock therefore lands within one render
+   * quantum (~2.7 ms @ 48 kHz) of the actual audio output, the same
+   * precision its sample-accurate gain ramps get.
+   */
+  audioRef: React.RefObject<VisualAudioShim | HTMLAudioElement | null>;
   /** Send a control command to the backend agent. */
   sendCommand: (cmd: LiveCommand) => void;
   /** Send free-text user message to the agent. */
@@ -265,6 +304,30 @@ export interface PhaseLockPayload {
    * outgoing deck. Always ``1.0`` today.
    */
   outgoing_rate?: number;
+  /**
+   * v3.3 — which crossfade move the engine picked. ``smooth_blend`` is
+   * the legacy equal-power overlay-add (no EQ touch); ``bass_swap``
+   * adds a high-pass filter automation to the incoming deck, snapping
+   * the cutoff back down on a phrase-boundary downbeat for a
+   * tension/release "drop" feel. Always present when ``xfade_sec`` is
+   * set so the deck can branch on it without optional chaining.
+   */
+  transition_style?: "smooth_blend" | "bass_swap";
+  /**
+   * v3.3 — automation envelope for the ``bass_swap`` style. Present iff
+   * ``transition_style === "bass_swap"``. The deck reads:
+   *
+   *   - ``hpf_cutoff_during_hz``: cutoff applied at xfade start.
+   *   - ``hpf_cutoff_after_hz``: cutoff applied at the drop downbeat.
+   *   - ``drop_at_incoming_sec``: catalog-time position in the incoming
+   *     track where the cutoff snaps from "during" to "after". Convert
+   *     to AudioContext time using the deck's currentTime offset.
+   */
+  bass_swap?: {
+    hpf_cutoff_during_hz: number;
+    hpf_cutoff_after_hz: number;
+    drop_at_incoming_sec: number;
+  };
 }
 
 interface ServerEngineCommand {
@@ -460,21 +523,28 @@ export function useLiveSession(
 ): UseLiveSessionApi {
   const viewerMode = options.viewer === true;
   // ``viewerMode`` is fixed for the lifetime of the hook (an embed
-  // page never flips to operator), but stable closures (ensureDeck,
+  // page never flips to operator), but stable closures (ensureBufferDeck,
   // setEndlessModeWS, …) are created once and need a ref to see it.
   const viewerModeRef = useRef(viewerMode);
   viewerModeRef.current = viewerMode;
   // ── Refs (audio + WS plumbing) ──────────────────────────────────────────
   const wsRef = useRef<WebSocket | null>(null);
-  const deckARef = useRef<HTMLAudioElement | null>(null);
-  const deckBRef = useRef<HTMLAudioElement | null>(null);
   const activeDeckRef = useRef<"a" | "b">("a");
   const audioCtxRef = useRef<AudioContext | null>(null);
-  const gainARef = useRef<GainNode | null>(null);
-  const gainBRef = useRef<GainNode | null>(null);
-  // Stable handle the visualizer can subscribe to. Always points at the
-  // currently active deck, swapping atomically on crossfade.
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  // v3.4 — BufferDeck refs replace the prior `<audio>` + GainNode +
+  // BiquadFilterNode trio per side. Each BufferDeck owns its own gain
+  // and filter internally and exposes a sample-accurate
+  // scheduleSource(buffer, when, offset, rate) primitive.
+  const deckARef = useRef<BufferDeck | null>(null);
+  const deckBRef = useRef<BufferDeck | null>(null);
+  // Buffer cache: keyed by stream URL, holds decoded PCM. Filled by
+  // preload during APPROACHING_CF + by direct load during a hard cut /
+  // first track. Cleared on unmount.
+  const bufferCacheRef = useRef<BufferCache | null>(null);
+  // Compatibility shim for VisualLayer.tsx — exposes the active deck's
+  // virtual position behind the same { currentTime } shape the prior
+  // HTMLAudioElement ref provided. Updated every playback_pos tick.
+  const audioRef = useRef<VisualAudioShim | null>(null);
   const currentTrackIdRef = useRef<string | null>(null);
 
   // ── State (derived from engine events) ──────────────────────────────────
@@ -668,168 +738,145 @@ export function useLiveSession(
     return ctx;
   }, [appendLog]);
 
-  const ensureDeck = useCallback(
-    (which: "a" | "b") => {
+  /**
+   * v3.4 — lazily create a BufferDeck for side ``which``. The deck owns
+   * its own gain + filter chain wired into the AudioContext. Per the
+   * spec, sources (AudioBufferSourceNode) are created on demand inside
+   * the deck's scheduleSource() — they're single-use, so we never
+   * cache a live source on the deck object itself.
+   *
+   * Returns null if the AudioContext can't be created (SSR / test
+   * environment without Web Audio). All call sites must null-check.
+   */
+  const ensureBufferDeck = useCallback(
+    (which: "a" | "b"): BufferDeck | null => {
       const refObj = which === "a" ? deckARef : deckBRef;
       if (refObj.current) return refObj.current;
-      if (typeof window === "undefined") return null;
-      const el = new Audio();
-      el.preload = "auto";
-      el.crossOrigin = "anonymous";
-      refObj.current = el;
-
-      // v2.5.0.1 — natural end-of-track notification.
-      //
-      // When `<audio>` finishes its buffer it fires ``ended``, pauses, and
-      // freezes ``currentTime``. The 250 ms ``playback_pos`` interval keeps
-      // pinging the same value to the backend, which never crosses the
-      // crossfade threshold — so the engine never advances. The fix is to
-      // forward ``ended`` as a synthetic ``track_ended`` WS message; the
-      // backend's ``LiveEngineBrowser.report_track_ended`` then advances
-      // the cursor and emits ``track_started`` for the next track.
-      //
-      // Only the *active* deck's ``ended`` matters. The inactive deck
-      // also fires ``ended`` mid-set if a previous src plays past the
-      // crossfade — guarding on ``activeDeckRef.current`` keeps the
-      // synthetic event tied to the track the user is hearing.
-      el.addEventListener("ended", () => {
-        if (activeDeckRef.current !== which) return;
-        // Viewers don't drive the engine — the primary's ``track_ended``
-        // already advances the cursor and the viewer will receive the
-        // resulting ``engine_command load`` like any other event.
-        if (viewerModeRef.current) return;
-        const ws = wsRef.current;
-        const tid = currentTrackIdRef.current;
-        if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
-        try {
-          ws.send(JSON.stringify({ type: "track_ended", track_id: tid }));
-        } catch {
-          /* ignore — backend has the endgame safeguard as a fallback */
-        }
-      });
-
-      // Diagnostic listeners — surface buffer / pause / error / mute /
-      // device events into the LiveStage log so silent stalls (HTTP
-      // stream socket dropping mid-track, OS audio output disconnecting,
-      // tab muted via Chrome's tab-mute icon) are visible. Only the
-      // *active* deck's events are logged to keep the panel readable.
-      const DIAG_EVENTS = [
-        "stalled",
-        "waiting",
-        "suspend",
-        "pause",
-        "playing",
-        "error",
-        "volumechange",
-        "ratechange",
-        "emptied",
-      ] as const;
-      for (const evt of DIAG_EVENTS) {
-        el.addEventListener(evt, () => {
-          if (activeDeckRef.current !== which) return;
-          const ct = Number.isFinite(el.currentTime) ? el.currentTime : 0;
-          const ns = el.networkState;
-          const rs = el.readyState;
-          const buffered =
-            el.buffered && el.buffered.length > 0
-              ? el.buffered.end(el.buffered.length - 1)
-              : 0;
-          const errCode = el.error ? el.error.code : null;
-          const extras: string[] = [];
-          if (evt === "volumechange") {
-            extras.push(`vol=${el.volume}`, `muted=${el.muted}`);
-          } else if (evt === "ratechange") {
-            extras.push(`rate=${el.playbackRate}`);
-          }
-          appendLog({
-            role: "assistant",
-            text:
-              `[deck ${which}] ${evt} @ ${ct.toFixed(1)}s ` +
-              `(net=${ns} ready=${rs} buf=${buffered.toFixed(1)}s` +
-              (errCode !== null ? ` errCode=${errCode}` : "") +
-              (extras.length ? ` ${extras.join(" ")}` : "") +
-              ")",
-            ts: Date.now(),
-          });
-        });
-      }
-
       const ctx = ensureAudioContext();
-      if (ctx) {
-        try {
-          const source = ctx.createMediaElementSource(el);
-          const gain = ctx.createGain();
-          gain.gain.value = which === "a" ? 1 : 0;
-          source.connect(gain).connect(ctx.destination);
-          if (which === "a") gainARef.current = gain;
-          else gainBRef.current = gain;
-        } catch {
-          // Some test environments don't implement Web Audio fully —
-          // playback still works through the <audio> element directly.
-        }
+      if (!ctx) return null;
+      try {
+        const deck = new BufferDeck(ctx, which === "a" ? 1 : 0);
+        refObj.current = deck;
+        return deck;
+      } catch (err) {
+        // Test environments / older AudioContext mocks may lack
+        // createBiquadFilter or createBufferSource. Surface so the
+        // diagnostic panel can flag the substrate failure rather
+        // than silently going mute.
+        appendLog({
+          role: "assistant",
+          text: `[deck ${which}] BufferDeck init failed: ${
+            (err as { name?: string })?.name ?? "Error"
+          }`,
+          ts: Date.now(),
+        });
+        return null;
       }
-      return el;
     },
     [ensureAudioContext, appendLog],
   );
 
+  /**
+   * v3.4 — lazily create the BufferCache. Same audio context as the
+   * decks so decoded PCM is at the right sample rate for sample-
+   * accurate scheduling against the playback clock.
+   */
+  const ensureBufferCache = useCallback((): BufferCache | null => {
+    if (bufferCacheRef.current) return bufferCacheRef.current;
+    const ctx = ensureAudioContext();
+    if (!ctx) return null;
+    const cache = new BufferCache(ctx);
+    bufferCacheRef.current = cache;
+    return cache;
+  }, [ensureAudioContext]);
+
+  /**
+   * Common natural-end-of-track handler — forwards a synthetic
+   * track_ended WS message to the backend so its LiveEngineBrowser
+   * can advance the cursor. Only fires when ``which`` is still the
+   * active deck (the inactive deck's source may also end if the
+   * outgoing track simply plays past its crossfade tail — that's
+   * not a session-advancing event).
+   */
+  const onDeckEnded = useCallback((which: "a" | "b") => {
+    if (activeDeckRef.current !== which) return;
+    if (viewerModeRef.current) return;
+    const ws = wsRef.current;
+    const tid = currentTrackIdRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
+    try {
+      ws.send(JSON.stringify({ type: "track_ended", track_id: tid }));
+    } catch {
+      /* ignore — backend has the endgame safeguard as a fallback */
+    }
+  }, []);
+
   const loadIntoActiveDeck = useCallback(
     async (track: LiveTrackSummary) => {
       const which = activeDeckRef.current;
-      const el = ensureDeck(which);
-      if (!el) return;
-      audioRef.current = el;
-      el.src = streamUrl(track.id);
-      // v3.1 — reset the tempo-match rate to 1.0 on a plain ``load``. A
-      // prior crossfade may have left ``playbackRate`` at e.g. 0.95 on
-      // this deck; without the reset the next track loaded directly
-      // (engine advanced via ``track_ended``, skip, or hard-cut) would
-      // play at the previous transition's tempo-match ratio instead of
-      // its native speed.
-      try {
-        el.playbackRate = 1.0;
-        el.preservesPitch = true;
-      } catch {
-        /* preservesPitch may be readonly on legacy WebKit; ignore */
-      }
-      // v2.5.0.1 — defensive gain restore. After a crossfade the
-      // previously-inactive deck's gain was ramped down to 0; if a
-      // ``load`` (rather than another ``crossfade``) is the next event
-      // (e.g. the engine advanced via ``track_ended``), the new track
-      // would play silently. Reset both Web Audio gain (when wired) and
-      // the element-level volume so playback is audible regardless of
-      // path.
       const ctx = ensureAudioContext();
-      const gain = which === "a" ? gainARef.current : gainBRef.current;
-      if (ctx && gain) {
-        try {
-          gain.gain.cancelScheduledValues(ctx.currentTime);
-          gain.gain.setValueAtTime(1, ctx.currentTime);
-        } catch {
-          /* ignore */
-        }
-      }
-      el.volume = 1;
+      const deck = ensureBufferDeck(which);
+      const cache = ensureBufferCache();
+      if (!ctx || !deck || !cache) return;
+
+      // v3.4 — restore the deck to known state BEFORE scheduling the
+      // new source. Gain to 1 (the new active track should be audible);
+      // filter cutoff back to 20 Hz pass-through (clears any pending
+      // bass_swap automation from a previous transition); kills the
+      // currently-playing source if any. Equivalent to the prior
+      // gain/filter/playbackRate reset block but expressed at the deck
+      // abstraction layer.
+      deck.stop();
+      deck.resetAutomation(1);
+
+      // Decode the track into PCM. This is the latency-bearing step
+      // (~0.5–2 s on slow hardware for a 4-min MP3) so the call site
+      // SHOULD have preloaded via cache.load() earlier. For a fresh
+      // load (no preload) we incur the latency now — same UX as the
+      // prior path (HTMLAudioElement also had to buffer before
+      // play()).
+      let buffer: AudioBuffer;
       try {
-        await el.play();
+        buffer = await cache.load(streamUrl(track.id));
+      } catch (err) {
+        console.warn("[live] decodeAudioData failed on load:", err);
+        return;
+      }
+
+      // Schedule with sample-accurate forward-lookahead — see
+      // SCHEDULE_LOOKAHEAD_SEC doc. start() returns immediately; the
+      // audio thread picks up the scheduled event on its next render
+      // quantum.
+      const when = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC;
+      try {
+        deck.scheduleSource(buffer, when, 0, 1.0, track.id, () =>
+          onDeckEnded(which),
+        );
         setAutoplayBlocked(false);
       } catch (err) {
-        // Distinguish "browser blocked autoplay" (NotAllowedError — UI must
-        // surface a click-to-start overlay) from "media failed to load"
-        // (NotSupportedError / TypeError — no overlay would help, the src
-        // is broken). Anything we can't classify is treated as autoplay
-        // gating because that's the user-recoverable case.
+        // Most likely failure mode: AudioContext suspended (autoplay
+        // policy). Surface the click-to-start overlay so the user
+        // gesture can resume() the context.
         const name = (err as { name?: string })?.name ?? "";
-        if (name === "NotAllowedError" || name === "" || name === "AbortError") {
-          console.warn("[live] autoplay blocked on load:", err);
+        if (name === "InvalidStateError" || name === "NotAllowedError" || name === "") {
+          console.warn("[live] schedule blocked on load:", err);
           setAutoplayBlocked(true);
         } else {
-          console.warn("[live] play() failed on load (non-recoverable):", err);
+          console.warn("[live] scheduleSource failed (non-recoverable):", err);
         }
       }
+
       currentTrackIdRef.current = track.id;
+      // Refresh the VisualLayer shim immediately so the UI sees the
+      // new duration on the next render rather than waiting for the
+      // 250 ms playback_pos tick.
+      audioRef.current = {
+        currentTime: deck.position(),
+        duration: deck.duration(),
+        paused: !deck.isPlaying(),
+      };
     },
-    [ensureDeck, ensureAudioContext],
+    [ensureAudioContext, ensureBufferDeck, ensureBufferCache, onDeckEnded],
   );
 
   const hardCutToTrack = useCallback(
@@ -847,140 +894,216 @@ export function useLiveSession(
       crossfadeSec: number,
       phaseLock?: PhaseLockPayload,
     ) => {
-      // Load the incoming track on the inactive deck, ramp the gains.
+      // v3.4 — sample-accurate verify-then-commit crossfade:
+      //   1. Decode the incoming track into a PCM AudioBuffer (likely
+      //      already preloaded — see preloadIncoming() called from the
+      //      APPROACHING_CF handler).
+      //   2. Pick ONE future AudioContext time `when` to land everything:
+      //      the new source's start(), the outgoing gain ramp, the
+      //      incoming gain ramp, AND any bass_swap HPF automation.
+      //      Because all four hit the same audio-thread clock at the
+      //      same sample, the kicks of outgoing and incoming align by
+      //      construction — eliminating the 10–50 ms "cabalgar" we saw
+      //      with the prior HTMLAudioElement substrate (where MP3
+      //      seek quantisation + play()-await wall-clock latency
+      //      conspired to drift the two decks apart).
+      //   3. Schedule, then atomically swap activeDeckRef.
+
       const fromWhich = activeDeckRef.current;
       const toWhich = fromWhich === "a" ? "b" : "a";
       const ctx = ensureAudioContext();
-      const fromEl = ensureDeck(fromWhich);
-      const toEl = ensureDeck(toWhich);
-      if (!fromEl || !toEl) return;
-      toEl.src = streamUrl(track.id);
+      const fromDeck = ensureBufferDeck(fromWhich);
+      const toDeck = ensureBufferDeck(toWhich);
+      const cache = ensureBufferCache();
+      if (!ctx || !fromDeck || !toDeck || !cache) return;
 
-      // v3.1 — tempo-match the incoming deck to the outgoing's BPM via
-      // ``playbackRate`` (with ``preservesPitch=true`` so pitch/key
-      // doesn't shift). The backend supplies ``incoming_rate`` =
-      // outgoing_bpm / incoming_bpm (clamped to [1/1.5, 1.5]) when the
-      // delta exceeds the threshold; ``1.0`` / missing means leave at
-      // native rate. This must be set BEFORE ``play()`` so the first
-      // audible sample is already at the correct tempo — matching the
-      // CLI ``LiveEngineLocal`` which pre-stretches the whole buffer
-      // with pyrubberband. Kept at the matched rate past the crossfade
-      // (no ramp-back) for CLI parity.
+      // v3.1 carried forward — tempo-match the incoming deck to the
+      // outgoing's BPM via AudioBufferSourceNode.playbackRate
+      // (sample-accurate equivalent of the prior HTMLMediaElement
+      // playbackRate + preservesPitch). Backend supplies
+      // incoming_rate = outgoing_bpm / incoming_bpm clamped to
+      // [1/1.5, 1.5]; 1.0 / missing means leave at native rate.
       const incomingRate =
         typeof phaseLock?.incoming_rate === "number" && phaseLock.incoming_rate > 0
           ? phaseLock.incoming_rate
           : 1.0;
-      try {
-        toEl.preservesPitch = true;
-        toEl.playbackRate = incomingRate;
-      } catch {
-        /* preservesPitch is readonly on legacy WebKit; fall back to
-           pitch-shifted rate change rather than no rate change at all. */
-        try {
-          toEl.playbackRate = incomingRate;
-        } catch {
-          /* nothing more we can do */
-        }
-      }
 
-      // v3.0 — seek to the incoming anchor BEFORE play() so the first
-      // sample played is a downbeat. Required for phase-lock to hold;
-      // without it the incoming track would start at sample 0 and
-      // overlay-add with the outgoing tail at an arbitrary phase.
-      //
-      // The seek must be issued before play() AND we still need to
-      // wait for the browser to honour it. ``loadedmetadata`` fires
-      // when ``duration`` becomes known, after which ``currentTime``
-      // assignments stick. Most browsers also accept the seek before
-      // metadata and replay it on metadata-load; we issue it
-      // optimistically and rely on the loadedmetadata listener as the
-      // belt-and-braces correction.
+      // Pre-stretched anchor: the catalog-time second within the
+      // incoming track where the engine wants the crossfade to begin.
+      // Becomes the `offset` argument to AudioBufferSourceNode.start —
+      // sample-accurate by spec, unaffected by MP3 frame boundaries
+      // because the buffer is plain PCM at the context's sample rate.
       const incomingAnchorSec =
         typeof phaseLock?.incoming_anchor_sec === "number"
           ? phaseLock.incoming_anchor_sec
           : 0;
-      if (incomingAnchorSec > 0) {
-        try {
-          toEl.currentTime = incomingAnchorSec;
-        } catch {
-          /* will retry below on loadedmetadata */
-        }
-        const onMeta = () => {
-          try {
-            if (Math.abs(toEl.currentTime - incomingAnchorSec) > 0.05) {
-              toEl.currentTime = incomingAnchorSec;
-            }
-          } catch {
-            /* nothing more we can do */
-          }
-          toEl.removeEventListener("loadedmetadata", onMeta);
-        };
-        toEl.addEventListener("loadedmetadata", onMeta);
+
+      // Latency-bearing step (~0.5–2 s on slow hardware). If the
+      // preload hit, this resolves synchronously from cache; if it
+      // missed (e.g. crossfade fired faster than expected), we wait
+      // here. Either way no audio drift accumulates because everything
+      // downstream is scheduled against ctx.currentTime AFTER this
+      // await resolves.
+      let buffer: AudioBuffer;
+      try {
+        buffer = await cache.load(streamUrl(track.id));
+      } catch (err) {
+        console.warn("[live] decodeAudioData failed on crossfade:", err);
+        return;
       }
 
+      // The one true reference time. Every audio-thread event we
+      // schedule below references THIS value, so they all hit the
+      // same sample. SCHEDULE_LOOKAHEAD_SEC is the spec-recommended
+      // slack so the render thread has at least one quantum to pick
+      // up the scheduled events.
+      const when = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC;
+
+      // Schedule the incoming source. Returns the same `when` (no
+      // surprise — but explicit for readability when the rest of the
+      // automation chains off it).
       try {
-        await toEl.play();
+        toDeck.scheduleSource(
+          buffer,
+          when,
+          incomingAnchorSec,
+          incomingRate,
+          track.id,
+          () => onDeckEnded(toWhich),
+        );
         setAutoplayBlocked(false);
       } catch (err) {
         const name = (err as { name?: string })?.name ?? "";
-        if (name === "NotAllowedError" || name === "" || name === "AbortError") {
-          console.warn("[live] autoplay blocked on crossfade:", err);
+        if (name === "InvalidStateError" || name === "NotAllowedError" || name === "") {
+          console.warn("[live] schedule blocked on crossfade:", err);
           setAutoplayBlocked(true);
         } else {
-          console.warn("[live] play() failed on crossfade (non-recoverable):", err);
+          console.warn("[live] scheduleSource failed on crossfade:", err);
+        }
+        return;
+      }
+
+      // v3.3 carried forward — bass_swap HPF automation on the
+      // incoming deck's filter. Drop time is computed against the
+      // SAME `when` as the source start, scaled by incomingRate
+      // (because the deck plays back at that rate so the catalog-time
+      // drop maps to wall-clock-time `dropOffset / rate`).
+      // SMOOTH_BLEND skips the automation; the deck.resetAutomation()
+      // below ensures the filter is at 20 Hz pass-through.
+      const filterTo = toDeck.filter;
+      if (
+        filterTo &&
+        phaseLock?.transition_style === "bass_swap" &&
+        phaseLock.bass_swap
+      ) {
+        const dropOffsetCatalogSec =
+          phaseLock.bass_swap.drop_at_incoming_sec - incomingAnchorSec;
+        const dropDelaySec = Math.max(
+          0,
+          dropOffsetCatalogSec / Math.max(0.0001, incomingRate),
+        );
+        try {
+          filterTo.frequency.cancelScheduledValues(when);
+          filterTo.frequency.setValueAtTime(
+            phaseLock.bass_swap.hpf_cutoff_during_hz,
+            when,
+          );
+          filterTo.frequency.setValueAtTime(
+            phaseLock.bass_swap.hpf_cutoff_after_hz,
+            when + dropDelaySec,
+          );
+        } catch {
+          /* BiquadFilter scheduling unavailable — degrade silently */
+        }
+      } else if (filterTo) {
+        // SMOOTH_BLEND or no payload — make sure the filter is in its
+        // pass-through state in case a previous bass_swap left a
+        // pending scheduled value on this deck.
+        try {
+          filterTo.frequency.cancelScheduledValues(when);
+          filterTo.frequency.setValueAtTime(20, when);
+        } catch {
+          /* ignore */
         }
       }
 
-      const gainFrom =
-        fromWhich === "a" ? gainARef.current : gainBRef.current;
-      const gainTo = toWhich === "a" ? gainARef.current : gainBRef.current;
-      if (ctx && gainFrom && gainTo) {
-        const now = ctx.currentTime;
-        gainFrom.gain.cancelScheduledValues(now);
-        gainTo.gain.cancelScheduledValues(now);
-        gainFrom.gain.setValueAtTime(gainFrom.gain.value, now);
-        gainTo.gain.setValueAtTime(gainTo.gain.value, now);
-        // v3.0 — equal-power cos/sin curves when the backend has shipped
-        // a phase-lock payload (catalog has v2 beatgrids on both sides
-        // of this transition). cos² + sin² = 1, so perceived power
-        // stays constant across the overlap instead of dipping at the
-        // 50 % mark the way a linear ramp does. Algebra matches
-        // ``agent.phase_lock.phase_locked_crossfade_np`` byte-for-byte.
-        //
-        // When the payload is missing (legacy catalog entry or backend
-        // didn't compute a plan), fall back to the v2.5.x linear ramp
-        // so existing /live sessions keep working unchanged.
+      // Gain ramps — scheduled at the SAME `when` as the source so
+      // the fade-in starts on the FIRST audible sample of the
+      // incoming track. This is the core fix for cabalgar: prior
+      // substrate scheduled gain at audioCtx.currentTime *after*
+      // await play() returned, which was already a handful of ms
+      // past the actual first sample.
+      const gainFrom = fromDeck.gain;
+      const gainTo = toDeck.gain;
+      try {
+        gainFrom.gain.cancelScheduledValues(when);
+        gainTo.gain.cancelScheduledValues(when);
+        gainFrom.gain.setValueAtTime(gainFrom.gain.value, when);
+        gainTo.gain.setValueAtTime(gainTo.gain.value, when);
         const xfadeSec = phaseLock?.xfade_sec ?? crossfadeSec;
         if (phaseLock && phaseLock.xfade_sec && phaseLock.xfade_sec > 0) {
+          // v3.0 — equal-power cos/sin curves (cos² + sin² = 1) so
+          // perceived loudness stays constant across the overlap.
+          // Algebra matches agent.phase_lock.phase_locked_crossfade_np.
           const fadeOut = buildEqualPowerCurve("out");
           const fadeIn = buildEqualPowerCurve("in");
-          gainFrom.gain.setValueCurveAtTime(fadeOut, now, xfadeSec);
-          gainTo.gain.setValueCurveAtTime(fadeIn, now, xfadeSec);
+          gainFrom.gain.setValueCurveAtTime(fadeOut, when, xfadeSec);
+          gainTo.gain.setValueCurveAtTime(fadeIn, when, xfadeSec);
         } else {
-          gainFrom.gain.linearRampToValueAtTime(0, now + xfadeSec);
-          gainTo.gain.linearRampToValueAtTime(1, now + xfadeSec);
+          gainFrom.gain.linearRampToValueAtTime(0, when + xfadeSec);
+          gainTo.gain.linearRampToValueAtTime(1, when + xfadeSec);
         }
-      } else {
-        // No Web Audio: fall back to volume ramp on the audio elements.
-        toEl.volume = 1;
-        fromEl.volume = 0;
+      } catch {
+        /* AudioParam mock without setValueCurveAtTime — fall back
+           silently; the source still plays, the fade just won't be
+           equal-power. */
       }
 
       activeDeckRef.current = toWhich;
-      audioRef.current = toEl;
       currentTrackIdRef.current = track.id;
+      // Refresh the VisualLayer shim — duration/paused are now from
+      // the new deck. currentTime updates on the playback_pos tick.
+      audioRef.current = {
+        currentTime: toDeck.position(),
+        duration: toDeck.duration(),
+        paused: !toDeck.isPlaying(),
+      };
     },
-    [ensureAudioContext, ensureDeck],
+    [ensureAudioContext, ensureBufferDeck, ensureBufferCache, onDeckEnded],
+  );
+
+  /**
+   * v3.4 — pre-decode the incoming track ahead of the crossfade so the
+   * actual transition scheduling is synchronous. Called from the
+   * APPROACHING_CF WS event handler (~30 s lookahead). Safe to call
+   * multiple times for the same trackId — the BufferCache
+   * de-duplicates concurrent loads. Quiet on failure; the crossfade
+   * path will just incur the decode latency synchronously if this
+   * never ran.
+   */
+  const preloadIncoming = useCallback(
+    async (track: LiveTrackSummary) => {
+      const cache = ensureBufferCache();
+      if (!cache) return;
+      try {
+        await cache.load(streamUrl(track.id));
+      } catch {
+        /* swallow — next attempt or the crossfade path will retry */
+      }
+    },
+    [ensureBufferCache],
   );
 
   const stopAllDecks = useCallback(() => {
+    // v3.4 — stop() is the BufferDeck equivalent of pause + removeAttribute
+    // + load(). It detaches the current source node, clears its onended
+    // handler (so we don't fire a synthetic track_ended for a deliberate
+    // teardown), and zeroes the deck's internal track state.
     for (const ref of [deckARef, deckBRef]) {
-      const el = ref.current;
-      if (el) {
+      const deck = ref.current;
+      if (deck) {
         try {
-          el.pause();
-          el.removeAttribute("src");
-          el.load();
+          deck.stop();
         } catch {
           /* ignore */
         }
@@ -1004,16 +1127,15 @@ export function useLiveSession(
     } else if (command === "crossfade" && evt.to_track) {
       void crossfadeToNext(evt.to_track, evt.crossfade_sec ?? 12, evt.phase_lock);
     } else if (command === "stop_deck") {
-      // v2.5.0.1 — release just the active deck (not both) so the next
-      // ``load`` plays into a fresh element and the previous track's
-      // ``ended`` fallback can't re-fire.
+      // v3.4 — release just the active deck's source so the next ``load``
+      // plays into a fresh BufferSource and the previous track's
+      // onended fallback can't re-fire (BufferDeck.stop() clears the
+      // onended handler before stop()ping the source).
       const which = activeDeckRef.current;
-      const el = which === "a" ? deckARef.current : deckBRef.current;
-      if (el) {
+      const deck = which === "a" ? deckARef.current : deckBRef.current;
+      if (deck) {
         try {
-          el.pause();
-          el.removeAttribute("src");
-          el.load();
+          deck.stop();
         } catch {
           /* ignore */
         }
@@ -1069,7 +1191,15 @@ export function useLiveSession(
         break;
       }
       case "approaching_crossfade": {
-        if (evt.next_track) setExplicitNextTrack(evt.next_track);
+        if (evt.next_track) {
+          setExplicitNextTrack(evt.next_track);
+          // v3.4 — kick off decode of the incoming track now (~30 s
+          // before the cf hits). BufferCache de-dupes if this races
+          // with the crossfade itself. Decode (~0.5-2 s for a typical
+          // MP3) is async fire-and-forget here so we never block the
+          // UI event handler on it.
+          void preloadIncoming(evt.next_track);
+        }
         if (typeof evt.cf_point_sec === "number") {
           setCfTargetSec(evt.cf_point_sec);
         }
@@ -1133,17 +1263,28 @@ export function useLiveSession(
         setExplicitNextTrack(null);
         setCfTargetSec(null);
         setLegacySecsToCf(null);
-        // Stop audio elements and let the user navigate away.
+        // v3.4 — release the buffer sources on both decks so we don't
+        // leak ~80 MB of PCM each and the user can navigate away
+        // cleanly. The deck wrappers stay (they only own gain +
+        // filter, both reusable for the next session).
         for (const ref of [deckARef, deckBRef]) {
-          const el = ref.current;
-          if (el) {
+          const deck = ref.current;
+          if (deck) {
             try {
-              el.pause();
-              el.removeAttribute("src");
-              el.load();
+              deck.stop();
             } catch {
               /* ignore */
             }
+          }
+        }
+        // Drop the decode cache too — a session_ended means no further
+        // playback in this session and the buffers could be a sizable
+        // chunk of RAM.
+        if (bufferCacheRef.current) {
+          try {
+            bufferCacheRef.current.clear();
+          } catch {
+            /* ignore */
           }
         }
         break;
@@ -1424,12 +1565,24 @@ export function useLiveSession(
     const ws = wsRef.current;
     const tid = currentTrackIdRef.current;
     const which = activeDeckRef.current;
-    const el = which === "a" ? deckARef.current : deckBRef.current;
-    if (!el) return;
-    const ct = Number.isFinite(el.currentTime) ? el.currentTime : 0;
-    const dur = Number.isFinite(el.duration) ? el.duration : 0;
+    const deck = which === "a" ? deckARef.current : deckBRef.current;
+    if (!deck) return;
+    // v3.4 — position is derived from the audio-thread clock, so it's
+    // accurate to within the render quantum (~2.7 ms @ 48 kHz). Both
+    // the catalog-time-into-track for the backend protocol and the
+    // duration for the UI progress bar come from the deck.
+    const ct = deck.position();
+    const dur = deck.duration();
     setCurrentTrackTime((prev) => (Math.abs(prev - ct) > 0.05 ? ct : prev));
     setCurrentTrackDuration((prev) => (Math.abs(prev - dur) > 0.05 ? dur : prev));
+    // Keep the VisualLayer compatibility shim fresh on every tick so
+    // its beat clock reads sub-frame-accurate currentTime without
+    // needing to know about BufferDeck.
+    audioRef.current = {
+      currentTime: ct,
+      duration: dur,
+      paused: !deck.isPlaying(),
+    };
     if (!ws || ws.readyState !== WebSocket.OPEN || !tid) return;
     // Viewers must NOT send playback_pos — the primary owns the
     // engine's crossfade timer. If two clients both pinged, the
@@ -1496,23 +1649,14 @@ export function useLiveSession(
       } catch {
         /* ignore — best effort */
       }
-      // Also kick the active deck — if play() returns silently it's a
-      // no-op, but if the element was paused without firing ``pause``
-      // (rare Chrome corner case) it'll resume audibly.
-      const which = activeDeckRef.current;
-      const el = which === "a" ? deckARef.current : deckBRef.current;
-      if (el && el.paused) {
-        try {
-          const p = el.play();
-          if (p && typeof p.then === "function") {
-            p.catch(() => {
-              /* ignore — autoplay overlay handles user-gesture cases */
-            });
-          }
-        } catch {
-          /* ignore */
-        }
-      }
+      // v3.4 — with BufferDeck there's no element-level paused/play
+      // dichotomy: the source is either scheduled (will produce audio
+      // when ctx.state === "running") or it's not. ctx.resume() above
+      // is the entire kick we need. If the deck has no source scheduled
+      // we don't try to start one — that's the engine's role via
+      // engine_command load / crossfade. This simplification removes a
+      // category of HTMLAudioElement-specific recovery that didn't
+      // apply to the new substrate.
     };
     const onVisible = () => {
       appendLog({
@@ -1563,43 +1707,41 @@ export function useLiveSession(
     };
   }, [appendLog]);
 
-  // Heartbeat — every 2 s, take a snapshot of (audioctx.state, gainA,
-  // gainB, active deck paused/muted/volume/networkState/readyState).
-  // Only log when something differs from the last snapshot, so the panel
-  // stays readable but any silent state flip surfaces.
+  // v3.4 — simplified heartbeat for the BufferDeck substrate.
   //
-  // Critically, also detect "STUCK": ``ctx === running`` and
-  // ``el.paused === false`` but ``currentTime`` hasn't advanced for
-  // ≥4 s. That's the Chrome silent-renderer bug — every flag looks
-  // healthy but no samples reach the speakers. When detected we log a
-  // STUCK marker and auto-kick (``ctx.resume()`` + ``el.play()``), which
-  // resuscitates the renderer in practice.
+  // The HTMLAudioElement substrate had a class of "running but silent"
+  // failure modes (net=2 ready=2, ctx=running el.paused=false but no
+  // samples reaching speakers) that needed tiered ctx.resume() +
+  // el.play() + el.load() recovery. BufferDeck has fewer failure
+  // surfaces: either the AudioContext is suspended (resume() unsticks
+  // it — handled by the visibility-resume effect above) or the source
+  // has played out (onended fires → we forward track_ended). There is
+  // no equivalent of "stalled HTTP stream mid-track" because the
+  // entire buffer is in memory by the time scheduleSource() is called.
+  //
+  // We keep a lightweight state snapshot every 2 s so any drift in
+  // the visible state (ctx state, deck gain, active deck, virtual
+  // position) shows up in the diagnostic panel without auto-recovery
+  // logic specific to the old substrate.
   useEffect(() => {
     if (!sessionId) return;
     if (typeof window === "undefined") return;
     let last = "";
-    let lastCt = -1;
-    let lastCtChangeMs = Date.now();
-    let kickedStuck = false;
-    let reloadedStuck = false;
     const id = window.setInterval(() => {
       const ctx = audioCtxRef.current;
-      const gA = gainARef.current;
-      const gB = gainBRef.current;
+      const a = deckARef.current;
+      const b = deckBRef.current;
       const which = activeDeckRef.current;
-      const el = which === "a" ? deckARef.current : deckBRef.current;
-      if (!el && !ctx) return;
-      const ct = el && Number.isFinite(el.currentTime) ? el.currentTime : 0;
+      const active = which === "a" ? a : b;
+      if (!a && !b && !ctx) return;
       const snapshot =
         `ctx=${ctx?.state ?? "?"} ` +
-        `gA=${gA ? gA.gain.value.toFixed(2) : "?"} ` +
-        `gB=${gB ? gB.gain.value.toFixed(2) : "?"} ` +
+        `gA=${a ? a.gain.gain.value.toFixed(2) : "?"} ` +
+        `gB=${b ? b.gain.gain.value.toFixed(2) : "?"} ` +
         `active=${which} ` +
-        `paused=${el?.paused ?? "?"} ` +
-        `muted=${el?.muted ?? "?"} ` +
-        `vol=${el?.volume ?? "?"} ` +
-        `net=${el?.networkState ?? "?"} ` +
-        `ready=${el?.readyState ?? "?"}`;
+        `playing=${active?.isPlaying() ?? "?"} ` +
+        `pos=${active ? active.position().toFixed(1) : "?"}s ` +
+        `dur=${active ? active.duration().toFixed(1) : "?"}s`;
       if (snapshot !== last) {
         last = snapshot;
         appendLog({
@@ -1607,101 +1749,6 @@ export function useLiveSession(
           text: `[heartbeat] ${snapshot}`,
           ts: Date.now(),
         });
-      }
-
-      // currentTime advancement check
-      if (Math.abs(ct - lastCt) > 0.05) {
-        lastCt = ct;
-        lastCtChangeMs = Date.now();
-        kickedStuck = false;
-        reloadedStuck = false;
-        return;
-      }
-      const stuckMs = Date.now() - lastCtChangeMs;
-      const looksHealthy =
-        ctx?.state === "running" &&
-        el !== null &&
-        el !== undefined &&
-        !el.paused &&
-        !el.muted &&
-        (el.readyState ?? 0) >= 2;
-      // Tier 1 — 4 s stuck: gentle kick. Helps when the renderer is in a
-      // running-but-silent state (Chrome bug after visibility toggles).
-      if (stuckMs >= 4000 && looksHealthy && !kickedStuck) {
-        kickedStuck = true;
-        appendLog({
-          role: "assistant",
-          text:
-            `[heartbeat] STUCK ct=${ct.toFixed(1)}s for ${(stuckMs / 1000).toFixed(1)}s ` +
-            `— auto-kicking ctx.resume() + el.play()`,
-          ts: Date.now(),
-        });
-        try {
-          const rp = ctx?.resume();
-          if (rp && typeof rp.then === "function") rp.catch(() => {});
-        } catch {
-          /* ignore */
-        }
-        try {
-          const pp = el?.play();
-          if (pp && typeof pp.then === "function") pp.catch(() => {});
-        } catch {
-          /* ignore */
-        }
-      }
-      // Tier 2 — 8 s stuck and tier-1 didn't unstick it. The Tier-1 kick
-      // doesn't help when the audio is waiting for HTTP data that never
-      // arrives (server stream socket dropped mid-Range). Force the
-      // ``<audio>`` to re-fetch by calling ``load()`` and reseeking to
-      // where it stalled. The ``loadeddata`` listener restores the
-      // playhead and resumes — net=2/ready=2 should flip back to
-      // net=1/ready=4 once the new connection delivers the rest.
-      if (
-        stuckMs >= 8000 &&
-        looksHealthy &&
-        kickedStuck &&
-        !reloadedStuck &&
-        el
-      ) {
-        reloadedStuck = true;
-        const stalledAt = ct;
-        const src = el.src;
-        appendLog({
-          role: "assistant",
-          text:
-            `[heartbeat] STILL STUCK after ${(stuckMs / 1000).toFixed(1)}s ` +
-            `— forcing src reload from ${stalledAt.toFixed(1)}s`,
-          ts: Date.now(),
-        });
-        const onLoaded = () => {
-          el.removeEventListener("loadeddata", onLoaded);
-          try {
-            el.currentTime = stalledAt;
-          } catch {
-            /* ignore — element may not allow seek yet */
-          }
-          try {
-            const p = el.play();
-            if (p && typeof p.then === "function") p.catch(() => {});
-          } catch {
-            /* ignore */
-          }
-          appendLog({
-            role: "assistant",
-            text: `[heartbeat] reload ok — resumed @ ${stalledAt.toFixed(1)}s`,
-            ts: Date.now(),
-          });
-        };
-        try {
-          el.addEventListener("loadeddata", onLoaded, { once: true });
-          // Re-assigning src forces a fresh HTTP request. Same URL so
-          // backend ``stream_track`` serves the same file from byte 0;
-          // we seek to ``stalledAt`` once the metadata is back.
-          el.src = src;
-          el.load();
-        } catch {
-          /* ignore — next heartbeat will retry */
-        }
       }
     }, 2000);
     return () => window.clearInterval(id);
@@ -1765,35 +1812,12 @@ export function useLiveSession(
         /* ignore — context may already be running */
       }
     }
-    const which = activeDeckRef.current;
-    const el = which === "a" ? deckARef.current : deckBRef.current;
-    if (!el) {
-      // Cold start — engine hasn't sent a `load` command yet. The
-      // gesture unlocked the context; the next loadIntoActiveDeck call
-      // will be able to play() without bouncing off the autoplay
-      // policy. Clear the blocked flag so the UI overlay dismisses.
-      setAutoplayBlocked(false);
-      return;
-    }
-    try {
-      const p = el.play();
-      if (p && typeof p.then === "function") {
-        p.then(
-          () => setAutoplayBlocked(false),
-          (err) => {
-             
-            console.warn("[live] resumePlayback rejected:", err);
-            setAutoplayBlocked(true);
-          },
-        );
-      } else {
-        setAutoplayBlocked(false);
-      }
-    } catch (err) {
-       
-      console.warn("[live] resumePlayback threw:", err);
-      setAutoplayBlocked(true);
-    }
+    // v3.4 — with the BufferDeck substrate, sources scheduled via
+    // start(when) play automatically once the AudioContext is
+    // running; there's no per-element play() to chase. The gesture
+    // unlocked the context above, so just clear the blocked flag
+    // and let the audio thread pick up any already-scheduled sources.
+    setAutoplayBlocked(false);
   }, [ensureAudioContext]);
 
   const quit = useCallback(() => {

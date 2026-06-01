@@ -25,6 +25,22 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from agent.transition_styles import (
+    TransitionStyle,
+    TransitionStyleChoice,
+    pick_transition_style,
+)
+
+
+def _default_smooth_blend() -> TransitionStyleChoice:
+    """Default factory for the LiveTransitionPlan.transition_style field.
+
+    Lives at module scope (not a lambda) so the dataclass default_factory
+    pickles cleanly across processes — the live engines are not pickled
+    today but keeping the door open avoids a debugging trap later.
+    """
+    return TransitionStyleChoice(style=TransitionStyle.SMOOTH_BLEND)
+
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -454,6 +470,14 @@ class LiveTransitionPlan:
     plan: PhaseLockPlan = field(repr=False)
     incoming_rate: float = 1.0
     outgoing_rate: float = 1.0
+    # v3.3 — which crossfade move the engine should execute. SMOOTH_BLEND
+    # is the legacy equal-power overlay; BASS_SWAP adds a HPF automation
+    # the browser deck applies on the incoming track. The choice is
+    # deterministic (see agent.transition_styles.pick_transition_style)
+    # so tests can assert exact-match wire payloads.
+    transition_style: "TransitionStyleChoice" = field(
+        default_factory=lambda: _default_smooth_blend()
+    )
 
 
 def resolve_downbeats(
@@ -525,6 +549,17 @@ def build_live_transition_plan(
     incoming_rate = compute_tempo_match_rate(
         outgoing_bpm, incoming_bpm, threshold=bpm_match_threshold,
     )
+    # v3.3 — pick the named crossfade move. Deterministic, runs after
+    # phase-lock so it can use the chosen incoming anchor as the
+    # reference point for the bass-swap drop downbeat search.
+    transition_choice = pick_transition_style(
+        outgoing_bpm=outgoing_bpm,
+        incoming_bpm=incoming_bpm,
+        phrase_tier=plan.phrase_tier,
+        incoming_anchor_catalog_sec=plan.incoming_anchor_catalog_sec,
+        incoming_downbeats=incoming_downbeats,
+        xfade_sec=plan.xfade_catalog_sec,
+    )
     return LiveTransitionPlan(
         outgoing_anchor_sample=int(round(plan.outgoing_anchor_catalog_sec * sample_rate)),
         incoming_start_sample=int(round(plan.incoming_anchor_catalog_sec * sample_rate)),
@@ -535,4 +570,5 @@ def build_live_transition_plan(
         plan=plan,
         incoming_rate=incoming_rate,
         outgoing_rate=1.0,
+        transition_style=transition_choice,
     )

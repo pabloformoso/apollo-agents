@@ -188,6 +188,65 @@ def test_format_event_approaching_cf():
     assert "B" in out
 
 
+def test_format_event_approaching_cf_smooth_blend_does_not_mention_move():
+    """v3.3 — smooth_blend is the default on every transition; if we
+    surfaced it the LLM would be told to consider narrating every
+    crossfade, polluting the dj_chat feed with noise."""
+    ev = {
+        "type": APPROACHING_CF,
+        "track": {"display_name": "A", "bpm": 122.0, "camelot_key": "8A"},
+        "next_track": {"display_name": "B", "bpm": 122.0, "camelot_key": "8A"},
+        "seconds_remaining": 25.0,
+        "phase_lock": {"transition_style": "smooth_blend"},
+    }
+    out = _format_event(ev)
+    assert "MOVE" not in out
+
+
+def test_format_event_approaching_cf_bass_swap_surfaces_move_hint():
+    """v3.3 — non-smooth transition styles show up as a "MOVE: '<name>'"
+    line in the formatted event so the live_dj LLM has a deterministic
+    cue to call emit_chat with personality-rich narration BEFORE the
+    crossfade hits."""
+    ev = {
+        "type": APPROACHING_CF,
+        "track": {"display_name": "A", "bpm": 122.0, "camelot_key": "8A"},
+        "next_track": {"display_name": "B", "bpm": 122.0, "camelot_key": "8A"},
+        "seconds_remaining": 25.0,
+        "phase_lock": {
+            "transition_style": "bass_swap",
+            "bass_swap": {
+                "hpf_cutoff_during_hz": 120,
+                "hpf_cutoff_after_hz": 20,
+                "drop_at_incoming_sec": 5.902,
+            },
+        },
+    }
+    out = _format_event(ev)
+    assert "MOVE" in out
+    assert "bass_swap" in out
+    assert "drop @ 5.9s in" in out
+    # And the prompt-side instruction "consider narrating" is there too
+    # so the LLM has a hint about what to do with the move metadata.
+    assert "narrat" in out.lower()
+
+
+def test_format_event_approaching_cf_missing_phase_lock_does_not_crash():
+    """Defensive: legacy backends or fallback-tier transitions ship no
+    phase_lock dict at all. Formatter should degrade silently to the
+    pre-v3.3 line, not throw on key access."""
+    ev = {
+        "type": APPROACHING_CF,
+        "track": {"display_name": "A", "bpm": 120.0, "camelot_key": "8A"},
+        "next_track": {"display_name": "B", "bpm": 128.0, "camelot_key": "9A"},
+        "seconds_remaining": 25.0,
+        # no phase_lock key at all
+    }
+    out = _format_event(ev)
+    assert "APPROACHING_CF" in out
+    assert "MOVE" not in out
+
+
 def test_format_event_crossfade_triggered():
     ev = {
         "type": CROSSFADE_TRIGGERED,

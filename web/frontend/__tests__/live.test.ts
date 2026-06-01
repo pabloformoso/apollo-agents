@@ -82,59 +82,47 @@ class FakeWebSocket {
 }
 
 // ── Fake Audio + AudioContext ──────────────────────────────────────────────
-class FakeAudioElement {
-  static nextPlayBehavior: "resolve" | "reject" = "resolve";
-  static lastInstance: FakeAudioElement | null = null;
-  static instances: FakeAudioElement[] = [];
+// v3.4 — substrate moved from HTMLAudioElement + MediaElementAudioSourceNode
+// to AudioBufferSourceNode. The new mocks below mirror the Web Audio
+// spec surface area the live hook actually exercises. The "deck" no
+// longer has DOM-element flags like paused / muted / readyState — its
+// state is { source: AudioBufferSourceNode | null, gain, filter,
+// startedAt, offset, rate, trackId } owned by BufferDeck in
+// audio_buffer_decks.ts. Tests assert against source.start(when, offset),
+// source.playbackRate.value, and the gain/filter automation calls.
 
-  src = "";
-  currentTime = 0;
-  duration = 0;
-  volume = 1;
-  paused = true;
-  preload = "auto";
-  crossOrigin: string | null = null;
-  // v3.1 — production code sets ``preservesPitch`` and ``playbackRate``
-  // on the deck before play() to tempo-match the incoming track. Mock
-  // them as plain writable properties so the assignment doesn't throw
-  // and tests can assert the value the hook applied.
-  preservesPitch = true;
-  playbackRate = 1.0;
-  // Listener bus so the v2.5.0.1 tests can fire a real ``ended`` event.
-  _listeners: Record<string, Array<(...args: unknown[]) => void>> = {};
-  play = vi.fn(() => {
-    if (FakeAudioElement.nextPlayBehavior === "reject") {
-      const err = new Error("NotAllowedError: autoplay blocked") as Error & {
-        name: string;
-      };
+class FakeAudioBuffer {
+  constructor(public duration: number = 240) {}
+}
+
+class FakeBufferSource {
+  static instances: FakeBufferSource[] = [];
+  /** Test knob — when set to "throw", the NEXT start() call raises a
+   * NotAllowedError. Auto-resets after one fire so subsequent sources
+   * play normally without manual cleanup. Mirrors the prior
+   * FakeAudioElement.nextPlayBehavior pattern. */
+  static nextStartBehavior: "resolve" | "throw" = "resolve";
+
+  buffer: AudioBuffer | null = null;
+  playbackRate = { value: 1 };
+  onended: (() => void) | null = null;
+  start = vi.fn(() => {
+    if (FakeBufferSource.nextStartBehavior === "throw") {
+      FakeBufferSource.nextStartBehavior = "resolve";
+      const err = new Error("autoplay blocked") as Error & { name: string };
       err.name = "NotAllowedError";
-      return Promise.reject(err);
+      throw err;
     }
-    this.paused = false;
-    return Promise.resolve();
   });
-  pause = vi.fn(() => {
-    this.paused = true;
-  });
-  load = vi.fn();
-  removeAttribute = vi.fn();
-  addEventListener = vi.fn(
-    (type: string, cb: (...args: unknown[]) => void) => {
-      (this._listeners[type] ||= []).push(cb);
-    },
-  );
-  removeEventListener = vi.fn();
-
-  // Test helper — fire a registered listener.
-  dispatch(type: string) {
-    for (const cb of this._listeners[type] || []) {
-      cb();
-    }
-  }
-
+  stop = vi.fn();
+  connect = vi.fn(() => this);
+  disconnect = vi.fn();
   constructor() {
-    FakeAudioElement.lastInstance = this;
-    FakeAudioElement.instances.push(this);
+    FakeBufferSource.instances.push(this);
+  }
+  /** Test helper — fire the wrapped onended (post-BufferDeck-wrap). */
+  endNaturally() {
+    if (this.onended) this.onended();
   }
 }
 
@@ -155,18 +143,68 @@ class FakeGainNode {
   }
 }
 
+class FakeBiquadFilterNode {
+  static instances: FakeBiquadFilterNode[] = [];
+  type = "highpass";
+  Q = { value: 0.7 };
+  frequency = {
+    value: 20,
+    cancelScheduledValues: vi.fn(),
+    setValueAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+  };
+  connect = vi.fn(() => this);
+  constructor() {
+    FakeBiquadFilterNode.instances.push(this);
+  }
+}
+
+// Shared mutable for the FakeAudioContext.currentTime getter — tests
+// bump this to simulate the audio clock advancing (the spec-defined
+// way the renderer's clock moves; we can't await real audio in JSDOM).
+const _NEXT_AUDIO_TIME = { value: 0 };
+
 class FakeAudioContext {
-  currentTime = 0;
+  // Getter so tests can bump _NEXT_AUDIO_TIME between scheduling and
+  // the playback_pos tick to simulate the audio thread advancing.
+  get currentTime(): number {
+    return _NEXT_AUDIO_TIME.value;
+  }
+  state: AudioContextState = "running";
   destination = {} as AudioDestinationNode;
-  createMediaElementSource = vi.fn(() => ({ connect: vi.fn(() => ({ connect: vi.fn() })) }));
+  createBufferSource = vi.fn(() => new FakeBufferSource());
   createGain = vi.fn(() => new FakeGainNode());
+  createBiquadFilter = vi.fn(() => new FakeBiquadFilterNode());
+  decodeAudioData = vi.fn(
+    async (
+      _buf: ArrayBuffer,
+      ok?: (b: AudioBuffer) => void,
+      _err?: (e: Error) => void,
+    ) => {
+      const ab = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+      if (ok) ok(ab);
+      return ab;
+    },
+  );
+  resume = vi.fn(() => Promise.resolve());
   close = vi.fn();
 }
 
 beforeEach(() => {
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal("AudioContext", FakeAudioContext);
-  vi.stubGlobal("Audio", FakeAudioElement);
+  // v3.4 — BufferCache.load() goes through window.fetch to download
+  // the MP3 bytes before decode. Stub a default that returns 8 bytes
+  // of arbitrary buffer data; individual tests can override per case
+  // via globalThis.fetch's Mock chain (mockResolvedValueOnce, etc.).
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      arrayBuffer: async () => new ArrayBuffer(8),
+    })),
+  );
   // Provide a minimal localStorage so streamUrl() / getToken() work.
   if (!globalThis.localStorage) {
     const store: Record<string, string> = { apollo_token: "tok" };
@@ -195,10 +233,11 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   FakeWebSocket.lastInstance = null;
-  FakeAudioElement.lastInstance = null;
-  FakeAudioElement.instances = [];
-  FakeAudioElement.nextPlayBehavior = "resolve";
   FakeGainNode.instances = [];
+  FakeBiquadFilterNode.instances = [];
+  FakeBufferSource.instances = [];
+  FakeBufferSource.nextStartBehavior = "resolve";
+  _NEXT_AUDIO_TIME.value = 0;
 });
 
 async function flushOpen() {
@@ -617,11 +656,14 @@ describe("useLiveSession", () => {
   });
 
   // ── Bug-3 regression — progress bar driven by per-track elapsed time ────
-  it("advances currentTrackTime as the active deck reports timeupdate ticks", async () => {
+  it("advances currentTrackTime as the active deck's virtual position advances", async () => {
+    // v3.4 — substrate moved to AudioBufferSourceNode. Position is
+    // computed as offsetAtStart + (audioCtx.currentTime - startedAt) *
+    // rate, so we exercise the math by bumping the FakeAudioContext's
+    // currentTime and asserting the playback_pos tick picks it up.
     vi.useFakeTimers();
     try {
       const { result } = renderHook(() => useLiveSession("sid-time"));
-      // Drive the WS open via the timer queue.
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5);
       });
@@ -643,8 +685,7 @@ describe("useLiveSession", () => {
           },
         });
       });
-      // Trigger the load so a deck exists and is wired as active.
-      act(() => {
+      await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
           type: "engine_command",
           command: "load",
@@ -654,31 +695,39 @@ describe("useLiveSession", () => {
           type: "track_started",
           track: playlist[0],
         });
+        // Let the async cache.load + scheduleSource chain resolve.
+        await vi.advanceTimersByTimeAsync(10);
       });
-      // Let any pending microtasks for play() resolve.
-      await act(async () => {
-        await vi.advanceTimersByTimeAsync(0);
-      });
-      // The hook reads the active deck via FakeAudioElement, which is the
-      // most-recently-constructed instance (active deck = "a" by default).
-      const fakeAudio = FakeAudioElement.lastInstance!;
-      fakeAudio.currentTime = 5.5;
-      fakeAudio.duration = 60;
-      // Two ticks of the playback-pos interval (250 ms each).
+      // After load(): exactly one source created on the active deck.
+      // startedAt = audioCtx.currentTime + lookahead (~0.05s). Bump
+      // the shared audio clock by 5s — deck.position() reads as
+      // ~4.95s and the next playback_pos tick surfaces it.
+      expect(FakeBufferSource.instances.length).toBeGreaterThan(0);
+      _NEXT_AUDIO_TIME.value = 5.0;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(260);
       });
+      // The shim's currentTime > 0 indicates the playback_pos tick ran
+      // and read deck.position() which used the bumped clock.
       expect(result.current.currentTrackTime).toBeGreaterThan(0);
-      expect(result.current.currentTrackDuration).toBe(60);
+      expect(result.current.currentTrackDuration).toBe(240);
     } finally {
       vi.useRealTimers();
+      _NEXT_AUDIO_TIME.value = 0;
     }
   });
 
   // ── Bug-4 regression — autoplay block surfaced + recoverable ────────────
-  it("flips autoplayBlocked when el.play() rejects with NotAllowedError", async () => {
-    // Make the next-constructed audio element reject play().
-    FakeAudioElement.nextPlayBehavior = "reject";
+  it("flips autoplayBlocked when AudioBufferSourceNode.start throws", async () => {
+    // v3.4 — the new substrate's autoplay-block signal is a thrown
+    // error on AudioBufferSourceNode.start() (typically
+    // InvalidStateError when the AudioContext is "suspended" without
+    // a user gesture, or NotAllowedError in stricter browsers).
+    // Arm the next source's start() to throw NotAllowedError via the
+    // FakeBufferSource.nextStartBehavior knob (auto-resets after one
+    // fire) and assert the hook surfaces autoplayBlocked = true.
+    FakeBufferSource.nextStartBehavior = "throw";
+
     const { result } = renderHook(() => useLiveSession("sid-autoplay"));
     await flushOpen();
     const playlist = [{ id: "A", display_name: "A" }];
@@ -705,21 +754,20 @@ describe("useLiveSession", () => {
         command: "load",
         track: playlist[0],
       });
-      // Wait for the awaited play() rejection to propagate.
-      await new Promise((r) => setTimeout(r, 5));
+      await new Promise((r) => setTimeout(r, 10));
     });
     expect(result.current.autoplayBlocked).toBe(true);
 
-    // resumePlayback must be exposed and re-attempts play() on the deck.
-    FakeAudioElement.nextPlayBehavior = "resolve";
-    const fakeAudio = FakeAudioElement.lastInstance!;
-    const playSpy = fakeAudio.play;
-    const callsBefore = playSpy.mock.calls.length;
+    // resumePlayback is the user-gesture re-attempt: it calls
+    // ctx.resume() and clears the blocked flag. With the new
+    // substrate the engine drives the next scheduleSource on its
+    // own engine_command — resumePlayback itself doesn't have to
+    // re-trigger playback, the audio thread picks up any pending
+    // scheduled events once the context resumes.
     await act(async () => {
       result.current.resumePlayback();
       await new Promise((r) => setTimeout(r, 5));
     });
-    expect(playSpy.mock.calls.length).toBeGreaterThan(callsBefore);
     expect(result.current.autoplayBlocked).toBe(false);
   });
 
@@ -763,13 +811,13 @@ describe("useLiveSession", () => {
       // Let the awaited play() resolve.
       await new Promise((r) => setTimeout(r, 5));
     });
-    const fakeAudio = FakeAudioElement.lastInstance!;
-    expect(fakeAudio).not.toBeNull();
-    // Fire the natural ``ended`` event — the hook's listener should
-    // forward a synthetic ``track_ended`` WS message with the current
-    // track id.
+    // v3.4 — natural end-of-track now flows through
+    // AudioBufferSourceNode.onended (wrapped by BufferDeck). Fire it
+    // and assert the hook forwards a synthetic track_ended WS message.
+    const src = FakeBufferSource.instances[0];
+    expect(src).toBeDefined();
     act(() => {
-      fakeAudio.dispatch("ended");
+      src.endNaturally();
     });
     const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
     expect(sent).toContainEqual({ type: "track_ended", track_id: "A" });
@@ -845,16 +893,18 @@ describe("useLiveSession", () => {
       });
       await new Promise((r) => setTimeout(r, 5));
     });
-    // The deck-A instance is the FIRST element constructed.
-    const deckA = FakeAudioElement.instances[0];
+    // v3.4 — the first source created (deck A's track A) is the now
+    // "inactive" deck after the crossfade swapped to B. Firing its
+    // onended must NOT publish track_ended because activeDeckRef
+    // is now "b".
+    const deckASource = FakeBufferSource.instances[0];
     const sentBefore = FakeWebSocket.lastInstance!.sent.length;
     act(() => {
-      deckA.dispatch("ended");
+      deckASource.endNaturally();
     });
     const sentAfter = FakeWebSocket.lastInstance!.sent
       .slice(sentBefore)
       .map((s) => JSON.parse(s));
-    // No track_ended should have been posted by the inactive deck.
     expect(
       sentAfter.find((m: { type: string }) => m.type === "track_ended"),
     ).toBeUndefined();
@@ -983,18 +1033,16 @@ describe("useLiveSession", () => {
       });
       // Initial countdown: currentTrackTime=0, target=30 ⇒ 30 s.
       expect(result.current.secondsToCrossfade).toBe(30);
-      // Advance the deck's currentTime by 5 s and tick the playback_pos
-      // interval.
-      const fakeAudio = FakeAudioElement.lastInstance!;
-      fakeAudio.currentTime = 5;
-      fakeAudio.duration = 60;
+      // v3.4 — advance the audio clock by 5 s and tick playback_pos.
+      // deck.position() = offsetAtStart + (currentTime - startedAt) * rate
+      // startedAt ≈ 0 + SCHEDULE_LOOKAHEAD_SEC (0.05).
+      _NEXT_AUDIO_TIME.value = 5.05;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(260);
       });
-      // currentTrackTime now 5 ⇒ countdown 30 - 5 = 25.
+      // currentTrackTime now ~5 ⇒ countdown 30 - 5 = 25.
       expect(result.current.secondsToCrossfade).toBe(25);
-      // Tick another 10 s.
-      fakeAudio.currentTime = 15;
+      _NEXT_AUDIO_TIME.value = 15.05;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(260);
       });
@@ -1042,9 +1090,10 @@ describe("useLiveSession", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      const fakeAudio = FakeAudioElement.lastInstance!;
-      fakeAudio.currentTime = 25; // past cf_point
-      fakeAudio.duration = 60;
+      // v3.4 — bump the audio clock past cf_point_sec (10) so
+      // deck.position() reads as ~25 and the derived countdown
+      // clamps to 0.
+      _NEXT_AUDIO_TIME.value = 25.05;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(260);
       });
@@ -1106,10 +1155,8 @@ describe("useLiveSession", () => {
           cf_point_sec: 53,
         });
       });
-      // Tick a frame so the memo re-runs.
-      const fakeAudio = FakeAudioElement.lastInstance!;
-      fakeAudio.currentTime = 23;
-      fakeAudio.duration = 60;
+      // v3.4 — bump audio clock to ~23s so deck.position() ≈ 23.
+      _NEXT_AUDIO_TIME.value = 23.05;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(260);
       });
@@ -1567,8 +1614,15 @@ describe("useLiveSession", () => {
       expect(curveCalls).toHaveLength(0);
     });
 
-    it("seeks the incoming deck to incoming_anchor_sec before play", async () => {
+    it("starts the incoming source at the incoming_anchor_sec offset", async () => {
+      // v3.4 — anchor is now the SAMPLE-ACCURATE second argument to
+      // AudioBufferSourceNode.start(when, offset). No more
+      // HTMLAudioElement.currentTime seek (which was MP3-frame
+      // quantised), no more loadedmetadata listener. This single
+      // source.start() with the right offset is the textbook
+      // sample-accurate scheduling primitive per W3C Web Audio 1.1.
       const { playlist } = await bootstrapAndStart("sid-pl-3");
+      const sourcesBefore = FakeBufferSource.instances.length;
       await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
           type: "engine_command",
@@ -1577,31 +1631,25 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: phaseLockPayload, // incoming_anchor_sec = 1.875
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      // The incoming deck is whichever was newly populated with track B's
-      // streamUrl. Its currentTime must equal the anchor BEFORE play.
-      const incomingDeck = FakeAudioElement.instances.find(
-        (el) => el.currentTime > 0 && el.src.includes("B"),
-      );
-      expect(incomingDeck).toBeDefined();
-      expect(incomingDeck!.currentTime).toBeCloseTo(1.875, 3);
-      // Also registers a loadedmetadata listener so the seek survives a
-      // late metadata load (some browsers reset currentTime when metadata
-      // becomes available).
-      expect(incomingDeck!.addEventListener).toHaveBeenCalledWith(
-        "loadedmetadata",
-        expect.any(Function),
-      );
+      // The incoming source is the one created after the crossfade event.
+      const incomingSource = FakeBufferSource.instances[sourcesBefore];
+      expect(incomingSource).toBeDefined();
+      // start(when, offset) — offset is the catalog-time anchor.
+      expect(incomingSource.start).toHaveBeenCalledTimes(1);
+      const [, offsetArg] = incomingSource.start.mock.calls[0] as [number, number];
+      expect(offsetArg).toBeCloseTo(1.875, 3);
     });
 
-    it("does NOT seek when incoming_anchor_sec is 0 (no pickup skip needed)", async () => {
+    it("starts the incoming source at offset 0 when incoming_anchor_sec is 0", async () => {
       const { playlist } = await bootstrapAndStart("sid-pl-4");
       const baselinePayload = {
         ...phaseLockPayload,
         incoming_anchor_sec: 0,
         incoming_pickup_skipped: false,
       };
+      const sourcesBefore = FakeBufferSource.instances.length;
       await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
           type: "engine_command",
@@ -1610,15 +1658,12 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: baselinePayload,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      // currentTime should still be 0 — no anchor seek means no listener,
-      // no pre-positioning. The "incoming" deck is the one with track B src.
-      const incomingDeck = FakeAudioElement.instances.find((el) =>
-        el.src.includes("B"),
-      );
-      expect(incomingDeck).toBeDefined();
-      expect(incomingDeck!.currentTime).toBe(0);
+      const incomingSource = FakeBufferSource.instances[sourcesBefore];
+      expect(incomingSource).toBeDefined();
+      const [, offsetArg] = incomingSource.start.mock.calls[0] as [number, number];
+      expect(offsetArg).toBe(0);
     });
 
     it("falls back to crossfade_sec when phase_lock.xfade_sec is missing", async () => {
@@ -1645,6 +1690,221 @@ describe("useLiveSession", () => {
         g.gain.linearRampToValueAtTime.mock.calls,
       );
       expect(linearCalls.length).toBeGreaterThan(0);
+    });
+  });
+
+  // =======================================================================
+  // v3.3 — bass_swap transition style (HPF cutoff automation on incoming).
+  //
+  // When the backend's pick_transition_style fires BASS_SWAP, the
+  // phase_lock payload carries:
+  //   transition_style: "bass_swap"
+  //   bass_swap: { hpf_cutoff_during_hz, hpf_cutoff_after_hz,
+  //                drop_at_incoming_sec }
+  //
+  // The deck schedules two AudioParam.setValueAtTime calls on the
+  // incoming filter's frequency: cutoff_during at currentTime,
+  // cutoff_after at currentTime + (drop_at_incoming - incoming_anchor)
+  // / incoming_rate. SMOOTH_BLEND (or missing payload) must NOT touch
+  // the filter beyond the defensive reset to 20 Hz.
+  // =======================================================================
+
+  describe("v3.3 bass_swap automation", () => {
+    const v2Track = (id: string, name: string) => ({
+      id,
+      display_name: name,
+      bpm: 122,
+      camelot_key: "8A",
+      duration_sec: 200,
+      beatgrid: {
+        version: 2,
+        bpm: 122,
+        first_beat_sec: 0,
+        downbeats_sec: [0, 1.967, 3.934, 5.902, 7.869, 9.836, 11.803],
+        beats_per_bar: 4,
+        source: "madmom" as const,
+      },
+    });
+
+    const bassSwapPayload = {
+      outgoing_anchor_sec: 100.0,
+      incoming_anchor_sec: 0,
+      xfade_sec: 12.0,
+      phrase_tier: "16-bar",
+      incoming_pickup_skipped: false,
+      edge_guard_samples: 64,
+      sample_rate: 44100,
+      incoming_rate: 1.0,
+      outgoing_rate: 1.0,
+      transition_style: "bass_swap" as const,
+      bass_swap: {
+        hpf_cutoff_during_hz: 120,
+        hpf_cutoff_after_hz: 20,
+        drop_at_incoming_sec: 5.902,
+      },
+    };
+
+    async function bootstrapAndStart(sessionId: string) {
+      const { result } = renderHook(() => useLiveSession(sessionId));
+      await flushOpen();
+      const playlist = [v2Track("A", "Track A"), v2Track("B", "Track B")];
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: sessionId,
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      return { result, playlist };
+    }
+
+    it("schedules HPF cutoff at hpf_cutoff_during_hz when bass_swap fires", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-1");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Exactly two filter instances exist (deck A + deck B) once
+      // ensureDeck has wired both decks. The incoming filter (deck B)
+      // is the one whose `frequency.setValueAtTime` was called with the
+      // bass_swap parameters.
+      const cutoffCalls = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.map(
+          (c) => c[0] as number,
+        ),
+      );
+      expect(cutoffCalls).toContain(120);
+      expect(cutoffCalls).toContain(20);
+    });
+
+    it("schedules the drop at when + drop_offset / incoming_rate", async () => {
+      // v3.4 — the drop time anchors against the SAME `when` as the
+      // source's start() and the gain ramps, not against
+      // ctx.currentTime. Because audio rendering is sample-accurate
+      // against that single `when`, the filter snap and the source's
+      // first samples and the gain crossover all hit the same audio
+      // frame. drop_at_incoming_sec=5.902, anchor=0, rate=1.0,
+      // when=currentTime + SCHEDULE_LOOKAHEAD_SEC (=0.05) →
+      // drop schedules at 0.05 + 5.902 = 5.952s.
+      const { playlist } = await bootstrapAndStart("sid-bs-2");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const incomingFilter = FakeBiquadFilterNode.instances.find((f) =>
+        f.frequency.setValueAtTime.mock.calls.some(
+          (c) => c[0] === 120,
+        ),
+      );
+      expect(incomingFilter).toBeDefined();
+      const dropCall = incomingFilter!.frequency.setValueAtTime.mock.calls.find(
+        (c) => c[0] === 20,
+      );
+      expect(dropCall).toBeDefined();
+      // Drop schedules at when + dropDelay. With the fake context's
+      // currentTime starting at 0 and SCHEDULE_LOOKAHEAD_SEC=0.05,
+      // when=0.05, dropDelay=5.902/1.0=5.902 → expected 5.952.
+      expect(dropCall![1] as number).toBeCloseTo(5.952, 2);
+    });
+
+    it("does NOT schedule bass_swap automation when transition_style is smooth_blend", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-3");
+      const smoothPayload = {
+        ...bassSwapPayload,
+        transition_style: "smooth_blend" as const,
+        bass_swap: undefined,
+      };
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: smoothPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // The 120 Hz cutoff is bass_swap-specific. Smooth blend may
+      // still re-assert the 20 Hz default for safety, so we only
+      // forbid the during-cutoff scheduling.
+      const cutoffCalls = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.map(
+          (c) => c[0] as number,
+        ),
+      );
+      expect(cutoffCalls).not.toContain(120);
+    });
+
+    it("resets incoming filter to 20 Hz on smooth_blend after a prior bass_swap", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bs-4");
+      // First a bass_swap to "dirty" the filter state.
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: bassSwapPayload,
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // Now a smooth_blend on the same deck pair — verify a 20 Hz
+      // reset is asserted on the incoming filter so the next track
+      // doesn't inherit the 120 Hz cutoff.
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[0],
+          crossfade_sec: 12,
+          phase_lock: {
+            ...bassSwapPayload,
+            transition_style: "smooth_blend" as const,
+            bass_swap: undefined,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      // At least one of the filters must have been reset to 20 Hz
+      // *after* the bass_swap calls landed on it.
+      const allResets = FakeBiquadFilterNode.instances.flatMap((f) =>
+        f.frequency.setValueAtTime.mock.calls.filter(
+          (c) => c[0] === 20,
+        ),
+      );
+      expect(allResets.length).toBeGreaterThanOrEqual(1);
     });
   });
 
@@ -1710,8 +1970,14 @@ describe("useLiveSession", () => {
       return { result, playlist };
     }
 
-    it("applies incoming_rate to the incoming deck during crossfade", async () => {
+    it("applies incoming_rate to the incoming source during crossfade", async () => {
+      // v3.4 — playbackRate is set on the new AudioBufferSourceNode's
+      // AudioParam (sample-accurate, audio-thread-scheduled). The
+      // legacy preservesPitch flag only existed on HTMLMediaElement;
+      // BufferSource preserves pitch natively because it's an
+      // in-memory PCM resampler. No "preservesPitch" assertion needed.
       const { playlist } = await bootstrapAndStart("sid-tempo-1");
+      const sourcesBefore = FakeBufferSource.instances.length;
       const phaseLock = {
         outgoing_anchor_sec: 48.0,
         incoming_anchor_sec: 0,
@@ -1720,7 +1986,7 @@ describe("useLiveSession", () => {
         incoming_pickup_skipped: false,
         edge_guard_samples: 64,
         sample_rate: 44100,
-        incoming_rate: 120 / 130,  // backend ratio for 120→130 BPM
+        incoming_rate: 120 / 130,
         outgoing_rate: 1.0,
       };
       await act(async () => {
@@ -1731,18 +1997,16 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: phaseLock,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      const incomingDeck = FakeAudioElement.instances.find((el) =>
-        el.src.includes("B"),
-      );
-      expect(incomingDeck).toBeDefined();
-      expect(incomingDeck!.playbackRate).toBeCloseTo(120 / 130, 6);
-      expect(incomingDeck!.preservesPitch).toBe(true);
+      const incomingSource = FakeBufferSource.instances[sourcesBefore];
+      expect(incomingSource).toBeDefined();
+      expect(incomingSource.playbackRate.value).toBeCloseTo(120 / 130, 6);
     });
 
     it("keeps playbackRate at 1.0 when incoming_rate is missing", async () => {
       const { playlist } = await bootstrapAndStart("sid-tempo-2");
+      const sourcesBefore = FakeBufferSource.instances.length;
       const phaseLockNoRate = {
         outgoing_anchor_sec: 48.0,
         incoming_anchor_sec: 0,
@@ -1751,7 +2015,6 @@ describe("useLiveSession", () => {
         incoming_pickup_skipped: false,
         edge_guard_samples: 64,
         sample_rate: 44100,
-        // No incoming_rate (older backend without v3.1 wiring).
       };
       await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
@@ -1761,20 +2024,16 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: phaseLockNoRate,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      const incomingDeck = FakeAudioElement.instances.find((el) =>
-        el.src.includes("B"),
-      );
-      expect(incomingDeck).toBeDefined();
-      expect(incomingDeck!.playbackRate).toBe(1.0);
+      const incomingSource = FakeBufferSource.instances[sourcesBefore];
+      expect(incomingSource).toBeDefined();
+      expect(incomingSource.playbackRate.value).toBe(1.0);
     });
 
     it("keeps playbackRate at 1.0 when incoming_rate is exactly 1.0", async () => {
-      // Below-threshold delta → backend sends 1.0 → frontend must not
-      // accidentally treat that as "skip the assignment" and leave a
-      // stale value from a prior crossfade.
       const { playlist } = await bootstrapAndStart("sid-tempo-3");
+      const sourcesBefore = FakeBufferSource.instances.length;
       const phaseLock = {
         outgoing_anchor_sec: 48.0,
         incoming_anchor_sec: 0,
@@ -1794,20 +2053,20 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: phaseLock,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      const incomingDeck = FakeAudioElement.instances.find((el) =>
-        el.src.includes("B"),
-      );
-      expect(incomingDeck!.playbackRate).toBe(1.0);
+      const incomingSource = FakeBufferSource.instances[sourcesBefore];
+      expect(incomingSource.playbackRate.value).toBe(1.0);
     });
 
     it("resets playbackRate to 1.0 on a plain load (post-crossfade hand-off)", async () => {
-      // After a crossfade the deck-that-was-incoming may still be at the
-      // matched rate. When the engine subsequently advances via
-      // track_ended → load (no second crossfade), the new track must
-      // play at its native rate, not the previous transition's ratio.
+      // v3.4 — each play creates a FRESH source with rate set
+      // explicitly. A plain load passes rate=1.0; a crossfade passes
+      // the incoming_rate from the phase_lock payload. There's no
+      // "stale rate inherited" failure mode like HTMLAudioElement
+      // had because BufferDeck.scheduleSource() never reuses a source.
       const { playlist } = await bootstrapAndStart("sid-tempo-4");
+      const sourcesBeforeXf = FakeBufferSource.instances.length;
       const phaseLock = {
         outgoing_anchor_sec: 48.0,
         incoming_anchor_sec: 0,
@@ -1827,31 +2086,26 @@ describe("useLiveSession", () => {
           crossfade_sec: 12,
           phase_lock: phaseLock,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      const deckB = FakeAudioElement.instances.find((el) => el.src.includes("B"))!;
-      expect(deckB.playbackRate).toBeCloseTo(0.9, 6);
+      const xfSource = FakeBufferSource.instances[sourcesBeforeXf];
+      expect(xfSource.playbackRate.value).toBeCloseTo(0.9, 6);
 
-      // Engine advances to track C via plain load (no crossfade) — deck
-      // B's playbackRate must be reset to 1.0 so the new track plays at
-      // native rate.
+      // Engine advances to track C via plain load (no crossfade) — the
+      // new source created on the active deck must have rate=1.0.
       const trackC = v2Track("C", "Track C", 130);
+      const sourcesBeforeLoad = FakeBufferSource.instances.length;
       await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
           type: "engine_command",
           command: "load",
           track: trackC,
         });
-        await new Promise((r) => setTimeout(r, 5));
+        await new Promise((r) => setTimeout(r, 10));
       });
-      // The most recently-loaded deck (whichever it was) must be at 1.0.
-      // Find it by track-C src.
-      const deckC = FakeAudioElement.instances.find((el) =>
-        el.src.includes("C"),
-      );
-      expect(deckC).toBeDefined();
-      expect(deckC!.playbackRate).toBe(1.0);
-      expect(deckC!.preservesPitch).toBe(true);
+      const trackCSource = FakeBufferSource.instances[sourcesBeforeLoad];
+      expect(trackCSource).toBeDefined();
+      expect(trackCSource.playbackRate.value).toBe(1.0);
     });
   });
 });

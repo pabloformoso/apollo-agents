@@ -16,6 +16,7 @@ from agent.live_engine import (
     TRACK_ENDED,
     TRACK_STARTED,
     LiveEngineBrowser,
+    _track_summary,
 )
 
 
@@ -39,6 +40,90 @@ class _Recorder:
 
     def types(self) -> list[str]:
         return [e.get("type") for e in self.events]
+
+
+# ---------------------------------------------------------------------------
+# _track_summary — WS payload shape that crosses to the frontend
+#
+# The TypeScript ``LiveTrackSummary.beatgrid`` contract has always
+# declared an optional ``{ bpm, first_beat_sec }`` field; before v3.3
+# the Python ``_track_summary`` never populated it, so the
+# VisualLayer's "Degraded sync — no beatgrid" banner fired on every
+# track regardless of catalog quality. These tests pin the contract so
+# the slim beatgrid block keeps reaching the UI.
+# ---------------------------------------------------------------------------
+
+def test_track_summary_returns_none_for_none_input():
+    assert _track_summary(None) is None
+
+
+def test_track_summary_includes_slim_beatgrid_when_catalog_has_it():
+    """A v2 catalog entry (post-madmom regen) ships the UI just the two
+    fields the VisualLayer needs — the heavy downbeats_sec array stays
+    backend-side and rides the separate phase_lock payload."""
+    track = {
+        "display_name": "Aqua Resonance",
+        "bpm": 121.83,
+        "camelot_key": "7A",
+        "hot_cues": [],
+        "beatgrid": {
+            "version": 2,
+            "source": "madmom",
+            "bpm": 121.83,
+            "first_beat_sec": 0.01,
+            "beats_per_bar": 4,
+            "downbeats_sec": [0.01, 1.97, 3.94, 5.91],
+        },
+    }
+    summary = _track_summary(track)
+    assert summary is not None
+    assert summary["beatgrid"] == {"bpm": 121.83, "first_beat_sec": 0.01}
+    # downbeats_sec NEVER crosses — it's ~100 floats per track.
+    assert "downbeats_sec" not in summary["beatgrid"]
+
+
+def test_track_summary_beatgrid_is_none_when_catalog_lacks_it():
+    """Legacy entries with no beatgrid dict at all surface as
+    ``beatgrid: null`` — the frontend's ``hasBeatgrid`` check then
+    correctly flips to false and the degraded-sync banner is the
+    right signal."""
+    track = {"display_name": "Old Track", "bpm": 120, "camelot_key": "8A", "hot_cues": []}
+    summary = _track_summary(track)
+    assert summary is not None and summary["beatgrid"] is None
+
+
+def test_track_summary_beatgrid_is_none_when_catalog_entry_is_partial():
+    """A beatgrid dict missing ``bpm`` or ``first_beat_sec`` (corrupted
+    / mid-regen state) also collapses to null — better the frontend
+    fall back than receive a half-populated record it can't reason
+    about safely."""
+    track = {
+        "display_name": "Mid-Regen Track",
+        "bpm": 120,
+        "camelot_key": "8A",
+        "hot_cues": [],
+        "beatgrid": {"version": 2, "source": "madmom"},  # bpm/fb missing
+    }
+    summary = _track_summary(track)
+    assert summary is not None and summary["beatgrid"] is None
+
+
+def test_track_summary_legacy_fields_still_present():
+    """Sanity check that we didn't drop fields when adding beatgrid."""
+    track = {
+        "display_name": "T",
+        "bpm": 120,
+        "camelot_key": "8A",
+        "hot_cues": [{"pos": 0.0}],
+    }
+    summary = _track_summary(track)
+    assert summary == {
+        "display_name": "T",
+        "bpm": 120,
+        "camelot_key": "8A",
+        "hot_cues": [{"pos": 0.0}],
+        "beatgrid": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +534,11 @@ class TestBrowserPhaseLockPayloadShape:
         engine = LiveEngineBrowser(crossfade_sec=12)
         engine.play([_v2_track("a"), _v2_track("b")])
         payload = engine._phase_lock_payload()
-        assert set(payload.keys()) == {
+        # Required keys the frontend reads on every transition. The
+        # bass_swap sub-block is optional (present iff the picker chose
+        # BASS_SWAP), so we assert required-keys-as-subset and forbid
+        # any *other* unexpected key rather than locking the exact set.
+        required_keys = {
             "outgoing_anchor_sec",
             "incoming_anchor_sec",
             "xfade_sec",
@@ -460,7 +549,11 @@ class TestBrowserPhaseLockPayloadShape:
             # v3.1 — tempo-match rates for the browser playbackRate path.
             "incoming_rate",
             "outgoing_rate",
+            # v3.3 — chosen transition style ("smooth_blend" | "bass_swap").
+            "transition_style",
         }
+        assert required_keys <= set(payload.keys())
+        assert set(payload.keys()) - required_keys <= {"bass_swap"}
 
     def test_payload_empty_dict_when_no_plan(self):
         engine = LiveEngineBrowser(crossfade_sec=12)
@@ -475,6 +568,32 @@ class TestBrowserPhaseLockPayloadShape:
         engine = LiveEngineBrowser(crossfade_sec=12)
         engine.play([_track("a"), _track("b")])  # no beatgrid → fallback
         assert engine._phase_lock_payload() == {}
+
+    def test_payload_transition_style_always_present(self):
+        """v3.3 — the frontend deck branches on transition_style on every
+        crossfade, so the key must be present even when the picker
+        falls back to SMOOTH_BLEND. Avoids ``?.transition_style`` checks
+        in the frontend."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        payload = engine._phase_lock_payload()
+        assert payload["transition_style"] in {"smooth_blend", "bass_swap"}
+
+    def test_payload_bass_swap_subblock_only_when_chosen(self):
+        """The bass_swap dict appears iff transition_style == 'bass_swap'.
+        Keeping the contract narrow keeps the frontend branch trivial."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a"), _v2_track("b")])
+        payload = engine._phase_lock_payload()
+        if payload["transition_style"] == "bass_swap":
+            assert "bass_swap" in payload
+            assert set(payload["bass_swap"].keys()) == {
+                "hpf_cutoff_during_hz",
+                "hpf_cutoff_after_hz",
+                "drop_at_incoming_sec",
+            }
+        else:
+            assert "bass_swap" not in payload
 
 
 class TestBrowserPhaseLockTempoMatching:
