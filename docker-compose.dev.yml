@@ -1,0 +1,96 @@
+# Apollo Agents — parallel DEV stack.
+#
+# Lets us iterate on a feature branch (this worktree) without touching the
+# production stack running on 4020 / 4010. Same images, different ports
+# (4021 / 4011), different container names, independent named volumes for
+# the venv + node_modules so packages from the prod stack don't bleed in.
+#
+# Usage from this worktree's root:
+#   docker compose -f docker-compose.dev.yml up --build       # first run
+#   docker compose -f docker-compose.dev.yml up               # subsequent
+#   docker compose -f docker-compose.dev.yml down             # tear down
+#   docker compose -f docker-compose.dev.yml down -v          # also wipe vols
+#
+# Frontend on http://localhost:4011, backend on http://localhost:4021.
+# The frontend proxies /api/* to the dev backend over the dev network.
+#
+# Tests inside the dev frontend container (uses the worktree's source):
+#   docker compose -f docker-compose.dev.yml exec frontend-dev npm run test
+#
+# Catalog regeneration / madmom commands:
+#   docker compose -f docker-compose.dev.yml run --rm backend-dev \
+#     uv run python main.py --regenerate-beatgrid --genre "deep house" --force
+
+services:
+  backend-dev:
+    build:
+      context: .
+      dockerfile: docker/backend.Dockerfile
+      args:
+        INSTALL_BEATGRID: "1"
+    container_name: apollo-backend-dev
+    restart: unless-stopped
+    ports:
+      - "4021:4020"
+    env_file:
+      - .env
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Bind THIS worktree's project root for source — prod stack mounts
+      # the main checkout, so each stack tests its own branch in isolation.
+      - ./:/app
+      # ...but tracks/ (catalog + audio + MP3 streams + waveforms) is
+      # SHARED with the prod checkout. The audio files are big, never
+      # branch-specific, and gitignored — duplicating them per worktree
+      # would burn disk for no benefit, and the catalog regenerations
+      # we do should benefit both stacks. Override the worktree's
+      # (empty) tracks/ with the prod checkout's full one.
+      - ../../../tracks:/app/tracks
+      # SQLite user/session DB is ALSO shared with prod — that way the
+      # dev stack on :4011 accepts the same credentials the user
+      # already has on prod, and sessions/playlists/auth are unified
+      # for A/B testing. SQLite's file-level locking handles the
+      # occasional concurrent write between the two stacks.
+      - ../../../web/backend/apollo.db:/app/web/backend/apollo.db
+      # Dedicated venv volume so the prod stack's named volume can't
+      # shadow this one (and vice versa). docker compose down -v wipes
+      # only THIS stack's volumes thanks to the file-scoped naming.
+      - apollo_backend_dev_venv:/opt/venv
+    tty: true
+    stdin_open: true
+
+  frontend-dev:
+    build:
+      context: .
+      dockerfile: docker/frontend.Dockerfile
+    container_name: apollo-frontend-dev
+    restart: unless-stopped
+    ports:
+      - "4011:4010"
+    environment:
+      # Point the HTTP proxy at the dev backend on the dev network.
+      APOLLO_API_URL: "http://backend-dev:4020"
+      # WebSocket connections do NOT go through Next.js's HTTP proxy —
+      # the browser opens them directly. Without this override the
+      # frontend defaults to ws://localhost:4020 (the PROD backend),
+      # which silently routes /curate + /live WS traffic to the wrong
+      # process and the user sees "stuck planning" because the dev
+      # backend's background tasks emit to a WS no client is listening
+      # to. Map to :4021 (the dev backend's host port).
+      NEXT_PUBLIC_WS_BASE: "ws://localhost:4021"
+      HOSTNAME: "0.0.0.0"
+    depends_on:
+      - backend-dev
+    volumes:
+      - ./web/frontend:/app
+      # Anonymous volumes for node_modules + .next so the worktree's
+      # host (potentially Windows-built) node_modules can't shadow the
+      # container's Linux ones.
+      - /app/node_modules
+      - /app/.next
+    tty: true
+    stdin_open: true
+
+volumes:
+  apollo_backend_dev_venv:
