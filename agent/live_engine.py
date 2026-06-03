@@ -1897,6 +1897,20 @@ class LiveEngineBrowser:
         # `?.transition_style`). The bass_swap sub-block is included only
         # when the picker chose BASS_SWAP, keeping the contract narrow.
         payload.update(serialise_choice(plan.transition_style))
+
+        # v3.5 — feed-forward beat-lock grid-warp. Only emitted when the
+        # picker produced a real per-bar lock schedule (tight 4/4 grids);
+        # loose-grid genres leave it absent and the frontend keeps using
+        # the single static ``incoming_rate`` above. The frontend applies
+        # these as AudioBufferSourceNode.playbackRate automation against
+        # the same `when` clock as the source start, so every incoming
+        # downbeat lands on an outgoing downbeat for the whole overlap.
+        sched = plan.beat_rate_schedule
+        if sched.mode == "grid_warp" and sched.segments:
+            payload["beat_rate_schedule"] = [
+                {"at_sec": seg.at_sec, "rate": seg.rate, "ramp": seg.ramp}
+                for seg in sched.segments
+            ]
         return payload
 
     def _emit(self, type_: str, **kwargs) -> None:

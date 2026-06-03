@@ -264,6 +264,49 @@ export class BufferDeck {
   }
 
   /**
+   * v3.5 — apply a feed-forward beat-lock grid-warp schedule to the
+   * current source's playbackRate.
+   *
+   * Each segment is scheduled against the SAME ``whenSec`` audio-thread
+   * clock passed to scheduleSource(), so the per-bar rate steps land on
+   * the exact samples the backend computed from both madmom beatgrids.
+   * ``ramp: false`` segments are stepped (``setValueAtTime`` — the per-bar
+   * lock corrections that hold until the next bar); ``ramp: true``
+   * segments glide (``linearRampToValueAtTime`` — the release back to
+   * native rate after the overlap). This is the software equivalent of a
+   * DJ riding the pitch fader for the whole blend.
+   *
+   * No-op when there is no scheduled source or the schedule is empty —
+   * the deck then keeps the static rate it was started with.
+   */
+  applyRateSchedule(
+    schedule: { at_sec: number; rate: number; ramp?: boolean }[] | undefined,
+    whenSec: number,
+  ): void {
+    const src = this.source;
+    if (!src || !schedule || schedule.length === 0) return;
+    const param = src.playbackRate;
+    try {
+      param.cancelScheduledValues(whenSec);
+    } catch {
+      /* mocked AudioParam without cancelScheduledValues — segments below
+         still apply individually where supported */
+    }
+    for (const seg of schedule) {
+      const at = whenSec + seg.at_sec;
+      try {
+        if (seg.ramp) {
+          param.linearRampToValueAtTime(seg.rate, at);
+        } else {
+          param.setValueAtTime(seg.rate, at);
+        }
+      } catch {
+        /* partial AudioParam mock — skip this segment, keep going */
+      }
+    }
+  }
+
+  /**
    * Stop the currently scheduled source (if any). Idempotent. The
    * onended callback will NOT fire — callers use stop() to forcibly
    * end without triggering "track ended naturally" semantics.
