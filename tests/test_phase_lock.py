@@ -441,6 +441,7 @@ from agent.phase_lock import (  # noqa: E402
     STRETCH_RATIO_MAX,
     STRETCH_RATIO_MIN,
     build_live_transition_plan,
+    compute_beat_rate_schedule,
     compute_tempo_match_rate,
     is_v2_beatgrid,
     phase_locked_crossfade_np,
@@ -676,6 +677,264 @@ class TestBuildLiveTransitionPlan:
         )
         assert plan.incoming_rate == pytest.approx(120.0 / 130.0)
         assert plan.outgoing_rate == 1.0
+
+    def test_tight_grids_attach_grid_warp_schedule(self):
+        """Two tight 4/4 grids at slightly different tempi must produce a
+        per-bar grid-warp schedule on the returned plan — that is the v3.5
+        cabalgar fix the live engine forwards to the browser."""
+        out = self._v2([round(i * 1.875, 4) for i in range(40)])  # 128 BPM
+        inc = self._v2([round(i * 2.0, 4) for i in range(40)])    # 120 BPM
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=out,
+            outgoing_duration_sec=80.0,
+            incoming_beatgrid=inc,
+            incoming_duration_sec=80.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+            target_ramp_sec=16.0,
+        )
+        assert plan.beat_rate_schedule.mode == "grid_warp"
+        assert len(plan.beat_rate_schedule.segments) >= 2
+
+    def test_loose_grid_leaves_schedule_static(self):
+        """A swung / irregular incoming grid must NOT be grid-warped (it
+        would wobble); the plan keeps a static schedule so the engine
+        falls back to the single ``incoming_rate``."""
+        out = self._v2([round(i * 1.875, 4) for i in range(40)])
+        # Jittered downbeats: ~±18% bar-to-bar — well above GRIDWARP_MAX_CV.
+        jitter = [0.0]
+        for i in range(1, 40):
+            step = 1.875 * (1.18 if i % 2 else 0.82)
+            jitter.append(round(jitter[-1] + step, 4))
+        plan = build_live_transition_plan(
+            outgoing_beatgrid=out,
+            outgoing_duration_sec=80.0,
+            incoming_beatgrid=self._v2(jitter),
+            incoming_duration_sec=80.0,
+            incoming_audio_y=None,
+            sample_rate=self.SR,
+            target_xfade_sec=12.0,
+        )
+        assert plan.beat_rate_schedule.mode == "static"
+        assert plan.beat_rate_schedule.segments == []
+
+
+class TestComputeBeatRateSchedule:
+    """v3.5 feed-forward beat-lock grid-warp. This is the software pitch
+    fader / jog ride: a per-bar playback-rate curve that keeps every
+    incoming downbeat on an outgoing downbeat across the whole overlap.
+    The arithmetic and the loose-grid gate are pinned here because a wrong
+    rate is precisely the audible cabalgar we're killing."""
+
+    def _grid(self, bar_sec, n, start=0.0, jitter=None):
+        out = [start]
+        for i in range(1, n):
+            step = bar_sec if jitter is None else bar_sec * jitter[i % len(jitter)]
+            out.append(round(out[-1] + step, 6))
+        return out
+
+    def test_identical_grids_lock_at_rate_one(self):
+        grid = self._grid(2.0, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=grid,
+            incoming_downbeats=grid,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "grid_warp"
+        assert all(seg.rate == pytest.approx(1.0) for seg in sched.segments)
+
+    def test_different_tempo_locks_every_downbeat(self):
+        """The whole point: with constant but different tempi the per-bar
+        rate equals in_bar/out_bar, and integrating it puts every incoming
+        downbeat exactly on the corresponding outgoing downbeat."""
+        out = self._grid(1.875, 32)   # 128 BPM
+        inc = self._grid(2.0, 32)     # 120 BPM
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "grid_warp"
+        lock = [s for s in sched.segments if not s.ramp]
+        expected_rate = 2.0 / 1.875
+        assert all(s.rate == pytest.approx(expected_rate, abs=1e-4) for s in lock)
+        # Reconstruct: cumulative catalog seconds consumed by the incoming
+        # deck after each outgoing bar must equal the incoming downbeat
+        # offset — i.e. the kicks line up bar by bar.
+        consumed = 0.0
+        for k, seg in enumerate(lock):
+            out_bar = out[k + 1] - out[k]
+            consumed += seg.rate * out_bar
+            assert consumed == pytest.approx(inc[k + 1] - inc[0], abs=1e-3)
+
+    def test_micro_tempo_grid_still_locks(self):
+        """Real tracks aren't perfectly metronomic — a single static rate
+        can't track micro-tempo, but the per-bar schedule does."""
+        out = self._grid(1.875, 32, jitter=[1.0, 1.01, 0.99, 1.005])
+        inc = self._grid(2.0, 32, jitter=[1.0, 0.995, 1.008, 0.997])
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "grid_warp"
+        lock = [s for s in sched.segments if not s.ramp]
+        consumed = 0.0
+        for k, seg in enumerate(lock):
+            consumed += seg.rate * (out[k + 1] - out[k])
+            assert consumed == pytest.approx(inc[k + 1] - inc[0], abs=2e-3)
+
+    def test_release_ramp_returns_to_native(self):
+        grid = self._grid(2.0, 32)
+        inc = self._grid(1.9, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=grid,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+            ramp_sec=16.0,
+        )
+        assert sched.mode == "grid_warp"
+        last = sched.segments[-1]
+        assert last.ramp is True
+        assert last.rate == pytest.approx(1.0)
+        assert last.at_sec == pytest.approx(12.0 + 16.0)
+        # The second-to-last segment holds the matched rate at the end of
+        # the crossfade so the ramp glides from there, not from mid-overlap.
+        hold = sched.segments[-2]
+        assert hold.ramp is False
+        assert hold.at_sec == pytest.approx(12.0)
+
+    def test_no_ramp_emits_no_release_segments(self):
+        grid = self._grid(2.0, 32)
+        inc = self._grid(1.9, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=grid,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+            ramp_sec=0.0,
+        )
+        assert all(seg.ramp is False for seg in sched.segments)
+
+    def test_loose_incoming_grid_falls_back_to_static(self):
+        out = self._grid(1.875, 32)
+        inc = self._grid(2.0, 32, jitter=[1.2, 0.8])  # cv far above ceiling
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "static"
+        assert sched.segments == []
+
+    def test_loose_outgoing_grid_falls_back_to_static(self):
+        out = self._grid(1.875, 32, jitter=[1.2, 0.8])
+        inc = self._grid(2.0, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "static"
+
+    def test_too_few_downbeats_falls_back_to_static(self):
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=[0.0, 2.0],
+            incoming_downbeats=[0.0, 1.9],
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        # Only one bar available → fewer than the 2-bar minimum.
+        assert sched.mode == "static"
+
+    def test_empty_grids_do_not_raise(self):
+        assert compute_beat_rate_schedule(
+            outgoing_downbeats=[],
+            incoming_downbeats=[],
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        ).mode == "static"
+
+    def test_doubled_downbeat_outlier_uses_median(self):
+        """A madmom-dropped downbeat doubles one bar. The outlier guard
+        must warp that bar with the median ratio (~1.0) instead of ~2.0,
+        keeping the rest of the transition locked."""
+        out = self._grid(1.875, 32)
+        inc = self._grid(1.875, 32)
+        # Remove one incoming downbeat mid-overlap → one 2× bar.
+        del inc[3]
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "grid_warp"
+        lock = [s for s in sched.segments if not s.ramp]
+        # No segment should be near the un-guarded 2.0 ratio.
+        assert all(s.rate < 1.5 for s in lock)
+        assert all(s.rate == pytest.approx(1.0, abs=0.1) for s in lock)
+
+    def test_extreme_ratio_is_clamped(self):
+        out = self._grid(0.5, 32)   # very fast
+        inc = self._grid(2.0, 32)   # very slow → ratio 4× before clamp
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert all(s.rate <= STRETCH_RATIO_MAX + 1e-9 for s in sched.segments)
+        assert all(s.rate >= STRETCH_RATIO_MIN - 1e-9 for s in sched.segments)
+
+    def test_segment_offsets_track_outgoing_downbeats(self):
+        out = self._grid(1.875, 32)
+        inc = self._grid(2.0, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=out[4],   # anchor partway in
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        lock = [s for s in sched.segments if not s.ramp]
+        # First lock segment sits at the anchor (offset 0), subsequent ones
+        # land on later outgoing downbeats relative to the anchor.
+        assert lock[0].at_sec == pytest.approx(0.0)
+        for k, seg in enumerate(lock):
+            assert seg.at_sec == pytest.approx(out[4 + k] - out[4], abs=1e-4)
+
+    def test_window_bounded_by_xfade(self):
+        out = self._grid(1.0, 64)
+        inc = self._grid(1.0, 64)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=6.0,
+        )
+        lock = [s for s in sched.segments if not s.ramp]
+        # 1 s bars, 6 s window → lock segments shouldn't run past ~6 s.
+        assert all(s.at_sec <= 6.0 + 1e-6 for s in lock)
 
 
 class TestComputeTempoMatchRate:

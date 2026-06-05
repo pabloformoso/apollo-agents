@@ -305,6 +305,21 @@ export interface PhaseLockPayload {
    */
   outgoing_rate?: number;
   /**
+   * v3.5 — feed-forward beat-lock grid-warp. A per-bar playback-rate
+   * curve for the incoming deck that keeps every incoming downbeat on an
+   * outgoing downbeat across the whole overlap — the software pitch-fader
+   * ride that kills the residual "cabalgar" on tight 4/4 grids that the
+   * single static ``incoming_rate`` couldn't (it corrects only the average
+   * BPM, not per-bar micro-tempo or madmom estimation error).
+   *
+   * Each entry's ``at_sec`` is seconds after the shared ``when`` clock;
+   * ``ramp`` selects setValueAtTime (stepped per-bar lock) vs
+   * linearRampToValueAtTime (the release glide back to native rate).
+   * Present ONLY for tight grids; absent for loose-grid genres
+   * (jazz/soul/lofi), where the frontend keeps using ``incoming_rate``.
+   */
+  beat_rate_schedule?: { at_sec: number; rate: number; ramp: boolean }[];
+  /**
    * v3.3 — which crossfade move the engine picked. ``smooth_blend`` is
    * the legacy equal-power overlay-add (no EQ touch); ``bass_swap``
    * adds a high-pass filter automation to the incoming deck, snapping
@@ -928,6 +943,16 @@ export function useLiveSession(
           ? phaseLock.incoming_rate
           : 1.0;
 
+      // v3.5 — feed-forward beat-lock grid-warp. When the backend produced
+      // a per-bar rate schedule (tight 4/4 grids), it supersedes the single
+      // static incomingRate: we start the source at the FIRST segment's
+      // rate (so the very first bar is already locked) and apply the rest
+      // as playbackRate automation below. Absent for loose grids, where we
+      // keep the static incomingRate.
+      const rateSchedule = phaseLock?.beat_rate_schedule;
+      const hasRateSchedule = Array.isArray(rateSchedule) && rateSchedule.length > 0;
+      const initialRate = hasRateSchedule ? rateSchedule[0].rate : incomingRate;
+
       // Pre-stretched anchor: the catalog-time second within the
       // incoming track where the engine wants the crossfade to begin.
       // Becomes the `offset` argument to AudioBufferSourceNode.start —
@@ -967,10 +992,16 @@ export function useLiveSession(
           buffer,
           when,
           incomingAnchorSec,
-          incomingRate,
+          initialRate,
           track.id,
           () => onDeckEnded(toWhich),
         );
+        if (hasRateSchedule) {
+          // Per-bar pitch-fader ride against the same `when` clock as the
+          // source start, so every incoming downbeat lands on an outgoing
+          // downbeat for the whole overlap.
+          toDeck.applyRateSchedule(rateSchedule, when);
+        }
         setAutoplayBlocked(false);
       } catch (err) {
         const name = (err as { name?: string })?.name ?? "";
