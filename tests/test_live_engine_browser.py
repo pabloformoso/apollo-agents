@@ -553,7 +553,9 @@ class TestBrowserPhaseLockPayloadShape:
             "transition_style",
         }
         assert required_keys <= set(payload.keys())
-        assert set(payload.keys()) - required_keys <= {"bass_swap"}
+        # bass_swap (v3.3) and beat_rate_schedule (v3.5) are the only
+        # optional keys allowed beyond the required contract.
+        assert set(payload.keys()) - required_keys <= {"bass_swap", "beat_rate_schedule"}
 
     def test_payload_empty_dict_when_no_plan(self):
         engine = LiveEngineBrowser(crossfade_sec=12)
@@ -578,6 +580,37 @@ class TestBrowserPhaseLockPayloadShape:
         engine.play([_v2_track("a"), _v2_track("b")])
         payload = engine._phase_lock_payload()
         assert payload["transition_style"] in {"smooth_blend", "bass_swap"}
+
+    def test_payload_carries_beat_rate_schedule_for_tight_grids(self):
+        """v3.5 — two tight 4/4 grids must produce a per-bar grid-warp
+        schedule in the payload, each segment shaped {at_sec, rate, ramp}
+        for the frontend's BufferDeck.applyRateSchedule contract."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play([_v2_track("a", bpm=128.0), _v2_track("b", bpm=124.0)])
+        payload = engine._phase_lock_payload()
+        assert "beat_rate_schedule" in payload
+        sched = payload["beat_rate_schedule"]
+        assert isinstance(sched, list) and len(sched) >= 2
+        for seg in sched:
+            assert set(seg.keys()) == {"at_sec", "rate", "ramp"}
+            assert isinstance(seg["ramp"], bool)
+            assert seg["rate"] > 0
+
+    def test_payload_omits_beat_rate_schedule_for_loose_grids(self):
+        """A swung / irregular incoming grid must NOT carry a grid-warp
+        schedule — the frontend then keeps using the static incoming_rate."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        tight = _v2_track("a", bpm=128.0)
+        loose = _v2_track("b", bpm=128.0)
+        # Jitter the incoming downbeats well past GRIDWARP_MAX_CV.
+        bar = (60.0 / 128.0) * 4.0
+        jittered = [0.0]
+        for i in range(1, len(loose["beatgrid"]["downbeats_sec"])):
+            jittered.append(round(jittered[-1] + bar * (1.2 if i % 2 else 0.8), 3))
+        loose["beatgrid"]["downbeats_sec"] = jittered
+        engine.play([tight, loose])
+        payload = engine._phase_lock_payload()
+        assert "beat_rate_schedule" not in payload
 
     def test_payload_bass_swap_subblock_only_when_chosen(self):
         """The bass_swap dict appears iff transition_style == 'bass_swap'.
