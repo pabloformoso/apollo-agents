@@ -104,7 +104,12 @@ class FakeBufferSource {
   static nextStartBehavior: "resolve" | "throw" = "resolve";
 
   buffer: AudioBuffer | null = null;
-  playbackRate = { value: 1 };
+  playbackRate = {
+    value: 1,
+    cancelScheduledValues: vi.fn(),
+    setValueAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+  };
   onended: (() => void) | null = null;
   start = vi.fn(() => {
     if (FakeBufferSource.nextStartBehavior === "throw") {
@@ -1638,7 +1643,10 @@ describe("useLiveSession", () => {
       expect(incomingSource).toBeDefined();
       // start(when, offset) — offset is the catalog-time anchor.
       expect(incomingSource.start).toHaveBeenCalledTimes(1);
-      const [, offsetArg] = incomingSource.start.mock.calls[0] as [number, number];
+      const [, offsetArg] = incomingSource.start.mock.calls[0] as unknown as [
+        number,
+        number,
+      ];
       expect(offsetArg).toBeCloseTo(1.875, 3);
     });
 
@@ -1662,8 +1670,71 @@ describe("useLiveSession", () => {
       });
       const incomingSource = FakeBufferSource.instances[sourcesBefore];
       expect(incomingSource).toBeDefined();
-      const [, offsetArg] = incomingSource.start.mock.calls[0] as [number, number];
+      const [, offsetArg] = incomingSource.start.mock.calls[0] as unknown as [
+        number,
+        number,
+      ];
       expect(offsetArg).toBe(0);
+    });
+
+    it("applies the v3.5 beat_rate_schedule as playbackRate automation on the incoming source", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-gw1");
+      const schedulePayload = {
+        ...phaseLockPayload,
+        incoming_rate: 1.0,
+        beat_rate_schedule: [
+          { at_sec: 0, rate: 1.0667, ramp: false },
+          { at_sec: 1.875, rate: 1.0667, ramp: false },
+          { at_sec: 12.0, rate: 1.0667, ramp: false },
+          { at_sec: 28.0, rate: 1.0, ramp: true },
+        ],
+      };
+      const sourcesBefore = FakeBufferSource.instances.length;
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: schedulePayload,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const incoming = FakeBufferSource.instances[sourcesBefore];
+      expect(incoming).toBeDefined();
+      // Source started at the first segment's rate (first bar already locked).
+      expect(incoming.playbackRate.value).toBeCloseTo(1.0667, 4);
+      // Stepped per-bar lock segments scheduled.
+      expect(incoming.playbackRate.setValueAtTime).toHaveBeenCalledWith(
+        1.0667,
+        expect.any(Number),
+      );
+      // Release glide back to native rate.
+      expect(incoming.playbackRate.linearRampToValueAtTime).toHaveBeenCalledWith(
+        1.0,
+        expect.any(Number),
+      );
+    });
+
+    it("keeps the static incoming_rate when no beat_rate_schedule is present", async () => {
+      const { playlist } = await bootstrapAndStart("sid-pl-gw2");
+      const staticRatePayload = { ...phaseLockPayload, incoming_rate: 0.94 };
+      const sourcesBefore = FakeBufferSource.instances.length;
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: 12,
+          phase_lock: staticRatePayload,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      const incoming = FakeBufferSource.instances[sourcesBefore];
+      expect(incoming.playbackRate.value).toBeCloseTo(0.94, 4);
+      // No per-bar automation without a schedule.
+      expect(incoming.playbackRate.setValueAtTime).not.toHaveBeenCalled();
+      expect(incoming.playbackRate.linearRampToValueAtTime).not.toHaveBeenCalled();
     });
 
     it("falls back to crossfade_sec when phase_lock.xfade_sec is missing", async () => {

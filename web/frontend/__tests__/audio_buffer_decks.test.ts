@@ -33,7 +33,12 @@ class FakeBufferSource {
   static onendedHandlers: Map<FakeBufferSource, (() => void) | null> = new Map();
 
   buffer: AudioBuffer | null = null;
-  playbackRate = { value: 1 };
+  playbackRate = {
+    value: 1,
+    cancelScheduledValues: vi.fn(),
+    setValueAtTime: vi.fn(),
+    linearRampToValueAtTime: vi.fn(),
+  };
   onended: (() => void) | null = null;
   start = vi.fn() as Mock;
   stop = vi.fn() as Mock;
@@ -170,6 +175,56 @@ describe("BufferDeck", () => {
     expect(FakeBufferSource.instances).toHaveLength(2);
     expect(FakeBufferSource.instances[0].stop).toHaveBeenCalled();
     expect(deck.getTrackId()).toBe("t2");
+  });
+
+  it("applyRateSchedule schedules stepped per-bar rates against the same when clock", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 10.05;
+    deck.scheduleSource(buf, when, 1.875, 1.0667, "track-A");
+    const src = FakeBufferSource.instances[0];
+    deck.applyRateSchedule(
+      [
+        { at_sec: 0, rate: 1.0667, ramp: false },
+        { at_sec: 1.875, rate: 1.0667, ramp: false },
+        { at_sec: 3.75, rate: 1.0667, ramp: false },
+      ],
+      when,
+    );
+    expect(src.playbackRate.cancelScheduledValues).toHaveBeenCalledWith(when);
+    expect(src.playbackRate.setValueAtTime).toHaveBeenCalledWith(1.0667, when + 0);
+    expect(src.playbackRate.setValueAtTime).toHaveBeenCalledWith(1.0667, when + 1.875);
+    expect(src.playbackRate.setValueAtTime).toHaveBeenCalledWith(1.0667, when + 3.75);
+    expect(src.playbackRate.linearRampToValueAtTime).not.toHaveBeenCalled();
+  });
+
+  it("applyRateSchedule uses linearRamp for the release glide segment", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    deck.scheduleSource(buf, 5.0, 0, 1.05, "t");
+    const src = FakeBufferSource.instances[0];
+    deck.applyRateSchedule(
+      [
+        { at_sec: 0, rate: 1.05, ramp: false },
+        { at_sec: 12, rate: 1.05, ramp: false },
+        { at_sec: 28, rate: 1.0, ramp: true },
+      ],
+      5.0,
+    );
+    // Release glide back to native rate at when + xfade + ramp.
+    expect(src.playbackRate.linearRampToValueAtTime).toHaveBeenCalledWith(1.0, 5.0 + 28);
+  });
+
+  it("applyRateSchedule is a no-op with no source or an empty schedule", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    // No source scheduled yet — must not throw.
+    expect(() => deck.applyRateSchedule([{ at_sec: 0, rate: 1.1 }], 1.0)).not.toThrow();
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    deck.scheduleSource(buf, 1.0, 0, 1.0, "t");
+    const src = FakeBufferSource.instances[0];
+    deck.applyRateSchedule([], 1.0);
+    deck.applyRateSchedule(undefined, 1.0);
+    expect(src.playbackRate.setValueAtTime).not.toHaveBeenCalled();
   });
 
   it("stop() ends the current source and clears state, idempotent on repeated calls", () => {

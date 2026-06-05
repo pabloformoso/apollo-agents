@@ -78,6 +78,24 @@ DEFAULT_BPM_MATCH_THRESHOLD: float = 5.0
 STRETCH_RATIO_MAX: float = 1.5
 STRETCH_RATIO_MIN: float = 1.0 / STRETCH_RATIO_MAX
 
+# v3.5 — beat-lock grid-warp tunables.
+#
+# Coefficient-of-variation ceiling on a track's bar intervals below which
+# per-bar grid-warp is safe. A tight 4/4 electronic grid sits near 0.005;
+# live / swung material (jazz, soul, lofi) runs much higher and would
+# audibly wobble if we warped its playback rate bar-by-bar. Above this
+# ceiling on EITHER side the schedule falls back to a single static
+# tempo-match rate (the pre-v3.5 behaviour that already sounds smooth on
+# those genres). The gate is data-driven — no hardcoded genre list to keep
+# in sync.
+GRIDWARP_MAX_CV: float = 0.04
+
+# A single bar whose length deviates from the track's median bar by more
+# than this fraction is treated as a madmom grid glitch (a dropped or
+# doubled downbeat) and warped using the median bar instead of its own —
+# so one bad downbeat can't throw a whole transition out of lock.
+GRIDWARP_BAR_OUTLIER_FRAC: float = 0.4
+
 
 # ---------------------------------------------------------------------------
 # Plan + grid tracking
@@ -428,6 +446,199 @@ def compute_tempo_match_rate(
     return max(STRETCH_RATIO_MIN, min(STRETCH_RATIO_MAX, rate))
 
 
+# ---------------------------------------------------------------------------
+# v3.5 — feed-forward beat-lock grid-warp
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RateSegment:
+    """One playback-rate automation point for the incoming deck.
+
+    ``at_sec`` is seconds after the crossfade's shared ``when`` clock
+    (i.e. measured from the outgoing anchor / first audible incoming
+    sample). ``ramp`` selects the AudioParam method the browser deck
+    applies: ``False`` → ``setValueAtTime`` (a stepped per-bar correction
+    that holds until the next segment), ``True`` →
+    ``linearRampToValueAtTime`` (the smooth release glide back to native
+    rate after the overlap).
+    """
+    at_sec: float
+    rate: float
+    ramp: bool = False
+
+
+@dataclass
+class BeatRateSchedule:
+    """Feed-forward playback-rate plan that keeps every incoming downbeat
+    locked onto an outgoing downbeat across the whole overlap.
+
+    This is the software equivalent of a DJ riding the pitch fader / jog
+    wheel for the entire blend, except it is computed up front from both
+    madmom beatgrids rather than chased by ear — so it absorbs the average
+    BPM delta, the per-bar micro-tempo, AND madmom's own estimation error
+    in one shot, and it is deterministic (hence testable).
+
+    ``mode`` is a diagnostic label:
+      - ``"grid_warp"`` — per-bar lock schedule produced; ``segments`` is
+        non-empty.
+      - ``"static"`` — one or both grids were too loose (cv >
+        :data:`GRIDWARP_MAX_CV`) or too short to lock per bar; ``segments``
+        is empty and the caller should fall back to the single static
+        ``incoming_rate``.
+    """
+    mode: str
+    segments: list[RateSegment] = field(default_factory=list)
+
+
+def _nearest_index(downbeats: Sequence[float], t: float) -> int:
+    """Index of the downbeat closest to ``t`` (assumes non-empty)."""
+    return min(range(len(downbeats)), key=lambda i: abs(downbeats[i] - t))
+
+
+def _is_grid_warpable(
+    lengths: Sequence[float],
+    max_cv: float = GRIDWARP_MAX_CV,
+    outlier_frac: float = GRIDWARP_BAR_OUTLIER_FRAC,
+) -> bool:
+    """True iff ``lengths`` (bar durations) form a grid tight enough to warp.
+
+    Two-stage test, designed to tell apart the two reasons a bar can be
+    "wrong":
+
+    1. **Glitches** — a handful of bars deviate hugely (a dropped/doubled
+       madmom downbeat). A few of these are fine: the per-bar outlier guard
+       in :func:`compute_beat_rate_schedule` repairs them. But if MANY bars
+       deviate by more than ``outlier_frac`` it isn't a glitch, it's a
+       genuinely loose / swung grid → reject.
+    2. **Consistent swing** — bars that wobble moderately (say ±20%) trip no
+       single >``outlier_frac`` outlier yet would still warble audibly if
+       warped per bar. After repairing the few real glitches we measure the
+       classic std/mean coefficient of variation on the cleaned lengths and
+       reject anything above ``max_cv``.
+
+    Tight 4/4 electronic grids (cv ≈ 0.005) sail through both stages; jazz /
+    soul / lofi fail one or the other and fall back to the static rate.
+    """
+    n = len(lengths)
+    if n < 2:
+        return False
+    median = sorted(lengths)[n // 2]
+    if median <= 0:
+        return False
+    deviating = sum(1 for x in lengths if abs(x - median) / median > outlier_frac)
+    # >~20% of bars deviating (always tolerating a single glitch) means the
+    # grid is loose by nature, not glitched.
+    if deviating > max(1, n // 5):
+        return False
+    repaired = [
+        median if abs(x - median) / median > outlier_frac else x for x in lengths
+    ]
+    mean = sum(repaired) / n
+    if mean <= 0:
+        return False
+    var = sum((x - mean) ** 2 for x in repaired) / n
+    return (var ** 0.5) / mean <= max_cv
+
+
+def compute_beat_rate_schedule(
+    *,
+    outgoing_downbeats: Sequence[float],
+    incoming_downbeats: Sequence[float],
+    outgoing_anchor_sec: float,
+    incoming_anchor_sec: float,
+    xfade_sec: float,
+    ramp_sec: float = 0.0,
+    max_cv: float = GRIDWARP_MAX_CV,
+    rate_min: float = STRETCH_RATIO_MIN,
+    rate_max: float = STRETCH_RATIO_MAX,
+) -> BeatRateSchedule:
+    """Plan a per-bar playback-rate curve that bar-locks incoming to outgoing.
+
+    The outgoing track is the reference (plays at rate 1.0, like the deck
+    already on the speakers). For each bar ``k`` of the overlap we set the
+    incoming deck's rate to ``incoming_bar_len / outgoing_bar_len`` so the
+    incoming track consumes exactly one outgoing bar of wall-clock per bar
+    — putting every incoming downbeat on an outgoing downbeat by
+    construction, not just the first one.
+
+    Two phases of segments are emitted:
+      1. **Lock** — one stepped ``setValueAtTime`` segment per overlap bar.
+      2. **Release** — when ``ramp_sec > 0``, hold the matched rate to the
+         end of the crossfade then ``linearRamp`` back to 1.0 over the
+         tempo-ramp window, so the incoming track ends at native rate as
+         the next transition's reference with no audible tempo step.
+
+    Returns a ``"static"`` :class:`BeatRateSchedule` (empty segments) when
+    either grid is too loose (cv > ``max_cv``) or too short to form at
+    least two overlap bars — the caller then falls back to the single
+    static ``incoming_rate`` that already sounds smooth on those genres.
+    Per-bar rates are clamped to ``[rate_min, rate_max]`` and a single
+    outlier bar (a dropped/doubled madmom downbeat) is warped using the
+    median bar instead of its own length.
+    """
+    if len(outgoing_downbeats) < 2 or len(incoming_downbeats) < 2 or xfade_sec <= 0:
+        return BeatRateSchedule(mode="static")
+
+    oa = _nearest_index(outgoing_downbeats, outgoing_anchor_sec)
+    ia = _nearest_index(incoming_downbeats, incoming_anchor_sec)
+
+    # Walk paired bars from each anchor until we've covered the crossfade
+    # window (in outgoing wall-clock) or run out of downbeats on either
+    # side. Each entry: (offset_from_anchor, outgoing_bar_len, incoming_bar_len).
+    bars: list[tuple[float, float, float]] = []
+    k = 0
+    while (oa + k + 1) < len(outgoing_downbeats) and (ia + k + 1) < len(incoming_downbeats):
+        offset = outgoing_downbeats[oa + k] - outgoing_downbeats[oa]
+        if offset > xfade_sec:
+            break
+        out_bar = outgoing_downbeats[oa + k + 1] - outgoing_downbeats[oa + k]
+        in_bar = incoming_downbeats[ia + k + 1] - incoming_downbeats[ia + k]
+        bars.append((offset, out_bar, in_bar))
+        k += 1
+
+    if len(bars) < 2:
+        return BeatRateSchedule(mode="static")
+
+    out_lengths = [b[1] for b in bars]
+    in_lengths = [b[2] for b in bars]
+
+    # Gate on BOTH grids: a loose grid on either side makes the per-bar
+    # rate sequence wobble, which is audible. Tight 4/4 sails through; a
+    # single glitch bar is tolerated and repaired below.
+    if not _is_grid_warpable(out_lengths, max_cv) or not _is_grid_warpable(in_lengths, max_cv):
+        return BeatRateSchedule(mode="static")
+
+    median_out = sorted(out_lengths)[len(out_lengths) // 2]
+    median_in = sorted(in_lengths)[len(in_lengths) // 2]
+
+    segments: list[RateSegment] = []
+    last_rate = 1.0
+    for offset, out_bar, in_bar in bars:
+        ob, ib = out_bar, in_bar
+        # Single dropped/doubled downbeat → fall back to the median bar so
+        # one glitch can't yank the whole transition out of lock.
+        if median_out > 0 and abs(out_bar - median_out) / median_out > GRIDWARP_BAR_OUTLIER_FRAC:
+            ob = median_out
+        if median_in > 0 and abs(in_bar - median_in) / median_in > GRIDWARP_BAR_OUTLIER_FRAC:
+            ib = median_in
+        rate = ib / ob if ob > 0 else 1.0
+        rate = max(rate_min, min(rate_max, rate))
+        segments.append(RateSegment(at_sec=round(offset, 6), rate=round(rate, 6), ramp=False))
+        last_rate = rate
+
+    # Release glide: hold the matched rate through the end of the
+    # crossfade, then ramp back to native over the tempo-ramp window.
+    if ramp_sec > 0:
+        segments.append(
+            RateSegment(at_sec=round(xfade_sec, 6), rate=round(last_rate, 6), ramp=False)
+        )
+        segments.append(
+            RateSegment(at_sec=round(xfade_sec + ramp_sec, 6), rate=1.0, ramp=True)
+        )
+
+    return BeatRateSchedule(mode="grid_warp", segments=segments)
+
+
 @dataclass
 class LiveTransitionPlan:
     """Live-engine-facing summary of a phase-lock plan.
@@ -477,6 +688,15 @@ class LiveTransitionPlan:
     # so tests can assert exact-match wire payloads.
     transition_style: "TransitionStyleChoice" = field(
         default_factory=lambda: _default_smooth_blend()
+    )
+    # v3.5 — feed-forward per-bar playback-rate curve that keeps every
+    # incoming downbeat locked onto an outgoing downbeat across the whole
+    # overlap (the software pitch-fader/jog ride). Defaults to a "static"
+    # schedule with no segments, signalling the engine to use the single
+    # ``incoming_rate`` above (the pre-v3.5 behaviour) — which is what
+    # loose-grid genres (jazz/soul/lofi) fall back to.
+    beat_rate_schedule: "BeatRateSchedule" = field(
+        default_factory=lambda: BeatRateSchedule(mode="static")
     )
 
 
@@ -560,6 +780,19 @@ def build_live_transition_plan(
         incoming_downbeats=incoming_downbeats,
         xfade_sec=plan.xfade_catalog_sec,
     )
+    # v3.5 — feed-forward beat-lock grid-warp. Computed from the actual
+    # downbeat times (not the average BPM), so it corrects micro-tempo and
+    # madmom estimation error that the single static ``incoming_rate``
+    # cannot. Falls back to a "static" schedule for loose grids; the engine
+    # then uses ``incoming_rate`` as before.
+    rate_schedule = compute_beat_rate_schedule(
+        outgoing_downbeats=outgoing_downbeats,
+        incoming_downbeats=incoming_downbeats,
+        outgoing_anchor_sec=plan.outgoing_anchor_catalog_sec,
+        incoming_anchor_sec=plan.incoming_anchor_catalog_sec,
+        xfade_sec=plan.xfade_catalog_sec,
+        ramp_sec=plan.ramp_catalog_sec,
+    )
     return LiveTransitionPlan(
         outgoing_anchor_sample=int(round(plan.outgoing_anchor_catalog_sec * sample_rate)),
         incoming_start_sample=int(round(plan.incoming_anchor_catalog_sec * sample_rate)),
@@ -571,4 +804,5 @@ def build_live_transition_plan(
         incoming_rate=incoming_rate,
         outgoing_rate=1.0,
         transition_style=transition_choice,
+        beat_rate_schedule=rate_schedule,
     )
