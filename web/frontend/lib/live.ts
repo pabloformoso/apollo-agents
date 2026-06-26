@@ -49,6 +49,7 @@ import {
   BufferDeck,
   SCHEDULE_LOOKAHEAD_SEC,
 } from "./audio_buffer_decks";
+import { computeCrossfadeWhen } from "./crossfade_timing";
 
 /**
  * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
@@ -982,7 +983,21 @@ export function useLiveSession(
       // same sample. SCHEDULE_LOOKAHEAD_SEC is the spec-recommended
       // slack so the render thread has at least one quantum to pick
       // up the scheduled events.
-      const when = ctx.currentTime + SCHEDULE_LOOKAHEAD_SEC;
+      //
+      // v3.6 bug 3 — align `when` to the OUTGOING deck's anchor downbeat
+      // (backend `outgoing_anchor_sec`) instead of an arbitrary clock
+      // instant. The incoming source starts at `when` on its own downbeat
+      // (the offset arg), so landing `when` on the outgoing downbeat puts
+      // the two in phase by construction. Previously we used a bare
+      // `currentTime + lookahead`, pinning the incoming downbeat to a random
+      // point in the outgoing bar → off from the first kick even with
+      // grid-warp active (grid-warp fixes tempo slope, not phase intercept).
+      const when = computeCrossfadeWhen({
+        ctxNow: ctx.currentTime,
+        lookaheadSec: SCHEDULE_LOOKAHEAD_SEC,
+        outgoingPosSec: fromDeck.position(),
+        outgoingAnchorSec: phaseLock?.outgoing_anchor_sec,
+      });
 
       // Schedule the incoming source. Returns the same `when` (no
       // surprise — but explicit for readability when the rest of the

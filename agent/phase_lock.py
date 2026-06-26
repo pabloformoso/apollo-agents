@@ -71,6 +71,20 @@ DEFAULT_TEMPO_RAMP_SEC: float = 16.0
 # Mirrors ``main.BPM_MATCH_THRESHOLD`` and ``live_engine._BPM_THRESHOLD``.
 DEFAULT_BPM_MATCH_THRESHOLD: float = 5.0
 
+# v3.6 bug 2 — a TIGHTER threshold used only for the live crossfade's static
+# tempo-match (``compute_tempo_match_rate``), NOT for whole-track body
+# stretching (that stays at the 5-BPM ``DEFAULT_*`` so the offline render and
+# the body-stretch decision are unchanged). The deep-house "contrabombo" came
+# from sub-5-BPM pairs (Δ0.6 / 1.2 / 3.0 observed) getting rate=1.0 → the two
+# decks free-ran over a 12 s blend. On a metronomic 4/4 kick even Δ1 BPM drifts
+# ~half a beat across the overlap, which is audible. 1.5 keeps true detection
+# noise (sub-~0.3 BPM, and identical-track Δ≈0) a no-op while correcting the
+# real small deltas. The live deep-house set showed Δ0.6 / 1.2 / 3.0 pairs all
+# audibly drifting, so 0.3 (chosen 2026-06-26) corrects essentially any real
+# tempo difference and leaves only pure madmom detection noise uncorrected.
+# Stretch is still clamped to [1/1.5, 1.5] downstream.
+GRIDWARP_BPM_MATCH_THRESHOLD: float = 0.3
+
 # Safety bounds on the time-stretch ratio. Past 1.5× (or its inverse) the
 # stretched audio sounds wrong regardless of algorithm, and a malformed
 # catalog entry could otherwise produce a 10× rate that just stops playing.
@@ -93,8 +107,20 @@ GRIDWARP_MAX_CV: float = 0.04
 # A single bar whose length deviates from the track's median bar by more
 # than this fraction is treated as a madmom grid glitch (a dropped or
 # doubled downbeat) and warped using the median bar instead of its own —
-# so one bad downbeat can't throw a whole transition out of lock.
+# so one bad downbeat can't throw a whole transition out of lock. Dropped/
+# doubled downbeats deviate ~50–100%, so 0.4 catches them comfortably.
 GRIDWARP_BAR_OUTLIER_FRAC: float = 0.4
+
+# v3.6 bug 1 — a separate, TIGHTER outlier threshold used only when repairing
+# bars BEFORE the warpability gate (``_repair_truncated_bars``). madmom's
+# truncated final downbeat (clipped against the track end) deviates only
+# ~25% — under the 0.4 glitch threshold, so the old post-gate repair never
+# caught it and a single clipped end-bar disabled grid-warp on the whole
+# transition. 0.15 catches the truncation while staying well above the
+# ~0.5% jitter of a genuinely tight 4/4 bar (so it never "repairs" real
+# musical timing). Loose/swung grids still have MANY bars over this, so the
+# deviating-count stage of ``_is_grid_warpable`` keeps rejecting them.
+GRIDWARP_REPAIR_OUTLIER_FRAC: float = 0.15
 
 
 # ---------------------------------------------------------------------------
@@ -418,16 +444,21 @@ def synthesise_downbeats_from_v1(
 def compute_tempo_match_rate(
     outgoing_bpm: Optional[float],
     incoming_bpm: Optional[float],
-    threshold: float = DEFAULT_BPM_MATCH_THRESHOLD,
+    threshold: float = GRIDWARP_BPM_MATCH_THRESHOLD,
 ) -> float:
     """Playback rate that aligns the incoming track's tempo to the outgoing's.
 
-    Mirrors the ratio computed by ``LiveEngineLocal._time_stretch`` and the
-    "match outgoing" branch of the offline mixer's ``compute_transition_bpm``
-    + pyrubberband stretch. The browser path applies this as the incoming
-    deck's ``HTMLMediaElement.playbackRate`` (with ``preservesPitch=true``)
-    during the crossfade window so the two decks stay in beat-lock without
-    pyrubberband running in WASM.
+    The browser path applies this as the incoming deck's playback rate (with
+    pitch preserved) during the crossfade window so the two decks stay in
+    beat-lock without pyrubberband running in WASM. This is a CROSSFADE-only
+    correction, so as of v3.6 it defaults to the tighter
+    ``GRIDWARP_BPM_MATCH_THRESHOLD`` (0.3) — sub-5-BPM deep-house pairs were
+    free-running over the blend and drifting into "contrabombo". The CLI
+    engine ignores this value (it pre-stretches the whole body via
+    pyrubberband using its own 5-BPM ``_BPM_THRESHOLD`` check), and the
+    offline mixer's body-stretch decision is likewise unaffected — both keep
+    the wider dead zone for whole-track stretching; only the live crossfade
+    rate got tighter.
 
     Returns ``1.0`` (no stretch) when either BPM is missing or non-positive,
     or when the BPM delta is within ``threshold`` — same early-return shape
@@ -493,6 +524,43 @@ class BeatRateSchedule:
 def _nearest_index(downbeats: Sequence[float], t: float) -> int:
     """Index of the downbeat closest to ``t`` (assumes non-empty)."""
     return min(range(len(downbeats)), key=lambda i: abs(downbeats[i] - t))
+
+
+def _repair_truncated_bars(
+    lengths: Sequence[float],
+    outlier_frac: float = GRIDWARP_REPAIR_OUTLIER_FRAC,
+) -> list[float]:
+    """Repair the specific madmom artefact of a TRUNCATED FINAL bar.
+
+    madmom often places its last downbeat clipped against the track end, so
+    the final bar of the crossfade window reads ~25% short in an otherwise
+    tight 4/4 tail. That one bar pushes the cv over the gate and disables
+    grid-warp exactly on the transition. We replace ONLY the last bar, and
+    ONLY when it is meaningfully SHORTER than the median (the truncation
+    signature), with the median length.
+
+    This is deliberately narrow — it does NOT touch interior bars. A swung /
+    loose grid (jazz/soul/lofi) alternates long/short bars THROUGHOUT, so its
+    interior wobble survives untouched and ``_is_grid_warpable`` still
+    rejects it → static fallback. An earlier, broader "repair any isolated
+    outlier" version wrongly rescued short swung windows (e.g. a 3-bar window
+    [long, short, long] has just one "outlier"), so we scope to the final
+    bar only. Returns a new list; the input is unchanged.
+    """
+    n = len(lengths)
+    if n < 3:
+        # Need a few bars to trust the median; with <3 a "truncated last" is
+        # indistinguishable from genuine timing — leave it to the gate.
+        return list(lengths)
+    median = sorted(lengths)[n // 2]
+    if median <= 0:
+        return list(lengths)
+    last = lengths[-1]
+    # Truncation signature: last bar is SHORTER than the median by more than
+    # the repair fraction. (A long final bar is not a clip — leave it.)
+    if (median - last) / median > outlier_frac:
+        return list(lengths[:-1]) + [median]
+    return list(lengths)
 
 
 def _is_grid_warpable(
@@ -602,24 +670,43 @@ def compute_beat_rate_schedule(
     out_lengths = [b[1] for b in bars]
     in_lengths = [b[2] for b in bars]
 
+    # v3.6 bug 1 — repair isolated glitch bars BEFORE the warpability gate.
+    # madmom routinely places a truncated final downbeat against the track
+    # end (e.g. a 1.51 s bar in an otherwise 2.02 s 4/4 tail). That single
+    # outlier pushes the raw cv above the gate, disabling grid-warp EXACTLY
+    # on the transition — even though the grid is tight. The per-bar median
+    # repair already existed below (the warp loop), but it ran AFTER the
+    # gate, so the gate never saw the cleaned grid. We now repair first and
+    # gate on the repaired lengths; ``_is_grid_warpable`` still rejects
+    # genuinely loose / swung grids (many deviating bars), so jazz/soul/lofi
+    # continue to fall back to the static rate.
+    out_clean = _repair_truncated_bars(out_lengths)
+    in_clean = _repair_truncated_bars(in_lengths)
+
     # Gate on BOTH grids: a loose grid on either side makes the per-bar
     # rate sequence wobble, which is audible. Tight 4/4 sails through; a
     # single glitch bar is tolerated and repaired below.
-    if not _is_grid_warpable(out_lengths, max_cv) or not _is_grid_warpable(in_lengths, max_cv):
+    if not _is_grid_warpable(out_clean, max_cv) or not _is_grid_warpable(in_clean, max_cv):
         return BeatRateSchedule(mode="static")
 
-    median_out = sorted(out_lengths)[len(out_lengths) // 2]
-    median_in = sorted(in_lengths)[len(in_lengths) // 2]
-
+    # v3.6 bug 1 — build the per-bar rates from the REPAIRED lengths
+    # (``out_clean`` / ``in_clean``), the same arrays the gate just judged, so
+    # a ~25%-truncated end-bar can't inject a wild final-bar rate (e.g. 1.32).
+    # On TOP of that we keep the original interior glitch repair (a dropped/
+    # doubled madmom downbeat anywhere mid-overlap deviates ~50–100%): any bar
+    # still off the median by more than GRIDWARP_BAR_OUTLIER_FRAC is warped
+    # with the median ratio so one glitch can't yank the transition out of
+    # lock. The two repairs are complementary: truncated-last-bar (narrow,
+    # 0.15, positional) feeds the gate; interior-glitch (0.40, anywhere)
+    # smooths the per-bar curve.
+    median_out = sorted(out_clean)[len(out_clean) // 2]
+    median_in = sorted(in_clean)[len(in_clean) // 2]
     segments: list[RateSegment] = []
     last_rate = 1.0
-    for offset, out_bar, in_bar in bars:
-        ob, ib = out_bar, in_bar
-        # Single dropped/doubled downbeat → fall back to the median bar so
-        # one glitch can't yank the whole transition out of lock.
-        if median_out > 0 and abs(out_bar - median_out) / median_out > GRIDWARP_BAR_OUTLIER_FRAC:
+    for (offset, _raw_out, _raw_in), ob, ib in zip(bars, out_clean, in_clean):
+        if median_out > 0 and abs(ob - median_out) / median_out > GRIDWARP_BAR_OUTLIER_FRAC:
             ob = median_out
-        if median_in > 0 and abs(in_bar - median_in) / median_in > GRIDWARP_BAR_OUTLIER_FRAC:
+        if median_in > 0 and abs(ib - median_in) / median_in > GRIDWARP_BAR_OUTLIER_FRAC:
             ib = median_in
         rate = ib / ob if ob > 0 else 1.0
         rate = max(rate_min, min(rate_max, rate))
@@ -735,7 +822,7 @@ def build_live_transition_plan(
     target_ramp_sec: float = 0.0,
     outgoing_bpm: Optional[float] = None,
     incoming_bpm: Optional[float] = None,
-    bpm_match_threshold: float = DEFAULT_BPM_MATCH_THRESHOLD,
+    bpm_match_threshold: float = GRIDWARP_BPM_MATCH_THRESHOLD,
 ) -> LiveTransitionPlan:
     """Top-level convenience for the live engines.
 

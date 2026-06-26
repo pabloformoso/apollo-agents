@@ -433,6 +433,7 @@ from agent import phase_lock as phase_lock_mod  # noqa: E402
 from agent.phase_lock import (  # noqa: E402
     BEATGRID_SCHEMA_VERSION,
     DEFAULT_BPM_MATCH_THRESHOLD,
+    GRIDWARP_BPM_MATCH_THRESHOLD,
     DEFAULT_CROSSFADE_SEC,
     DEFAULT_TEMPO_RAMP_SEC,
     GridState,
@@ -949,10 +950,16 @@ class TestComputeTempoMatchRate:
         assert compute_tempo_match_rate(128.0, 128.0) == 1.0
 
     def test_returns_one_when_delta_within_threshold(self):
-        # Threshold is 5 BPM — exactly 5 still rounds to "no stretch"
-        # (matches CLI ``_time_stretch``'s ``<=`` comparison).
-        assert compute_tempo_match_rate(128.0, 124.0) == 1.0
-        assert compute_tempo_match_rate(128.0, 123.0) == 1.0  # delta=5
+        # v3.6 — the crossfade default threshold is now the tighter
+        # GRIDWARP_BPM_MATCH_THRESHOLD (0.3), not 5.0: sub-BPM deep-house
+        # drift is audible over a 12 s blend, so only true detection noise
+        # (sub-0.3 BPM) collapses to "no stretch". Callers wanting the wide
+        # 5-BPM dead zone (body stretch) pass it explicitly.
+        assert compute_tempo_match_rate(128.0, 128.0) == 1.0       # identical
+        assert compute_tempo_match_rate(128.0, 127.8) == 1.0       # delta=0.2 < 0.3
+        # And with the explicit wide threshold the old behaviour still holds.
+        assert compute_tempo_match_rate(128.0, 124.0, threshold=5.0) == 1.0
+        assert compute_tempo_match_rate(128.0, 123.0, threshold=5.0) == 1.0  # delta=5
 
     def test_returns_outgoing_over_incoming_when_delta_exceeds_threshold(self):
         """Sign convention: ``incoming_bpm`` is too high → rate < 1.0
@@ -992,22 +999,23 @@ class TestComputeTempoMatchRate:
         assert compute_tempo_match_rate(-1.0, 128.0) == 1.0
 
     def test_threshold_argument_is_honoured(self):
-        """A path that wants tighter tempo matching can pass a smaller
-        threshold. Useful for genres where 2-BPM drift IS audible."""
-        # Default threshold (5) → no stretch.
-        assert compute_tempo_match_rate(120.0, 122.0) == 1.0
-        # Tighter threshold (1) → stretch even tiny deltas.
-        rate = compute_tempo_match_rate(120.0, 122.0, threshold=1.0)
+        """A path that wants the WIDE dead zone (whole-track body stretch)
+        can pass the larger threshold explicitly."""
+        # Wide threshold (5) → no stretch for a 2-BPM delta.
+        assert compute_tempo_match_rate(120.0, 122.0, threshold=5.0) == 1.0
+        # The tighter v3.6 crossfade default DOES stretch the same delta.
+        rate = compute_tempo_match_rate(120.0, 122.0)
         assert rate == pytest.approx(120.0 / 122.0)
 
-    def test_default_threshold_matches_constant(self):
-        """Sanity check: the implicit default mirrors the documented
-        module-level constant. Tests reference the constant elsewhere so
-        a drift here would mask cross-path disagreement."""
-        # Anything inside ±DEFAULT_BPM_MATCH_THRESHOLD must collapse to 1.0.
-        assert compute_tempo_match_rate(
-            120.0, 120.0 + DEFAULT_BPM_MATCH_THRESHOLD
-        ) == 1.0
+    def test_default_threshold_matches_crossfade_constant(self):
+        """Sanity check: the implicit default mirrors the v3.6 crossfade
+        constant (GRIDWARP_BPM_MATCH_THRESHOLD), not the wide body-stretch
+        dead zone. A delta just under it collapses to 1.0; just over it
+        stretches."""
+        just_under = 120.0 + GRIDWARP_BPM_MATCH_THRESHOLD - 0.05
+        just_over = 120.0 + GRIDWARP_BPM_MATCH_THRESHOLD + 0.05
+        assert compute_tempo_match_rate(120.0, just_under) == 1.0
+        assert compute_tempo_match_rate(120.0, just_over) != 1.0
 
 
 class TestPhaseLockedCrossfadeNp:
