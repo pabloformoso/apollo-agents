@@ -117,15 +117,33 @@ class TestFindPhraseAnchor:
         assert self.DURATION - anchor >= CROSSFADE_SEC + 0.5
 
     def test_falls_back_to_closest_beat_when_no_constraint_fits(self):
-        """When no candidate satisfies the tail constraint, the function
-        falls back to the closest plain beat — better than crashing the
-        mix. The 'fallback' tier label is the diagnostic signal."""
-        # Target near track end where no beat can satisfy min_tail.
-        _anchor, tier = find_phrase_anchor(self.DOWNBEATS,
-                                           target_sec=58.0,
-                                           track_duration_sec=self.DURATION,
-                                           min_tail_sec=CROSSFADE_SEC + 0.5)
+        """When NO downbeat anywhere satisfies the tail constraint, the
+        function falls back to the closest plain beat — better than crashing
+        the mix. The 'fallback' tier label is the diagnostic signal.
+
+        v3.7: the trigger is a tail so large that every downbeat violates it
+        (so neither the tight pass nor the phrase-back-search can find a
+        candidate). The previous version of this test used a near-end target
+        on a long grid, but that now correctly resolves to an earlier phrase
+        boundary via the back-search rather than a bare fallback — which is
+        the bug-4 fix working, not a regression."""
+        # Every downbeat is within min_tail of the end → nothing qualifies.
+        anchor, tier = find_phrase_anchor(self.DOWNBEATS,
+                                          target_sec=58.0,
+                                          track_duration_sec=self.DURATION,
+                                          min_tail_sec=self.DURATION + 100.0)
         assert tier == "fallback"
+
+    def test_v37_backsearch_beats_bare_fallback_near_end(self):
+        """A near-end target that the old code resolved to a bare beat now
+        snaps back to a real phrase boundary with a valid tail — the audible
+        improvement from bug 4."""
+        anchor, tier = find_phrase_anchor(self.DOWNBEATS,
+                                          target_sec=58.0,
+                                          track_duration_sec=self.DURATION,
+                                          min_tail_sec=CROSSFADE_SEC + 0.5)
+        assert tier in ("16-bar", "8-bar", "4-bar")
+        assert self.DURATION - anchor >= CROSSFADE_SEC + 0.5
 
     def test_empty_downbeats_returns_fallback(self):
         anchor, tier = find_phrase_anchor([], target_sec=10.0,
@@ -141,6 +159,59 @@ class TestFindPhraseAnchor:
                                           max_offset_sec=10.0)
         assert anchor == 30.0
         assert tier == "16-bar"
+
+    # ------------------------------------------------------------------
+    # v3.7 bug 4 — "entered out of phrase". The crossfade target is fixed
+    # by track duration (dur - xfade), which rarely lands within the narrow
+    # ±max_offset window of a real 16/8-bar phrase boundary, so the ladder
+    # collapsed to a bare downbeat and the incoming track entered mid-phrase
+    # (sounded "horrible" live even though the beat was locked). The fix:
+    # prefer a phrase boundary even if it sits further BACK than max_offset —
+    # starting the blend a few bars early is musically safe; entering off the
+    # phrase is not.
+    # ------------------------------------------------------------------
+    # Hazy Comfort geometry (real catalog track, the live "horrible" case):
+    # 122 BPM, 113 downbeats, dur 221.9 s. target = dur - 12 = 209.9 s lands
+    # at idx ~107 (mod16=11): nearest 16-bar boundary is 21 s away, nearest
+    # 8/4-bar boundary 5.31 s away — BOTH outside the ±4 s default window, so
+    # the old ladder collapsed to a bare downbeat (mid-phrase entry).
+    _HAZY_DOWNBEATS = [round(i * (60.0 / 122.0 * 4.0), 4) for i in range(113)]
+    _HAZY_DURATION = 221.9
+
+    def test_v37_prefers_phrase_boundary_over_bare_downbeat(self):
+        """Real Hazy Comfort geometry: nearest phrase boundary sits ~5.3 s
+        from the duration-derived target, just outside the ±4 s window. Old
+        behaviour: tier='downbeat' (entered mid-phrase, sounded horrible).
+        v3.7: must snap to a phrase boundary (16/8/4-bar) instead."""
+        anchor, tier = find_phrase_anchor(
+            self._HAZY_DOWNBEATS,
+            target_sec=self._HAZY_DURATION - 12.0,
+            track_duration_sec=self._HAZY_DURATION,
+            min_tail_sec=12.5,
+        )
+        assert tier in ("16-bar", "8-bar", "4-bar"), (
+            f"expected a phrase boundary, got tier={tier!r}"
+        )
+        stride = {"16-bar": 16, "8-bar": 8, "4-bar": 4}[tier]
+        idx = min(
+            range(len(self._HAZY_DOWNBEATS)),
+            key=lambda i: abs(self._HAZY_DOWNBEATS[i] - anchor),
+        )
+        assert idx % stride == 0, f"anchor idx {idx} not on a {stride}-bar boundary"
+        assert self._HAZY_DURATION - anchor >= 12.5
+
+    def test_v37_phrase_boundary_lands_at_or_before_target(self):
+        """The phrase anchor should sit AT or BEFORE the duration-derived
+        target (start the blend a touch early to stay in phrase), never so
+        late it eats the tail."""
+        target = self._HAZY_DURATION - 12.0
+        anchor, _tier = find_phrase_anchor(
+            self._HAZY_DOWNBEATS,
+            target_sec=target,
+            track_duration_sec=self._HAZY_DURATION,
+            min_tail_sec=12.5,
+        )
+        assert anchor <= target + 1e-6
 
 
 # ---------------------------------------------------------------------------

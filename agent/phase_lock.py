@@ -234,19 +234,35 @@ def find_phrase_anchor(
     track_duration_sec: float,
     min_tail_sec: float = DEFAULT_CROSSFADE_SEC + 1.0,
     max_offset_sec: float = 4.0,
+    phrase_back_sec: float = 32.0,
 ) -> tuple[float, str]:
-    """Pick the downbeat closest to ``target_sec`` sitting on a 16/8/4-bar boundary.
+    """Pick a downbeat near ``target_sec`` sitting on a 16/8/4-bar boundary.
 
     Phrase boundary candidates are ``downbeats[::N]`` for N=16, 8, 4 (counting
     bars from ``downbeats[0]``, which madmom locks to the song's true bar 1).
-    Falls back through the ladder when no candidate fits the constraints,
-    finally returning the nearest plain downbeat. The string return is a
-    diagnostic tier label printed alongside per-transition logging.
+
+    Two-pass selection (v3.7):
+
+    1. **Tight pass** — for each stride, take boundaries within
+       ``max_offset_sec`` of the target on EITHER side and pick the closest.
+       This is the original behaviour and wins whenever the target happens to
+       sit near a phrase boundary.
+    2. **Phrase-priority back-search** — if no stride had a tight candidate,
+       rather than collapsing to a bare downbeat (which makes the incoming
+       track enter MID-PHRASE — audibly wrong even with the beat locked), look
+       BACKWARD up to ``phrase_back_sec`` for the latest 16→8→4-bar boundary
+       that still leaves ``min_tail_sec``. Starting the blend a few bars early
+       keeps the mix on the phrase, which matters far more than hitting
+       ``dur - xfade`` exactly. This is bug 4 ("entered out of phrase").
+
+    Only when neither pass finds a phrase boundary does it fall back to the
+    nearest plain downbeat (tier ``"downbeat"``), and finally ``"fallback"``.
+    The string return is a diagnostic tier label printed per transition.
     """
     if not downbeats:
         return target_sec, "fallback"
 
-    def _candidates(stride: int) -> list[float]:
+    def _tight_candidates(stride: int) -> list[float]:
         out: list[float] = []
         for i in range(0, len(downbeats), stride):
             t = downbeats[i]
@@ -257,15 +273,35 @@ def find_phrase_anchor(
             out.append(t)
         return out
 
-    for stride, label in (
-        (16, "16-bar"),
-        (8, "8-bar"),
-        (4, "4-bar"),
-        (1, "downbeat"),
-    ):
-        cands = _candidates(stride)
+    # Pass 1 — tight window (original behaviour).
+    for stride, label in ((16, "16-bar"), (8, "8-bar"), (4, "4-bar")):
+        cands = _tight_candidates(stride)
         if cands:
             return min(cands, key=lambda t: abs(t - target_sec)), label
+
+    # Pass 2 — phrase-priority back-search. Prefer the LATEST phrase boundary
+    # at or before the target (start the blend a touch early to stay in
+    # phrase) within ``phrase_back_sec``, leaving the crossfade tail. Try
+    # coarser phrases first so we lock to the strongest musical boundary.
+    for stride, label in ((16, "16-bar"), (8, "8-bar"), (4, "4-bar")):
+        back: list[float] = []
+        for i in range(0, len(downbeats), stride):
+            t = downbeats[i]
+            if (track_duration_sec - t) < min_tail_sec:
+                continue
+            if t > target_sec:  # at or before the target only
+                continue
+            if (target_sec - t) > phrase_back_sec:
+                continue
+            back.append(t)
+        if back:
+            # Latest such boundary = closest to the target from behind.
+            return max(back), label
+
+    # No phrase boundary anywhere usable → nearest plain downbeat with tail.
+    tailed = [t for t in downbeats if (track_duration_sec - t) >= min_tail_sec]
+    if tailed:
+        return min(tailed, key=lambda t: abs(t - target_sec)), "downbeat"
 
     # Last resort: closest beat we know about, even past the tail constraint.
     return min(downbeats, key=lambda t: abs(t - target_sec)), "fallback"
