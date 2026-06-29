@@ -851,6 +851,33 @@ def resolve_downbeats(
     return [], 4
 
 
+def build_profile(
+    outgoing_key: "str | None",
+    incoming_key: "str | None",
+    outgoing_bpm: "float | None",
+) -> str:
+    """Build the `(key_pair)|bpm(bucket)` profile string the beatmatch loop
+    indexes on. Mirrors the frontend `buildMeasurementProfile` exactly so the
+    learned-offset key written by one side is read by the other.
+
+    bpm_bucket = the outgoing BPM floored to a 2-BPM band ("120-122"); unknown
+    key/bpm → "?".
+    """
+    ok = outgoing_key or "?"
+    ik = incoming_key or "?"
+    bucket = "?"
+    if outgoing_bpm is not None:
+        try:
+            b = float(outgoing_bpm)
+            import math as _math
+            if _math.isfinite(b):
+                lo = int(b // 2) * 2
+                bucket = f"{lo}-{lo + 2}"
+        except (TypeError, ValueError):
+            bucket = "?"
+    return f"{ok}->{ik}|bpm{bucket}"
+
+
 def read_learned_offset(
     memory_path: "str | object",
     profile: str,

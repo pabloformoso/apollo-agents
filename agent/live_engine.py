@@ -41,9 +41,18 @@ from agent.phase_lock import (
     XFADE_EDGE_GUARD_SAMPLES,
     LiveTransitionPlan,
     build_live_transition_plan,
+    build_profile,
+    read_learned_offset,
     resolve_downbeats,
 )
 from agent.transition_styles import serialise_choice
+
+# W4 (beatmatch feedback loop) — apply learned per-profile offsets to live
+# transitions. GATE G3: audio-affecting, OFF by default; opt in with
+# APOLLO_BEATMATCH_APPLY=1. The loop always LEARNS (writes offsets); this flag
+# only controls whether they are APPLIED to how transitions sound.
+_BEATMATCH_APPLY = os.getenv("APOLLO_BEATMATCH_APPLY", "0") == "1"
+_BEATMATCH_MEMORY_PATH = Path(__file__).parent / "memory.json"
 
 
 def _bar_cv(downbeats: "list[float]") -> str:
@@ -1807,6 +1816,19 @@ class LiveEngineBrowser:
             with self._lock:
                 self._transition_plan = None
             return
+        # W4 (beatmatch feedback loop, GATE G3) — apply the learned per-profile
+        # timing offset. Always 0.0 unless APPLY is enabled AND a learned offset
+        # exists for this exact (key_pair, bpm_bucket) profile. read_learned_offset
+        # returns 0.0 for any missing/disabled/out-of-range case, so this is a
+        # safe no-op when nothing has been learned yet.
+        _profile = build_profile(
+            current_track.get("camelot_key"),
+            next_track.get("camelot_key"),
+            float(current_track.get("bpm") or 0) or None,
+        )
+        _learned_offset_ms = read_learned_offset(
+            _BEATMATCH_MEMORY_PATH, _profile, apply_enabled=_BEATMATCH_APPLY,
+        )
         plan = build_live_transition_plan(
             outgoing_beatgrid=current_track.get("beatgrid"),
             outgoing_duration_sec=outgoing_duration,
@@ -1817,6 +1839,7 @@ class LiveEngineBrowser:
             target_xfade_sec=float(self.crossfade_sec),
             outgoing_bpm=float(current_track.get("bpm") or 0) or None,
             incoming_bpm=float(next_track.get("bpm") or 0) or None,
+            learned_offset_ms=_learned_offset_ms,
             # v3.6 — inherit the tighter GRIDWARP_BPM_MATCH_THRESHOLD default
             # so sub-5-BPM deep-house pairs get a real crossfade tempo-match
             # (the browser deck applies the resulting incoming_rate) instead

@@ -73,7 +73,7 @@ note                    : metric = coverage WITH tests in denominator (user choi
 | gate | item | reason | cleared? |
 |------|------|--------|----------|
 | G1 | — | pre-run sign-off | YES (user: "Apruebo. Puedes lanzar la implementación?") |
-| G3 | W4 | wire read_learned_offset into live_engine with the apply flag ON — this changes how live transitions sound. Logic is implemented + tested with the flag OFF (no audible change yet). Awaits sign-off to enable. | NO |
+| G3 | W4 | wire read_learned_offset into live_engine — DONE. Apply is behind APOLLO_BEATMATCH_APPLY (OFF by default; set =1 to enable). Wiring + pitch-bend buttons landed; offsets read per-transition (no-op until learned + flag on). | YES (user chose option a) |
 
 ---
 

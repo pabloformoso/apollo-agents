@@ -1205,6 +1205,24 @@ class TestReadLearnedOffset:
         assert read_learned_offset(p, "", apply_enabled=True) == 0.0
 
 
+class TestBuildProfile:
+    """``build_profile`` must mirror the frontend ``buildMeasurementProfile``
+    byte-for-byte so the offset key written by one side reads on the other."""
+
+    def test_key_pair_and_2bpm_bucket(self):
+        assert phase_lock_mod.build_profile("8A", "8B", 121.8) == "8A->8B|bpm120-122"
+
+    def test_floors_to_lower_even_band(self):
+        assert phase_lock_mod.build_profile("1A", "1A", 123.0) == "1A->1A|bpm122-124"
+        assert phase_lock_mod.build_profile("1A", "1A", 120.0) == "1A->1A|bpm120-122"
+
+    def test_unknown_key_and_bpm(self):
+        assert phase_lock_mod.build_profile(None, None, None) == "?->?|bpm?"
+
+    def test_partial_unknowns(self):
+        assert phase_lock_mod.build_profile("8A", None, None) == "8A->?|bpm?"
+
+
 class TestLearnedOffsetApplied:
     """``build_live_transition_plan`` shifts the incoming start by the learned
     offset. Positive offset (incoming was landing late) → start earlier."""
