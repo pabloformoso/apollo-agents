@@ -227,6 +227,35 @@ describe("BufferDeck", () => {
     expect(src.playbackRate.setValueAtTime).not.toHaveBeenCalled();
   });
 
+  // --- W3: momentary pitch-bend (nudgeRate) -------------------------------
+  it("nudgeRate bumps the live source rate then ramps back to base", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    audioCtx.currentTime = 3.0;
+    deck.scheduleSource(buf, 3.0, 0, 1.0, "t"); // base rate 1.0
+    const src = FakeBufferSource.instances[0];
+    deck.nudgeRate(1.02, 0.25);
+    // Bumps to base*rate now, ramps back to base after hold.
+    expect(src.playbackRate.setValueAtTime).toHaveBeenCalledWith(1.02, 3.0);
+    expect(src.playbackRate.linearRampToValueAtTime).toHaveBeenCalledWith(1.0, 3.25);
+  });
+
+  it("nudgeRate scales against the deck's base rate, not absolute", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    audioCtx.currentTime = 0;
+    deck.scheduleSource(buf, 0, 0, 1.05, "t"); // base rate 1.05 (tempo-matched)
+    const src = FakeBufferSource.instances[0];
+    deck.nudgeRate(1.02, 0.25);
+    expect(src.playbackRate.setValueAtTime).toHaveBeenCalledWith(1.05 * 1.02, 0);
+    expect(src.playbackRate.linearRampToValueAtTime).toHaveBeenCalledWith(1.05, 0.25);
+  });
+
+  it("nudgeRate is a no-op with no source playing", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    expect(() => deck.nudgeRate(1.02)).not.toThrow();
+  });
+
   it("stop() ends the current source and clears state, idempotent on repeated calls", () => {
     const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
     const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;

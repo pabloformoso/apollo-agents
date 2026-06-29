@@ -69,6 +69,66 @@ app.add_middleware(
 app.include_router(render_router)
 
 
+# --- beatmatch feedback loop (W1) ------------------------------------------
+# Where the browser-streamed per-transition measurements land. The
+# beatmatch-learn loop reads this file to learn per-profile timing offsets.
+# Project root = parent of the backend package's parent (web/backend → repo).
+_BEATMATCH_MEASUREMENTS_PATH = (
+    Path(pipeline._PROJECT_DIR) / "loops" / "beatmatch-learn" / "measurements.jsonl"
+)
+
+# Required fields a measurement must carry to be persisted (W1 acceptance).
+_BEATMATCH_REQUIRED = ("profile", "offset_ms")
+
+
+def record_beatmatch_measurement(
+    msg: dict, *, path: Path | None = None
+) -> bool:
+    """Append one validated beatmatch measurement as a JSON line.
+
+    Returns True if a line was written, False if the message was dropped as
+    malformed (missing required field, non-numeric offset). Creates the parent
+    directory and file on first write. Raises only on unexpected I/O errors
+    (the caller logs and continues — a bad measurement must never kill the WS).
+
+    A valid measurement carries at least ``profile`` (str) and ``offset_ms``
+    (number); ``pitch_bend_ms``, ``key_pair``, ``bpm_bucket``, ``ts`` are
+    optional. See ``beatmatch-learn-knowledge`` for the schema + sign rubric.
+    """
+    target = path or _BEATMATCH_MEASUREMENTS_PATH
+
+    # Validation — drop (return False), do not raise, on malformed input.
+    for field in _BEATMATCH_REQUIRED:
+        if field not in msg or msg[field] is None:
+            return False
+    if not isinstance(msg.get("profile"), str) or not msg["profile"]:
+        return False
+    try:
+        offset_ms = float(msg["offset_ms"])
+    except (TypeError, ValueError):
+        return False
+
+    record: dict = {"profile": msg["profile"], "offset_ms": offset_ms}
+    # Optional fields, copied through only when present + well-typed.
+    if msg.get("pitch_bend_ms") is not None:
+        try:
+            record["pitch_bend_ms"] = float(msg["pitch_bend_ms"])
+        except (TypeError, ValueError):
+            return False
+    for opt in ("key_pair", "bpm_bucket", "ts"):
+        if isinstance(msg.get(opt), str) and msg[opt]:
+            record[opt] = msg[opt]
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    # Single write() of one line is atomic enough for concurrent appenders on
+    # a local fs (POSIX append semantics); keeps W1 dependency-free.
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(line)
+        fh.flush()
+    return True
+
+
 # Genre Guard cap: max user turns before we treat the conversation as
 # stuck and emit the "Could not confirm genre" error. See issue #23.
 MAX_GENRE_TURNS = 8
@@ -1236,6 +1296,20 @@ async def live_session_ws(
                         "timestamp_ms": msg.get("timestamp_ms"),
                     }
                 )
+            elif msg_type == "beatmatch_measurement":
+                # W1 (beatmatch feedback loop) — one transition's measured
+                # residual offset + optional human pitch-bend correction,
+                # streamed from the browser (lib/live.ts crossfadeToNext).
+                # Appended as one JSON line to measurements.jsonl, which the
+                # beatmatch-learn loop consumes to learn per-profile offsets.
+                # Malformed messages are dropped (logged), never fatal.
+                try:
+                    record_beatmatch_measurement(msg)
+                except Exception as exc:  # noqa: BLE001 — never kill the WS loop
+                    print(
+                        f"[live-ws {session_id}] beatmatch_measurement dropped: {exc}",
+                        flush=True,
+                    )
             elif msg_type == "quit":
                 await command_queue.put({"type": "quit"})
                 break

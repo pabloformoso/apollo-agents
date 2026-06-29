@@ -307,6 +307,31 @@ export class BufferDeck {
   }
 
   /**
+   * W3 — momentary pitch-bend: multiply the live source's playbackRate by
+   * ``rate`` now, then ramp back to the deck's base rate after
+   * ``holdSec``. The DJ presses a nudge button; this is the audible
+   * correction. No-op when no source is playing. Best-effort against mocked
+   * AudioParams (tests).
+   */
+  nudgeRate(rate: number, holdSec = 0.25): void {
+    const src = this.source;
+    if (!src) return;
+    const now = this.audioCtx.currentTime;
+    const base = this.rateAtStart || 1;
+    try {
+      src.playbackRate.cancelScheduledValues(now);
+    } catch {
+      /* mocked AudioParam without cancelScheduledValues */
+    }
+    try {
+      src.playbackRate.setValueAtTime(base * rate, now);
+      src.playbackRate.linearRampToValueAtTime(base, now + holdSec);
+    } catch {
+      /* partial AudioParam mock — degrade silently */
+    }
+  }
+
+  /**
    * Stop the currently scheduled source (if any). Idempotent. The
    * onended callback will NOT fire — callers use stop() to forcibly
    * end without triggering "track ended naturally" semantics.

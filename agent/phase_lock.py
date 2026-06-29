@@ -92,6 +92,11 @@ GRIDWARP_BPM_MATCH_THRESHOLD: float = 0.3
 STRETCH_RATIO_MAX: float = 1.5
 STRETCH_RATIO_MIN: float = 1.0 / STRETCH_RATIO_MAX
 
+# W4 (beatmatch feedback loop) — clamp on the learned per-profile timing offset
+# applied to the incoming start. Same sane window as a single bar at slow tempo;
+# a corrupt memory.json entry can shift the start at most this far.
+MAX_LEARNED_OFFSET_MS: float = 100.0
+
 # v3.5 — beat-lock grid-warp tunables.
 #
 # Coefficient-of-variation ceiling on a track's bar intervals below which
@@ -846,6 +851,50 @@ def resolve_downbeats(
     return [], 4
 
 
+def read_learned_offset(
+    memory_path: "str | object",
+    profile: str,
+    *,
+    apply_enabled: bool,
+) -> float:
+    """Return the learned timing offset (ms) for ``profile``, or 0.0.
+
+    W4 (beatmatch feedback loop). Reads ``beatmatch_offsets`` from the memory
+    JSON the loop writes. Returns 0.0 — i.e. NO shift — when any of:
+      - ``apply_enabled`` is False (the G4 gate is closed: learn but don't apply);
+      - the file is missing / unreadable / malformed;
+      - the profile has no learned offset;
+      - the stored offset is non-finite or outside the sane clamp window.
+
+    Kept dependency-free (plain json + path) so ``phase_lock`` stays importable
+    without the agent tools. ``memory_path`` is anything ``open()`` accepts.
+    """
+    if not apply_enabled or not profile:
+        return 0.0
+    import json as _json
+    import math as _math
+    from pathlib import Path as _Path
+
+    try:
+        p = _Path(memory_path)
+        if not p.exists():
+            return 0.0
+        data = _json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0.0
+    entry = ((data or {}).get("beatmatch_offsets", {}) or {}).get(profile)
+    if not isinstance(entry, dict):
+        return 0.0
+    raw = entry.get("offset_ms")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if not _math.isfinite(val) or abs(val) > MAX_LEARNED_OFFSET_MS:
+        return 0.0
+    return val
+
+
 def build_live_transition_plan(
     *,
     outgoing_beatgrid: Optional[dict],
@@ -859,6 +908,7 @@ def build_live_transition_plan(
     outgoing_bpm: Optional[float] = None,
     incoming_bpm: Optional[float] = None,
     bpm_match_threshold: float = GRIDWARP_BPM_MATCH_THRESHOLD,
+    learned_offset_ms: float = 0.0,
 ) -> LiveTransitionPlan:
     """Top-level convenience for the live engines.
 
@@ -916,9 +966,20 @@ def build_live_transition_plan(
         xfade_sec=plan.xfade_catalog_sec,
         ramp_sec=plan.ramp_catalog_sec,
     )
+    # W4 (beatmatch feedback loop) — shift the incoming start by the learned
+    # per-profile offset. A POSITIVE learned offset means "the incoming
+    # downbeat has been landing late for this profile" → start the incoming
+    # track EARLIER by that many ms to compensate. Audio-affecting: the caller
+    # passes 0.0 unless the apply flag (G4) is on AND a learned offset exists.
+    # Clamped to a sane window so a corrupt memory entry can't yank the start.
+    incoming_start_sec = plan.incoming_anchor_catalog_sec
+    if learned_offset_ms:
+        shift_ms = max(-MAX_LEARNED_OFFSET_MS, min(MAX_LEARNED_OFFSET_MS, learned_offset_ms))
+        incoming_start_sec = max(0.0, incoming_start_sec - shift_ms / 1000.0)
+
     return LiveTransitionPlan(
         outgoing_anchor_sample=int(round(plan.outgoing_anchor_catalog_sec * sample_rate)),
-        incoming_start_sample=int(round(plan.incoming_anchor_catalog_sec * sample_rate)),
+        incoming_start_sample=int(round(incoming_start_sec * sample_rate)),
         xfade_samples=int(round(plan.xfade_catalog_sec * sample_rate)),
         sample_rate=sample_rate,
         phrase_tier=plan.phrase_tier,

@@ -14,7 +14,7 @@
 ```
 N (offset window)        : 10
 K (pitch-bend window)    : 10
-OFFSET_THRESHOLD_MS      : 10
+OFFSET_THRESHOLD_MS      : 5
 alpha (EMA)              : 0.3
 MAX_TRANSITIONS (budget) : 100
 large_jump_gate_ms (G7)  : 30

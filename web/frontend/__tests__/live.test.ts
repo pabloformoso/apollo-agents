@@ -1900,7 +1900,7 @@ describe("useLiveSession", () => {
       // call carries the `when` everything chains off.
       const incomingSource =
         FakeBufferSource.instances[FakeBufferSource.instances.length - 1];
-      const sourceWhen = incomingSource.start.mock.calls[0][0] as number;
+      const sourceWhen = (incomingSource.start.mock.calls[0] as unknown[])[0] as number;
 
       const incomingFilter = FakeBiquadFilterNode.instances.find((f) =>
         f.frequency.setValueAtTime.mock.calls.some(
@@ -1983,6 +1983,38 @@ describe("useLiveSession", () => {
         ),
       );
       expect(allResets.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // --- W2: beatmatch measurement emit ------------------------------------
+    it("emits a beatmatch_measurement on crossfade with the right shape", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bm-1");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          from_track: playlist[0],
+          crossfade_sec: 12,
+          phase_lock: {
+            ...bassSwapPayload,
+            transition_style: "smooth_blend" as const,
+            bass_swap: undefined,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const measurements = FakeWebSocket.lastInstance!.sent
+        .map((s) => JSON.parse(s))
+        .filter((m) => m.type === "beatmatch_measurement");
+      expect(measurements.length).toBe(1);
+      const m = measurements[0];
+      // This describe's v2Track is bpm 122, key 8A → bucket 122-124.
+      expect(m.profile).toBe("8A->8A|bpm122-124");
+      expect(m.key_pair).toBe("8A->8A");
+      expect(m.bpm_bucket).toBe("122-124");
+      expect(typeof m.offset_ms).toBe("number");
+      expect(m.offset_ms).toBeGreaterThanOrEqual(0);
+      expect(m.pitch_bend_ms).toBe(0); // no pitch-bend yet (W3 fills it)
     });
   });
 

@@ -49,7 +49,11 @@ import {
   BufferDeck,
   SCHEDULE_LOOKAHEAD_SEC,
 } from "./audio_buffer_decks";
-import { computeCrossfadeWhen } from "./crossfade_timing";
+import {
+  computeCrossfadeWhen,
+  buildMeasurementProfile,
+  applyPitchNudge,
+} from "./crossfade_timing";
 
 /**
  * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
@@ -248,6 +252,13 @@ export interface UseLiveSessionApi {
   wsExhausted: boolean;
   /** Manual "try again" trigger — clears exhausted flag and reopens the WS. */
   reconnectNow: () => void;
+  /**
+   * W3 (beatmatch feedback loop) — manual pitch-bend on the active deck.
+   * "earlier" speeds the incoming track up momentarily (it entered late),
+   * "later" slows it; the correction accumulates as the reinforcement signal
+   * for the current transition's beatmatch_measurement.
+   */
+  nudgePitch: (direction: "earlier" | "later") => void;
 }
 
 export type LiveCommand =
@@ -562,6 +573,10 @@ export function useLiveSession(
   // HTMLAudioElement ref provided. Updated every playback_pos tick.
   const audioRef = useRef<VisualAudioShim | null>(null);
   const currentTrackIdRef = useRef<string | null>(null);
+  // W2/W3 (beatmatch feedback loop) — accumulates the human pitch-bend
+  // correction (ms) for the CURRENT transition; rides on the next
+  // beatmatch_measurement emit, then resets. W3 wires the buttons that fill it.
+  const pitchBendMsRef = useRef<number>(0);
 
   // ── State (derived from engine events) ──────────────────────────────────
   const [state, setState] = useState<LiveEngineState>("idle");
@@ -909,6 +924,7 @@ export function useLiveSession(
       track: LiveTrackSummary,
       crossfadeSec: number,
       phaseLock?: PhaseLockPayload,
+      outgoingTrack?: LiveTrackSummary | null,
     ) => {
       // v3.4 — sample-accurate verify-then-commit crossfade:
       //   1. Decode the incoming track into a PCM AudioBuffer (likely
@@ -992,12 +1008,66 @@ export function useLiveSession(
       // `currentTime + lookahead`, pinning the incoming downbeat to a random
       // point in the outgoing bar → off from the first kick even with
       // grid-warp active (grid-warp fixes tempo slope, not phase intercept).
-      const when = computeCrossfadeWhen({
+      const _xfTiming = computeCrossfadeWhen({
         ctxNow: ctx.currentTime,
         lookaheadSec: SCHEDULE_LOOKAHEAD_SEC,
         outgoingPosSec: fromDeck.position(),
         outgoingAnchorSec: phaseLock?.outgoing_anchor_sec,
       });
+      const when = _xfTiming.when;
+      // v3.6-diag — measure the residual few-ms late offset reported by ear.
+      // If `clamped` is true the ideal downbeat landing was in the PAST and we
+      // bumped to ctxNow+lookahead (missed-downbeat → constant late offset);
+      // if false, any residual is more likely output latency. outputLatency /
+      // baseLatency are the AudioContext's hardware/render delay (uncompensated
+      // today). Grep the browser console for [xfade-timing].
+      try {
+        const ac = ctx as AudioContext & {
+          outputLatency?: number;
+          baseLatency?: number;
+        };
+        console.log(
+          "[xfade-timing]",
+          JSON.stringify({
+            secondsUntilDownbeat: _xfTiming.secondsUntilDownbeat,
+            clamped: _xfTiming.clamped,
+            lookaheadSec: SCHEDULE_LOOKAHEAD_SEC,
+            outputLatency: ac.outputLatency ?? null,
+            baseLatency: ac.baseLatency ?? null,
+          }),
+        );
+      } catch {
+        /* console unavailable — ignore */
+      }
+
+      // W2 (beatmatch feedback loop) — stream this transition's measured
+      // residual + (optional) human pitch-bend to the backend, which appends
+      // it to measurements.jsonl for the beatmatch-learn loop. The profile
+      // mirrors the backend's (key_pair, bpm_bucket) indexing. Best-effort:
+      // a failed send must never disrupt the crossfade.
+      try {
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const { profile, keyPair, bpmBucket } = buildMeasurementProfile(
+            { bpm: outgoingTrack?.bpm, camelot_key: outgoingTrack?.camelot_key },
+            { camelot_key: track.camelot_key },
+          );
+          ws.send(
+            JSON.stringify({
+              type: "beatmatch_measurement",
+              profile,
+              key_pair: keyPair,
+              bpm_bucket: bpmBucket,
+              offset_ms: _xfTiming.residualMs,
+              pitch_bend_ms: pitchBendMsRef.current,
+            }),
+          );
+        }
+      } catch {
+        /* WS send failed — drop this measurement, keep mixing */
+      }
+      // Reset the pitch-bend accumulator for the next transition (W3 fills it).
+      pitchBendMsRef.current = 0;
 
       // Schedule the incoming source. Returns the same `when` (no
       // surprise — but explicit for readability when the rest of the
@@ -1171,7 +1241,12 @@ export function useLiveSession(
     } else if (command === "skip" && evt.track) {
       void hardCutToTrack(evt.track);
     } else if (command === "crossfade" && evt.to_track) {
-      void crossfadeToNext(evt.to_track, evt.crossfade_sec ?? 12, evt.phase_lock);
+      void crossfadeToNext(
+        evt.to_track,
+        evt.crossfade_sec ?? 12,
+        evt.phase_lock,
+        evt.from_track ?? currentTrack,
+      );
     } else if (command === "stop_deck") {
       // v3.4 — release just the active deck's source so the next ``load``
       // plays into a fresh BufferSource and the previous track's
@@ -1580,6 +1655,18 @@ export function useLiveSession(
     setReconnectKey((k) => k + 1);
   }, []);
 
+  // W3 (beatmatch feedback loop) — manual pitch-bend. The DJ nudges the
+  // incoming (active) deck earlier/later to fix a transition by ear; the
+  // momentary playbackRate bump is the audible correction, and the ms are
+  // accumulated into pitchBendMsRef to ride on the next beatmatch_measurement
+  // emit (W2) as the reinforcement signal. Resets per transition there.
+  const nudgePitch = useCallback((direction: "earlier" | "later") => {
+    const { accumMs, rate } = applyPitchNudge(direction, pitchBendMsRef.current);
+    pitchBendMsRef.current = accumMs;
+    const deck = ensureBufferDeck(activeDeckRef.current);
+    deck?.nudgeRate(rate);
+  }, [ensureBufferDeck]);
+
   // True-unmount audio cleanup. ``[]`` deps means the cleanup runs only
   // when the hook is unmounted (component truly disposed), not on every
   // WS effect re-run. Strict Mode in dev still mount/unmount/mounts on
@@ -1935,6 +2022,7 @@ export function useLiveSession(
       wsRetryMax: MAX_WS_RETRIES,
       wsExhausted,
       reconnectNow,
+      nudgePitch,
     }),
     [
       state,
@@ -1965,6 +2053,7 @@ export function useLiveSession(
       wsRetryAttempt,
       wsExhausted,
       reconnectNow,
+      nudgePitch,
     ],
   );
 }
