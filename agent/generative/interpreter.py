@@ -19,6 +19,7 @@ from .spec import (
     BassRole,
     ControlsRole,
     DrumRole,
+    LeadRole,
     PadRole,
     PatternSpec,
     STEPS_PER_BAR,
@@ -33,8 +34,13 @@ TICKS_PER_STEP = TICKS_PER_BAR // STEPS_PER_BAR  # 6
 DRUM_CHANNEL = 9  # GM drums (0-indexed)
 BASS_CHANNEL = 0
 PAD_CHANNEL = 1
+LEAD_CHANNEL = 2  # S-5 (#74): unassigned before, passes through SplitPort untouched
 
-DRUM_NOTES = {"kick": 36, "snare": 38, "hats": 42}
+DRUM_NOTES = {"kick": 36, "snare": 38, "hats": 42, "perc": 37, "shaker": 70, "clap": 39}
+
+# apply_density removal priority: weakest metric position first (S-3 / #72).
+# Class order: off-16ths -> off-8ths -> beats 2&4 -> downbeats.
+_STEP_WEAKNESS = ([1, 3, 5, 7, 9, 11, 13, 15], [2, 6, 10, 14], [4, 12], [0, 8])
 DRUM_HIT_TICKS = TICKS_PER_STEP // 2  # short percussive gate
 ACCENT_BOOST = 15
 VEL_JITTER = 5  # humanization bound: |rendered - spec vel| <= this (+accent)
@@ -60,17 +66,63 @@ def _clamp_vel(v: int) -> int:
     return max(1, min(127, v))
 
 
+def apply_density(pattern: str, density: float, rng: random.Random) -> str:
+    """Deterministic density transform of a 16-step pattern (S-3 / #72).
+
+    target hit-count = round(density * 16). Below the written count, hits
+    are removed weakest-beat-first (off-16ths, then off-8ths, then beats,
+    then downbeats; seeded tie-break within a class). Above it, plain 'x'
+    embellishments are added on empty steps, weakest positions first.
+    Monotonic in note count for a fixed pattern + RNG stream position.
+    """
+    steps = list(pattern)
+    written = [i for i, ch in enumerate(steps) if ch != "."]
+    target = round(density * len(steps))
+    if target < len(written):
+        removable = []
+        for weakness_class in _STEP_WEAKNESS:
+            in_class = [i for i in weakness_class if steps[i] != "."]
+            removable.extend(rng.sample(in_class, len(in_class)))
+        for i in removable[: len(written) - target]:
+            steps[i] = "."
+    elif target > len(written):
+        addable = []
+        for weakness_class in _STEP_WEAKNESS:
+            in_class = [i for i in weakness_class if steps[i] == "."]
+            addable.extend(rng.sample(in_class, len(in_class)))
+        for i in addable[: target - len(written)]:
+            steps[i] = "x"
+    return "".join(steps)
+
+
+def _fill_steps(pattern: str, name: str, rng: random.Random) -> str:
+    """Deterministic last-bar fill: add hits on empty steps in the bar's
+    second half (steps 8-15); the kick's downbeat (step 0) is never touched
+    — fills never rewrite the anchor."""
+    steps = list(pattern)
+    candidates = [i for i in range(8, STEPS_PER_BAR) if steps[i] == "."]
+    if name == "kick" and 0 in candidates:
+        candidates.remove(0)
+    density_frac = sum(1 for ch in steps if ch != ".") / len(steps)
+    extra = min(len(candidates), 1 + int(3 * density_frac))
+    for i in rng.sample(candidates, extra) if candidates else []:
+        steps[i] = "x"
+    return "".join(steps)
+
+
 def _drum_events(name: str, role: DrumRole, bar: int, rng: random.Random,
-                 feel=None) -> list[MidiEvent]:
+                 feel=None, pattern: str | None = None) -> list[MidiEvent]:
     # feel=0/0 (or None) draws NOTHING extra from the RNG, so a spec without
     # feel renders byte-identical to pre-M-5 output (determinism, FS1).
+    # `pattern` overrides role.pattern (density/fill transforms, S-3) — the
+    # transform happens ONCE per role in render(), never per bar.
     slop = feel.timing_slop if feel is not None and name != "kick" else 0.0
     ghosts = feel.ghost_notes if feel is not None and name != "kick" else 0.0
     events = []
     note = DRUM_NOTES[name]
     bar_tick = bar * TICKS_PER_BAR
     swing_ticks = int(round(role.swing * TICKS_PER_STEP))
-    for step, ch in enumerate(role.pattern):
+    for step, ch in enumerate(pattern if pattern is not None else role.pattern):
         tick = bar_tick + step * TICKS_PER_STEP + (swing_ticks if step % 2 == 1 else 0)
         if ch == ".":
             if ghosts > 0 and rng.random() < ghosts * GHOST_DENSITY:
@@ -135,6 +187,24 @@ def _control_events(role: ControlsRole, total_bars: int) -> list[MidiEvent]:
     return events
 
 
+def _lead_events(role: LeadRole, bar: int, rng: random.Random, phrase_ticks: int) -> list[MidiEvent]:
+    """Same looping/clipping semantics as bass, on the lead channel."""
+    events = []
+    bar_tick = bar * TICKS_PER_BAR
+    for step, note, beats in role.notes:
+        period_bars = max(1, math.ceil(beats / BEATS_PER_BAR))
+        if bar % period_bars != 0:
+            continue
+        tick = bar_tick + step * TICKS_PER_STEP
+        vel = _clamp_vel(role.vel + rng.randint(-VEL_JITTER, VEL_JITTER))
+        off = min(tick + max(1, int(round(beats * TICKS_PER_BEAT))), phrase_ticks - 1)
+        if off <= tick:
+            continue
+        events.append(MidiEvent(tick, "on", LEAD_CHANNEL, note, vel))
+        events.append(MidiEvent(off, "off", LEAD_CHANNEL, note, 0))
+    return events
+
+
 def _pad_phrase_events(role: PadRole, total_bars: int) -> list[MidiEvent]:
     """Render the whole progression: voice-led changes, optional sustain.
 
@@ -171,16 +241,30 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
     events: list[MidiEvent] = []
     phrase_ticks = spec.for_bars * TICKS_PER_BAR
     # Iterate role-major in a fixed order so the RNG draw sequence is
-    # independent of dict insertion order (determinism, FS1).
-    for name in ("kick", "snare", "hats", "bass"):
+    # independent of dict insertion order (determinism, FS1). New S-3 roles
+    # sit AFTER hats and BEFORE bass so pre-S-3 specs keep their exact RNG
+    # draw order (byte-identical output).
+    for name in ("kick", "snare", "hats", "perc", "shaker", "clap", "bass", "lead"):
         role = spec.roles.get(name)
         if role is None:
             continue
+        pattern = None
+        fill_pattern = None
+        if isinstance(role, DrumRole):
+            if role.density is not None:
+                pattern = apply_density(role.pattern, role.density, rng)
+            if role.fill == "auto":
+                fill_pattern = _fill_steps(pattern if pattern is not None else role.pattern,
+                                           name, rng)
         for bar in range(spec.for_bars):
             if isinstance(role, DrumRole):
-                events.extend(_drum_events(name, role, bar, rng, spec.feel))
+                bar_pattern = fill_pattern if (fill_pattern is not None
+                                               and bar == spec.for_bars - 1) else pattern
+                events.extend(_drum_events(name, role, bar, rng, spec.feel, pattern=bar_pattern))
             elif isinstance(role, BassRole):
                 events.extend(_bass_events(role, bar, rng, phrase_ticks))
+            elif isinstance(role, LeadRole):
+                events.extend(_lead_events(role, bar, rng, phrase_ticks))
     pad = spec.roles.get("pad")
     if isinstance(pad, PadRole):
         events.extend(_pad_phrase_events(pad, spec.for_bars))

@@ -28,9 +28,13 @@ _CAMELOT_RE = re.compile(r"^(1[0-2]|[1-9])[AB]$")
 _NOTE_RE = re.compile(r"^([A-G])([#b]?)(-?\d)$")
 _CHORD_RE = re.compile(r"^([A-G][#b]?)(maj7|maj9|m7b5|min7|min9|min|m7|m9|m6|m|7|9|6|add9|sus2|sus4|dim|aug)?$")
 
-DRUM_ROLES = ("kick", "snare", "hats")
-PITCHED_ROLES = ("bass", "pad")
+DRUM_ROLES = ("kick", "snare", "hats", "perc", "shaker", "clap")
+PITCHED_ROLES = ("bass", "pad", "lead")
 ALLOWED_ROLES = DRUM_ROLES + PITCHED_ROLES + ("controls",)
+
+LEAD_RANGE = (60, 95)  # C4-B6 — the melodic register (S-5 / #74)
+
+FILL_MODES = ("none", "auto")
 
 VOICINGS = ("close", "wide")
 
@@ -41,6 +45,12 @@ NAMED_PATTERNS = {
     "8ths": "x.x.x.x.x.x.x.x.",
     "16ths": "xxxxxxxxxxxxxxxx",
     "backbeat": "....x.......x...",
+    # v3.2 S-3 additions
+    "half-time": "x.......x.......",
+    "garage": "x..x..x...x..x..",
+    "shaker-groove": "xxXxxxXxxxXxxxXx",
+    "rim-sync": "..x...x.....x..x",
+    "clap-24": "....x.......x...",
 }
 
 _PATTERN_CHARS = set("xX.")
@@ -127,6 +137,8 @@ class DrumRole:
     pattern: str  # canonical 16-step string
     vel: int = 100
     swing: float = 0.0
+    density: float | None = None  # None = written pattern as-is (byte-identical path)
+    fill: str = "none"  # "auto" = deterministic last-bar variation
 
     @classmethod
     def from_dict(cls, name: str, d: dict) -> "DrumRole":
@@ -137,7 +149,16 @@ class DrumRole:
         swing = d.get("swing", 0.0)
         if not isinstance(swing, (int, float)) or not SWING_MIN <= swing <= SWING_MAX:
             raise SpecError(f"{name}: swing must be in [{SWING_MIN}, {SWING_MAX}], got {swing!r}")
-        return cls(pattern=pattern, vel=vel, swing=float(swing))
+        density = d.get("density")
+        if density is not None:
+            if not isinstance(density, (int, float)) or isinstance(density, bool) \
+                    or not 0.0 <= density <= 1.0:
+                raise SpecError(f"{name}: density must be in [0.0, 1.0], got {density!r}")
+            density = float(density)
+        fill = d.get("fill", "none")
+        if fill not in FILL_MODES:
+            raise SpecError(f"{name}: fill must be one of {FILL_MODES}, got {fill!r}")
+        return cls(pattern=pattern, vel=vel, swing=float(swing), density=density, fill=fill)
 
 
 @dataclass(frozen=True)
@@ -165,6 +186,41 @@ class BassRole:
                 raise SpecError(f"{name}: duration must be in (0, {BARS_MAX * 4}] beats, got {beats!r}")
             notes.append((step, note_to_midi(note_name), float(beats)))
         vel = _check_vel(d.get("vel", 90), name)
+        return cls(notes=tuple(notes), vel=vel)
+
+
+@dataclass(frozen=True)
+class LeadRole:
+    """Melodic surface (S-5 / #74) — like bass, but registered C4-B6.
+
+    Schema deliberately tolerates unknown keys (e.g. #69's future per-role
+    "patch") — from_dict reads only what it knows.
+    """
+    notes: tuple[tuple[int, int, float], ...]  # (step 0-15, midi, beats)
+    vel: int = 84
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict) -> "LeadRole":
+        if not isinstance(d, dict):
+            raise SpecError(f"{name}: role must be an object, got {d!r}")
+        raw = d.get("notes")
+        if not isinstance(raw, list) or not raw:
+            raise SpecError(f"{name}: 'notes' must be a non-empty list of [step, note, beats]")
+        notes = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 3:
+                raise SpecError(f"{name}: each note must be [step, note, beats], got {item!r}")
+            step, note_name, beats = item
+            if not isinstance(step, int) or isinstance(step, bool) or not 0 <= step < STEPS_PER_BAR:
+                raise SpecError(f"{name}: step must be an int in [0, {STEPS_PER_BAR - 1}], got {step!r}")
+            if not isinstance(beats, (int, float)) or not 0 < beats <= BARS_MAX * 4:
+                raise SpecError(f"{name}: duration must be in (0, {BARS_MAX * 4}] beats, got {beats!r}")
+            midi = note_to_midi(note_name)
+            if not LEAD_RANGE[0] <= midi <= LEAD_RANGE[1]:
+                raise SpecError(f"{name}: {note_name} (MIDI {midi}) outside the lead register "
+                                f"[{LEAD_RANGE[0]}, {LEAD_RANGE[1]}] (C4-B6)")
+            notes.append((step, midi, float(beats)))
+        vel = _check_vel(d.get("vel", 84), name)
         return cls(notes=tuple(notes), vel=vel)
 
 
@@ -266,8 +322,8 @@ class ControlsRole:
         return cls(ramps=tuple(ControlRamp.from_dict(r) for r in raw))
 
 
-_ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": BassRole,
-                 "pad": PadRole, "controls": ControlsRole}
+_ROLE_CLASSES = {**{name: DrumRole for name in DRUM_ROLES},
+                 "bass": BassRole, "pad": PadRole, "lead": LeadRole, "controls": ControlsRole}
 
 
 @dataclass(frozen=True)
@@ -307,7 +363,7 @@ def _check_scale(key: str, roles: dict) -> None:
 
     scale = camelot_scale(key)
     for name, role in roles.items():
-        if isinstance(role, BassRole):
+        if isinstance(role, (BassRole, LeadRole)):
             for _step, note, _beats in role.notes:
                 if note % 12 not in scale:
                     raise SpecError(
@@ -396,6 +452,8 @@ class PatternSpec:
                              + (f",sw{role.swing:.2f})" if role.swing else ")"))
             elif isinstance(role, BassRole):
                 parts.append(f"bass={len(role.notes)}notes(v{role.vel})")
+            elif isinstance(role, LeadRole):
+                parts.append(f"lead={len(role.notes)}notes(v{role.vel})")
             elif isinstance(role, PadRole):
                 chords = "-".join(c for _, c in role.progression)
                 parts.append(f"pad={chords}/{role.voicing}"

@@ -22,6 +22,7 @@ from .interpreter import (
     BASS_CHANNEL,
     DRUM_CHANNEL,
     DRUM_NOTES,
+    LEAD_CHANNEL,
     PAD_CHANNEL,
     TICKS_PER_BEAT,
     MidiEvent,
@@ -32,7 +33,8 @@ from .spec import PatternSpec
 
 SR = 44100
 
-_GAINS = {"kick": 0.9, "snare": 0.55, "hats": 0.3, "bass": 0.55, "pad": 0.4}
+_GAINS = {"kick": 0.9, "snare": 0.55, "hats": 0.3, "perc": 0.4, "shaker": 0.22,
+          "clap": 0.5, "bass": 0.55, "pad": 0.4, "lead": 0.45}
 
 
 def _midi_to_freq(note: int) -> float:
@@ -46,19 +48,32 @@ def _kick(dur_s: float, vel: float) -> np.ndarray:
     return np.sin(phase) * np.exp(-t * 14.0) * vel
 
 
+def _lowpass(sig: np.ndarray, cutoff_hz: float) -> np.ndarray:
+    """Cheap deterministic FFT-domain 2nd-order-ish lowpass for short voices.
+
+    Unfiltered differentiated noise put the render's centroid near 10 kHz —
+    the quality bench (#71) flagged it against the catalog references; real
+    lofi/ambient sits dark. This keeps the noise voices genre-plausible.
+    """
+    spectrum = np.fft.rfft(sig)
+    freqs = np.fft.rfftfreq(len(sig), 1.0 / SR)
+    spectrum *= 1.0 / (1.0 + (freqs / cutoff_hz) ** 2)
+    return np.fft.irfft(spectrum, n=len(sig))
+
+
 def _snare(dur_s: float, vel: float, rng: np.random.Generator) -> np.ndarray:
     n = int(dur_s * SR)
     t = np.arange(n) / SR
-    noise = np.diff(rng.uniform(-1, 1, n + 1))  # differentiate -> brighter
+    noise = _lowpass(np.diff(rng.uniform(-1, 1, n + 1)), 3500.0)
     tone = np.sin(2 * np.pi * 185.0 * t) * np.exp(-t * 30.0)
-    return (noise * np.exp(-t * 25.0) * 0.8 + tone * 0.5) * vel
+    return (noise * np.exp(-t * 25.0) * 1.6 + tone * 0.5) * vel
 
 
 def _hat(dur_s: float, vel: float, rng: np.random.Generator) -> np.ndarray:
     n = int(dur_s * SR)
     t = np.arange(n) / SR
-    noise = np.diff(rng.uniform(-1, 1, n + 1))
-    return noise * np.exp(-t * 60.0) * vel
+    noise = _lowpass(np.diff(rng.uniform(-1, 1, n + 1)), 6500.0)
+    return noise * np.exp(-t * 60.0) * vel * 1.8
 
 
 def _tonal(note: int, dur_s: float, vel: float, *, partials, attack_s: float,
@@ -82,6 +97,12 @@ def _tonal(note: int, dur_s: float, vel: float, *, partials, attack_s: float,
 def _bass(note: int, dur_s: float, vel: float) -> np.ndarray:
     return _tonal(note, dur_s, vel, partials=((1, 1.0), (2, 0.35), (3, 0.12)),
                   attack_s=0.005, release_s=0.05)
+
+
+def _lead(note: int, dur_s: float, vel: float) -> np.ndarray:
+    # brighter than bass, longer gate/release — the melodic surface (S-5)
+    return _tonal(note, dur_s, vel, partials=((1, 1.0), (2, 0.55), (3, 0.28), (5, 0.08)),
+                  attack_s=0.01, release_s=0.15, detune=0.001)
 
 
 def _pad(note: int, dur_s: float, vel: float) -> np.ndarray:
@@ -118,17 +139,21 @@ def render_audio(spec: PatternSpec, seed: int = 0) -> np.ndarray:
         dur_s = max(0.01, (off_tick - on_tick) * sec_per_tick)
         vel = (velocity / 127.0) ** 1.5
         if channel == DRUM_CHANNEL:
-            name = drum_names.get(note)
+            name = drum_names.get(note, "hats")
             if name == "kick":
                 sig = _kick(0.35, vel) * _GAINS["kick"]
-            elif name == "snare":
-                sig = _snare(0.25, vel, rng) * _GAINS["snare"]
-            else:
-                sig = _hat(0.1, vel, rng) * _GAINS["hats"]
+            elif name in ("snare", "clap"):
+                sig = _snare(0.25, vel, rng) * _GAINS[name]
+            elif name == "perc":
+                sig = _snare(0.09, vel, rng) * _GAINS["perc"]  # rimshot-ish: short snare burst
+            else:  # hats, shaker
+                sig = _hat(0.1, vel, rng) * _GAINS[name]
         elif channel == BASS_CHANNEL:
             sig = _bass(note, dur_s, vel) * _GAINS["bass"]
         elif channel == PAD_CHANNEL:
             sig = _pad(note, dur_s, vel) * _GAINS["pad"]
+        elif channel == LEAD_CHANNEL:
+            sig = _lead(note, dur_s, vel) * _GAINS["lead"]
         else:
             continue
         end = min(start + len(sig), n_total)

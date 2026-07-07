@@ -21,6 +21,7 @@ def build_state(
     intent: str,
     recent_reasons: list[str],
     jitter_ms: float | None = None,
+    arc_state=None,
 ) -> dict:
     state = {
         "now_playing": current_spec.summary(),
@@ -30,6 +31,12 @@ def build_state(
     }
     if jitter_ms is not None:
         state["clock_p99_jitter_ms"] = jitter_ms
+    if arc_state is not None:
+        state["arc"] = arc_state.describe()  # S-4: "you are in <section>, target X"
+    lead = current_spec.roles.get("lead")
+    if lead is not None:
+        from .motif import motif_of
+        state["lead_motif"] = motif_of(lead.notes)  # S-5: vary, don't reinvent
     return state
 
 
