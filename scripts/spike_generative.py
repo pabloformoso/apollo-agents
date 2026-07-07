@@ -33,7 +33,8 @@ from dotenv import load_dotenv
 
 from agent.generative.clock import Clock
 from agent.generative.controls import LiveControls
-from agent.generative.dispatch import all_notes_off, open_output, play_events
+from agent.generative.dispatch import SplitPort, all_notes_off, open_output, play_events
+from agent.generative.patches import expected_setup
 from agent.generative.interpreter import render, total_ticks
 from agent.generative.mind import Mind, MindError
 from agent.generative.spec import PatternSpec
@@ -55,6 +56,9 @@ def _intent_reader(q: "queue.Queue[str]") -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", default="loopMIDI", help="substring of the MIDI output port name")
+    parser.add_argument("--drum-port", default=None,
+                        help="substring of a SECOND port for drums (ch 10) — see "
+                             "docs/surge-multitimbral-setup.md")
     parser.add_argument("--genre", default="deep", choices=sorted(GENRE_PACKS),
                         help="genre pack: starter spec + idiom brief for the mind")
     parser.add_argument("--bpm", type=float, default=None, help="override starter BPM")
@@ -78,7 +82,10 @@ def main() -> int:
     spec = PatternSpec.from_dict(starter)
 
     port = open_output(args.port)
+    if args.drum_port:
+        port = SplitPort(port, open_output(args.drum_port))
     print(f"[spike] MIDI out: {port.name}")
+    print(expected_setup(args.genre))
     mind = None if args.no_llm else Mind(genre=args.genre)
     intent = args.intent
     reasons: list[str] = [spec.reason]
