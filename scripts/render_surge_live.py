@@ -51,12 +51,29 @@ def cli_path() -> Path:
     return path
 
 
-def midi_index(cli: Path, port_substring: str) -> str:
+def _cli_devices(cli: Path) -> str:
     out = subprocess.run([str(cli), "-l"], capture_output=True, text=True, timeout=60)
-    for line in (out.stdout + out.stderr).splitlines():
+    return out.stdout + out.stderr
+
+
+def midi_index(devices: str, port_substring: str) -> str:
+    for line in devices.splitlines():
         if "MIDI Device" in line and port_substring.lower() in line.lower():
             return line.split("[")[1].split("]")[0]
     raise SystemExit(f"no MIDI device matching {port_substring!r} in surge-xt-cli -l")
+
+
+def audio_interface_index(devices: str, speaker_name: str) -> str | None:
+    """DirectSound index (e.g. '3.1') whose name matches the capture speaker.
+
+    The CLI and the loopback MUST point at the same endpoint — audio devices
+    come and go on this machine (monitor sleep kills the DP output), and a
+    mismatch records perfect silence.
+    """
+    for line in devices.splitlines():
+        if "Output Audio Device" in line and speaker_name.lower() in line.lower():
+            return line.split("[")[1].split("]")[0]
+    return None
 
 
 def main() -> int:
@@ -77,16 +94,17 @@ def main() -> int:
 
     cli = cli_path()
     registry = PATCH_REGISTRY[args.genre]
-    # One CLI per port: melodic roles share the main port (pad patch — the
-    # dominant voice); drums get their own instance and patch. No explicit
-    # audio interface: the system default follows whatever the user hears
-    # (audio endpoints come and go — monitors sleep, headsets switch off).
-    instances = [(midi_index(cli, args.port), registry["pad"]["patch"])]
+    devices = _cli_devices(cli)
+    instances = [(midi_index(devices, args.port), registry["pad"]["patch"])]
     if "drums" in registry:
-        instances.append((midi_index(cli, args.drum_port), registry["drums"]["patch"]))
+        instances.append((midi_index(devices, args.drum_port), registry["drums"]["patch"]))
 
     speaker = (next(s for s in sc.all_speakers() if args.speaker.lower() in s.name.lower())
                if args.speaker else sc.default_speaker())
+    # Pin the CLI to the SAME endpoint the loopback records — a mismatch
+    # captures perfect silence.
+    audio_if = audio_interface_index(devices, speaker.name)
+    print(f"[audio] capture + CLI on: {speaker.name} (interface {audio_if or 'default'})")
     loopback = sc.get_microphone(speaker.name, include_loopback=True)
     out_path = args.out or f"output/quality/surge-live-{args.genre}-{args.seed}.wav"
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -98,9 +116,14 @@ def main() -> int:
             patch = resolve_patch_path(patch_name)
             if patch is None:
                 print(f"[warn] patch {patch_name!r} not found — CLI will use its default")
-            cmd = [str(cli), "--midi-input", midi_idx, "--no-stdin"]
+            # CLI11 optional-value flags require '=' syntax — space-separated
+            # values are silently treated as unexpected positionals and the
+            # CLI exits without playing (found the hard way).
+            cmd = [str(cli), f"--midi-input={midi_idx}", "--no-stdin"]
+            if audio_if:
+                cmd.append(f"--audio-interface={audio_if}")
             if patch:
-                cmd += ["--init-patch", str(patch)]
+                cmd.append(f"--init-patch={patch}")
             procs.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
             print(f"[cli] midi[{midi_idx}] <- {patch_name}")
         time.sleep(4)  # device + patch load
