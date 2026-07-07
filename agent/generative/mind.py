@@ -68,9 +68,10 @@ Rules:
 - "feel" is optional performance imperfection: timing_slop drifts snare/hats off the grid
   (the kick never drifts), ghost_notes adds quiet extra hits. Lofi wants both high
   (0.4-0.7); precise genres (techno, deep house) want 0.
-- "controls" is optional timbral automation: CC 1 = energy/intensity, CC 74 = brightness/filter.
-  Use slow ramps (2-8 bars) for builds and breakdowns — e.g. open CC 74 from 0.3 to 0.9 over the
-  phrase into a peak. Values are normalized 0.0-1.0.
+- "controls" is optional timbral automation over Surge macros: CC 41 = energy, CC 42 = brightness,
+  CC 43 = space (reverb/send), CC 44 = motion (LFO depth). Use slow ramps (2-8 bars) for builds
+  and breakdowns — e.g. open CC 42 from 0.3 to 0.9 over the phrase into a peak, or push CC 43
+  up while thinning the drums for a washed-out breakdown. Values are normalized 0.0-1.0.
 - Keep bpm and key stable unless the intent demands a change; evolve gradually, phrase by phrase.
 - Respect the standing intent above all. "darker" -> lower velocities, sparser hats, minor colors.
   "build"/"lift" -> add density, open the hats, raise velocities toward a peak.
