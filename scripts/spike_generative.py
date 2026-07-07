@@ -53,9 +53,13 @@ STARTER_SPEC = {
 }
 
 
+_EOF = "\x00eof"  # sentinel: stdin closed (terminal gone / piped input exhausted)
+
+
 def _intent_reader(q: "queue.Queue[str]") -> None:
     for line in sys.stdin:
         q.put(line.strip())
+    q.put(_EOF)
 
 
 def main() -> int:
@@ -99,7 +103,14 @@ def main() -> int:
             # Drain any direction typed during the last phrase.
             while not intents.empty():
                 line = intents.get_nowait()
-                if line.lower() in ("quit", "q", "exit"):
+                if line == _EOF:
+                    # Unbounded runs need a live stdin — once the terminal is
+                    # gone nothing could ever say "quit", so don't orphan-loop.
+                    # Bounded runs (--phrases N) may legitimately run headless.
+                    if args.phrases == 0:
+                        print("[spike] stdin closed — stopping (no way to receive 'quit')")
+                        stop.set()
+                elif line.lower() in ("quit", "q", "exit"):
                     stop.set()
                 elif line:
                     intent = line
