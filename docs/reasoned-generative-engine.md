@@ -321,7 +321,7 @@ Step 4 onward needs the audible end set up on this Windows box:
 
 ---
 
-## 12. v0.3 — MUSICAL SENSE (ambient & lofi first)
+## 12. v3.0 — MUSICAL SENSE (ambient & lofi first)
 
 > Planned 2026-07-07 after the spike was accepted. Goal: stop sounding like a
 > validated grid and start sounding like *music from the channel's genres*.
