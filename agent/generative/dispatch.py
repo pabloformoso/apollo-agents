@@ -51,6 +51,8 @@ def event_to_message(ev: MidiEvent):
         return mido.Message("note_on", channel=ev.channel, note=ev.note, velocity=ev.velocity)
     if ev.kind == "off":
         return mido.Message("note_off", channel=ev.channel, note=ev.note, velocity=0)
+    if ev.kind == "cc":
+        return mido.Message("control_change", channel=ev.channel, control=ev.note, value=ev.velocity)
     raise ValueError(f"unknown event kind: {ev.kind!r}")
 
 
@@ -61,11 +63,15 @@ def all_notes_off(port, channels=(0, 1, 9)) -> None:
 
 
 def play_events(events: list[MidiEvent], clock: Clock, port, total_ticks: int | None = None,
-                stop_event=None) -> None:
+                stop_event=None, controller=None) -> None:
     """Run one phrase: schedule `events` on `clock`, sending to `port`.
 
     Blocks for exactly `total_ticks` ticks (pass interpreter.total_ticks(spec)
     so back-to-back phrases stay on the grid; defaults to the last event).
+
+    controller: optional callable(tick) -> list[MidiEvent], invoked every
+    tick AFTER the scheduled events — the live control plane (instant CC
+    ramps, mid-phrase intent handling) rides the same clock as the notes.
     """
     by_tick: dict[int, list[MidiEvent]] = {}
     for ev in events:
@@ -76,6 +82,9 @@ def play_events(events: list[MidiEvent], clock: Clock, port, total_ticks: int | 
     def on_tick(tick: int) -> None:
         for ev in by_tick.get(tick, ()):
             port.send(event_to_message(ev))
+        if controller is not None:
+            for ev in controller(tick):
+                port.send(event_to_message(ev))
 
     try:
         clock.run(total_ticks, on_tick, stop_event=stop_event)

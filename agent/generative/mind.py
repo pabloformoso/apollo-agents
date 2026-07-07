@@ -47,7 +47,9 @@ Output ONLY a JSON object (no prose, no markdown fences) with this exact shape:
     "snare": {{"pattern": "<steps>", "vel": <1-127>}},
     "hats":  {{"pattern": "<steps>", "vel": <1-127>, "swing": <0.0-0.5>}},
     "bass":  {{"notes": [[<step 0-15>, "<note e.g. A1>", <beats>], ...], "vel": <1-127>}},
-    "pad":   {{"chord": "<e.g. Am9>", "voicing": "close|wide", "vel": <1-127>}}
+    "pad":   {{"chord": "<e.g. Am9>", "voicing": "close|wide", "vel": <1-127>}},
+    "controls": {{"ramps": [{{"cc": <0-127>, "from": <0.0-1.0>, "to": <0.0-1.0>,
+                              "start_bar": <0-based bar>, "over_bars": <int>}}, ...]}}
   }},
   "reason": "<one sentence: the musical WHY of this phrase>",
   "rethink_in_bars": <int, usually equal to for_bars>
@@ -57,6 +59,9 @@ Rules:
 - Allowed roles: {", ".join(ALLOWED_ROLES)}. Include only the roles you want playing; omitting a role silences it.
 - Drum "pattern" is a step string over a 16th-note grid using x (hit), X (accent), . (rest);
   length 4, 8 or 16; or a named pattern: {", ".join(sorted(NAMED_PATTERNS))}.
+- "controls" is optional timbral automation: CC 1 = energy/intensity, CC 74 = brightness/filter.
+  Use slow ramps (2-8 bars) for builds and breakdowns — e.g. open CC 74 from 0.3 to 0.9 over the
+  phrase into a peak. Values are normalized 0.0-1.0.
 - Keep bpm and key stable unless the intent demands a change; evolve gradually, phrase by phrase.
 - Respect the standing intent above all. "darker" -> lower velocities, sparser hats, minor colors.
   "build"/"lift" -> add density, open the hats, raise velocities toward a peak.

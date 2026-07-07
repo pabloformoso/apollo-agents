@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from dotenv import load_dotenv
 
 from agent.generative.clock import Clock
+from agent.generative.controls import LiveControls
 from agent.generative.dispatch import all_notes_off, open_output, play_events
 from agent.generative.interpreter import render, total_ticks
 from agent.generative.mind import Mind, MindError
@@ -96,27 +97,39 @@ def main() -> int:
     print("[spike] type direction ('darker', 'build', ...) or 'quit'\n")
 
     stop = threading.Event()
+    live = LiveControls()
+    holder = {"intent": intent}
     bars_elapsed = 0
     phrase = 0
+
+    def drain_intents(now_tick: int = 0) -> None:
+        """Consume typed lines: quit stops NOW, direction ramps CCs NOW."""
+        while not intents.empty():
+            line = intents.get_nowait()
+            if line == _EOF:
+                # Unbounded runs need a live stdin — once the terminal is
+                # gone nothing could ever say "quit", so don't orphan-loop.
+                # Bounded runs (--phrases N) may legitimately run headless.
+                if args.phrases == 0:
+                    print("[spike] stdin closed — stopping (no way to receive 'quit')")
+                    stop.set()
+            elif line.lower() in ("quit", "q", "exit"):
+                stop.set()
+            elif line:
+                holder["intent"] = line
+                ramped = live.trigger(line, now_tick)
+                print(f"[intent] -> {line!r}" + (" (CC ramp started)" if ramped else ""))
+
+    def controller(tick: int):
+        drain_intents(tick)
+        return live.on_tick(tick)
+
     try:
         while not stop.is_set() and (args.phrases == 0 or phrase < args.phrases):
-            # Drain any direction typed during the last phrase.
-            while not intents.empty():
-                line = intents.get_nowait()
-                if line == _EOF:
-                    # Unbounded runs need a live stdin — once the terminal is
-                    # gone nothing could ever say "quit", so don't orphan-loop.
-                    # Bounded runs (--phrases N) may legitimately run headless.
-                    if args.phrases == 0:
-                        print("[spike] stdin closed — stopping (no way to receive 'quit')")
-                        stop.set()
-                elif line.lower() in ("quit", "q", "exit"):
-                    stop.set()
-                elif line:
-                    intent = line
-                    print(f"[intent] -> {intent!r}")
+            drain_intents()
             if stop.is_set():
                 break
+            intent = holder["intent"]
 
             clock = Clock(spec.bpm)
             events = render(spec, seed=args.seed + phrase)
@@ -137,7 +150,8 @@ def main() -> int:
 
             print(f"[phrase {phrase + 1}] {spec.summary()}")
             print(f"[reason] {spec.reason}")
-            play_events(events, clock, port, total_ticks(spec), stop_event=stop)
+            play_events(events, clock, port, total_ticks(spec), stop_event=stop,
+                        controller=controller)
             stats = clock.jitter_stats()
             print(f"[clock]  p50 {stats['p50_ms']}ms  p99 {stats['p99_ms']}ms  max {stats['max_ms']}ms")
 

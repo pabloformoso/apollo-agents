@@ -30,7 +30,7 @@ _CHORD_RE = re.compile(r"^([A-G][#b]?)(maj7|maj9|m7b5|min7|min9|min|m7|m9|m6|m|7
 
 DRUM_ROLES = ("kick", "snare", "hats")
 PITCHED_ROLES = ("bass", "pad")
-ALLOWED_ROLES = DRUM_ROLES + PITCHED_ROLES
+ALLOWED_ROLES = DRUM_ROLES + PITCHED_ROLES + ("controls",)
 
 VOICINGS = ("close", "wide")
 
@@ -185,7 +185,57 @@ class PadRole:
         return cls(chord=chord, voicing=voicing, vel=vel)
 
 
-_ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": BassRole, "pad": PadRole}
+@dataclass(frozen=True)
+class ControlRamp:
+    cc: int              # MIDI CC number (1 = mod/energy, 74 = brightness by convention)
+    from_val: float      # 0.0-1.0
+    to_val: float        # 0.0-1.0
+    start_bar: int       # bar within the phrase the ramp starts on
+    over_bars: int       # ramp length in bars (clipped to phrase end at render)
+    channel: int = 0
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ControlRamp":
+        if not isinstance(d, dict):
+            raise SpecError(f"controls: each ramp must be an object, got {d!r}")
+        cc = d.get("cc")
+        if not isinstance(cc, int) or isinstance(cc, bool) or not 0 <= cc <= 127:
+            raise SpecError(f"controls: cc must be an int in [0, 127], got {cc!r}")
+        vals = {}
+        for key in ("from", "to"):
+            v = d.get(key)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0.0 <= v <= 1.0:
+                raise SpecError(f"controls: '{key}' must be in [0.0, 1.0], got {v!r}")
+            vals[key] = float(v)
+        start_bar = d.get("start_bar", 0)
+        if not isinstance(start_bar, int) or isinstance(start_bar, bool) or not 0 <= start_bar < BARS_MAX:
+            raise SpecError(f"controls: start_bar must be an int in [0, {BARS_MAX - 1}], got {start_bar!r}")
+        over_bars = d.get("over_bars", 1)
+        if not isinstance(over_bars, int) or isinstance(over_bars, bool) or not BARS_MIN <= over_bars <= BARS_MAX:
+            raise SpecError(f"controls: over_bars must be an int in [{BARS_MIN}, {BARS_MAX}], got {over_bars!r}")
+        channel = d.get("channel", 0)
+        if not isinstance(channel, int) or isinstance(channel, bool) or not 0 <= channel <= 15:
+            raise SpecError(f"controls: channel must be an int in [0, 15], got {channel!r}")
+        return cls(cc=cc, from_val=vals["from"], to_val=vals["to"],
+                   start_bar=start_bar, over_bars=over_bars, channel=channel)
+
+
+@dataclass(frozen=True)
+class ControlsRole:
+    ramps: tuple[ControlRamp, ...]
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict) -> "ControlsRole":
+        if not isinstance(d, dict):
+            raise SpecError(f"{name}: role must be an object, got {d!r}")
+        raw = d.get("ramps")
+        if not isinstance(raw, list) or not raw:
+            raise SpecError(f"{name}: 'ramps' must be a non-empty list")
+        return cls(ramps=tuple(ControlRamp.from_dict(r) for r in raw))
+
+
+_ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": BassRole,
+                 "pad": PadRole, "controls": ControlsRole}
 
 
 @dataclass(frozen=True)
@@ -248,6 +298,9 @@ class PatternSpec:
                              + (f",sw{role.swing:.2f})" if role.swing else ")"))
             elif isinstance(role, BassRole):
                 parts.append(f"bass={len(role.notes)}notes(v{role.vel})")
-            else:
+            elif isinstance(role, PadRole):
                 parts.append(f"pad={role.chord}/{role.voicing}(v{role.vel})")
+            else:  # ControlsRole
+                ramps = ",".join(f"cc{r.cc}:{r.from_val:.2f}->{r.to_val:.2f}" for r in role.ramps)
+                parts.append(f"controls=[{ramps}]")
         return f"{self.bpm:g}bpm {self.key} {self.for_bars}bars | " + " ".join(parts)

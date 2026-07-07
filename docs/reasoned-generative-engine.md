@@ -9,6 +9,16 @@
 > mutation on the first try (A2/A4 ✅ pending ear test). Next: ear test, then
 > EPIC C polish (true reason-ahead) and EPIC D/E.
 >
+> **v0.2 (same day):** added the **CC control lane** — synth (Surge) parameter
+> control over the same MIDI transport. Two tiers: (1) `controls` role in the
+> pattern-spec (LLM-authored CC ramps, e.g. open the filter over 8 bars), and
+> (2) an **instant control layer** (`controls.py`): typed intents like "darker"
+> trigger deterministic CC ramps on the next tick — reaction drops from ~2
+> phrases (~30 s) to ~2 s, no LLM in the path. CC contract: CC 1 = energy
+> (modwheel, native in Surge), CC 74 = brightness (MIDI-learn in Surge).
+> Intents and `quit` are now handled mid-phrase. OSC control = documented
+> follow-up (Surge XT has an OSC server; float precision, named params).
+>
 > Lineage: descends from the author's *Archaeopteryx* (Ruby generative MIDI engine,
 > EuRuKo 2009) — but replaces **probabilistic matrices** with **reasoned acts**: an
 > LLM that states *why* it plays what it plays, can be critiqued, and remembers.

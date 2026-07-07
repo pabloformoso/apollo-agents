@@ -176,3 +176,43 @@ def test_chord_qualities():
 def test_chord_to_midi_rejects(bad):
     with pytest.raises(SpecError):
         chord_to_midi(bad)
+
+
+# --- controls role (v0.2: CC control lane) -----------------------------------
+
+def test_controls_role_parses():
+    d = valid_spec_dict()
+    d["roles"]["controls"] = {"ramps": [
+        {"cc": 74, "from": 0.3, "to": 0.9, "start_bar": 0, "over_bars": 8},
+        {"cc": 1, "from": 0.5, "to": 0.5, "start_bar": 4, "over_bars": 2, "channel": 1},
+    ]}
+    spec = PatternSpec.from_dict(d)
+    ramps = spec.roles["controls"].ramps
+    assert len(ramps) == 2
+    assert ramps[0].cc == 74 and ramps[0].to_val == 0.9
+    assert ramps[1].channel == 1
+    assert "controls=[cc74:0.30->0.90" in spec.summary()
+
+
+@pytest.mark.parametrize("bad_ramp", [
+    {"cc": 128, "from": 0, "to": 1},           # cc out of range
+    {"cc": -1, "from": 0, "to": 1},
+    {"cc": 1, "from": 1.5, "to": 0.5},          # from out of range
+    {"cc": 1, "from": 0.5, "to": -0.1},         # to out of range
+    {"cc": 1, "from": 0, "to": 1, "start_bar": -1},
+    {"cc": 1, "from": 0, "to": 1, "over_bars": 0},
+    {"cc": 1, "from": 0, "to": 1, "channel": 16},
+    "cc74",                                      # not an object
+])
+def test_bad_control_ramp_rejected(bad_ramp):
+    d = valid_spec_dict()
+    d["roles"]["controls"] = {"ramps": [bad_ramp]}
+    with pytest.raises(SpecError):
+        PatternSpec.from_dict(d)
+
+
+def test_controls_requires_nonempty_ramps():
+    d = valid_spec_dict()
+    d["roles"]["controls"] = {"ramps": []}
+    with pytest.raises(SpecError):
+        PatternSpec.from_dict(d)

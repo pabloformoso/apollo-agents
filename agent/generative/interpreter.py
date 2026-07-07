@@ -14,7 +14,15 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from .spec import BassRole, DrumRole, PadRole, PatternSpec, STEPS_PER_BAR, chord_to_midi
+from .spec import (
+    BassRole,
+    ControlsRole,
+    DrumRole,
+    PadRole,
+    PatternSpec,
+    STEPS_PER_BAR,
+    chord_to_midi,
+)
 
 TICKS_PER_BEAT = 24
 BEATS_PER_BAR = 4
@@ -34,7 +42,7 @@ VEL_JITTER = 5  # humanization bound: |rendered - spec vel| <= this (+accent)
 @dataclass(frozen=True, order=True)
 class MidiEvent:
     tick: int
-    kind: str  # "on" | "off"
+    kind: str  # "on" | "off" | "cc" (for cc: note = controller number, velocity = value)
     channel: int
     note: int
     velocity: int
@@ -70,6 +78,34 @@ def _bass_events(role: BassRole, bar: int, rng: random.Random) -> list[MidiEvent
     return events
 
 
+def cc_value(from_val: float, to_val: float, progress: float) -> int:
+    """Linear ramp position -> 7-bit CC value. progress in [0, 1]."""
+    return max(0, min(127, int(round(127 * (from_val + (to_val - from_val) * progress)))))
+
+
+def _control_events(role: ControlsRole, total_bars: int) -> list[MidiEvent]:
+    """Render CC ramps to one update per 16th step, deduped on value change.
+
+    Ramps are clipped to the phrase end; a ramp starting past the last bar
+    is dropped. Emitted once per phrase (not per bar — ramps span bars).
+    """
+    events = []
+    for ramp in role.ramps:
+        if ramp.start_bar >= total_bars:
+            continue
+        end_bar = min(ramp.start_bar + ramp.over_bars, total_bars)
+        start_tick = ramp.start_bar * TICKS_PER_BAR
+        span_ticks = (end_bar - ramp.start_bar) * TICKS_PER_BAR
+        last_value = None
+        for offset in range(0, span_ticks + 1, TICKS_PER_STEP):
+            progress = min(1.0, offset / span_ticks) if span_ticks else 1.0
+            value = cc_value(ramp.from_val, ramp.to_val, progress)
+            if value != last_value:
+                events.append(MidiEvent(start_tick + offset, "cc", ramp.channel, ramp.cc, value))
+                last_value = value
+    return events
+
+
 def _pad_events(role: PadRole, bar: int) -> list[MidiEvent]:
     bar_tick = bar * TICKS_PER_BAR
     events = []
@@ -96,6 +132,9 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
                 events.extend(_bass_events(role, bar, rng))
             elif isinstance(role, PadRole):
                 events.extend(_pad_events(role, bar))
+    controls = spec.roles.get("controls")
+    if isinstance(controls, ControlsRole):
+        events.extend(_control_events(controls, spec.for_bars))
     events.sort()
     return events
 

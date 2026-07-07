@@ -87,3 +87,21 @@ def test_all_notes_off_targets_channels():
     all_notes_off(port, channels=(0, 9))
     assert [m.channel for m in port.sent] == [0, 9]
     assert all(m.control == 123 for m in port.sent)
+
+
+def test_cc_conversion():
+    msg = event_to_message(MidiEvent(0, "cc", 0, 74, 100))
+    assert msg.type == "control_change" and msg.control == 74 and msg.value == 100
+
+
+def test_play_events_sends_controller_output():
+    spec = PatternSpec.from_dict(valid_spec_dict(for_bars=1))
+    port = FakePort()
+    extra = MidiEvent(0, "cc", 0, 1, 64)
+
+    def controller(tick):
+        return [extra] if tick == 5 else []
+
+    play_events(render(spec, 0), fast_clock(), port, total_ticks(spec), controller=controller)
+    ccs = [m for m in port.sent if m.type == "control_change" and m.control == 1]
+    assert len(ccs) == 1 and ccs[0].value == 64

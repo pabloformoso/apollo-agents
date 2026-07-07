@@ -142,3 +142,48 @@ def test_events_sorted_and_within_phrase():
 
 def test_total_ticks():
     assert total_ticks(make_spec(for_bars=8)) == 8 * TICKS_PER_BAR
+
+
+# --- controls (CC lane) --------------------------------------------------------
+
+def make_controls_spec(ramps, for_bars=4):
+    d = valid_spec_dict(for_bars=for_bars)
+    d["roles"] = {"kick": {"pattern": "4-on-floor", "vel": 110}, "controls": {"ramps": ramps}}
+    return PatternSpec.from_dict(d)
+
+
+def test_cc_ramp_hits_endpoints():
+    spec = make_controls_spec([{"cc": 74, "from": 0.0, "to": 1.0, "start_bar": 0, "over_bars": 4}])
+    ccs = only(render(spec, 0), kind="cc", note=74)
+    assert ccs[0].tick == 0 and ccs[0].velocity == 0
+    assert ccs[-1].tick == 4 * TICKS_PER_BAR and ccs[-1].velocity == 127
+    vels = [e.velocity for e in ccs]
+    assert vels == sorted(vels)          # monotonic rise
+    assert len(vels) == len(set(vels))   # deduped
+
+
+def test_cc_ramp_clipped_to_phrase_end():
+    spec = make_controls_spec([{"cc": 1, "from": 0.0, "to": 1.0, "start_bar": 2, "over_bars": 30}],
+                              for_bars=4)
+    ccs = only(render(spec, 0), kind="cc", note=1)
+    assert ccs[0].tick == 2 * TICKS_PER_BAR
+    assert ccs[-1].tick <= 4 * TICKS_PER_BAR
+
+
+def test_cc_ramp_past_phrase_dropped():
+    spec = make_controls_spec([{"cc": 1, "from": 0.0, "to": 1.0, "start_bar": 10, "over_bars": 2}],
+                              for_bars=4)
+    assert only(render(spec, 0), kind="cc") == []
+
+
+def test_cc_events_deterministic_and_seed_independent():
+    spec = make_controls_spec([{"cc": 74, "from": 0.2, "to": 0.8, "start_bar": 0, "over_bars": 4}])
+    ccs1 = only(render(spec, 1), kind="cc")
+    ccs2 = only(render(spec, 99), kind="cc")
+    assert ccs1 == ccs2  # control curves carry no humanization
+
+
+def test_flat_ramp_emits_single_value():
+    spec = make_controls_spec([{"cc": 1, "from": 0.5, "to": 0.5, "start_bar": 0, "over_bars": 4}])
+    ccs = only(render(spec, 0), kind="cc", note=1)
+    assert len(ccs) == 1 and ccs[0].velocity == 64
