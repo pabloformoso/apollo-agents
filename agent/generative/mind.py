@@ -47,7 +47,9 @@ Output ONLY a JSON object (no prose, no markdown fences) with this exact shape:
     "snare": {{"pattern": "<steps>", "vel": <1-127>}},
     "hats":  {{"pattern": "<steps>", "vel": <1-127>, "swing": <0.0-0.5>}},
     "bass":  {{"notes": [[<step 0-15>, "<note e.g. A1>", <beats>], ...], "vel": <1-127>}},
-    "pad":   {{"chord": "<e.g. Am9>", "voicing": "close|wide", "vel": <1-127>}},
+    "pad":   {{"progression": [[<bar, first must be 0>, "<chord e.g. Am9>"], [4, "Fmaj7"], ...],
+               "voicing": "close|wide", "hold": <true = sustain until next change, false = retrigger each bar>,
+               "vel": <1-127>}},
     "controls": {{"ramps": [{{"cc": <0-127>, "from": <0.0-1.0>, "to": <0.0-1.0>,
                               "start_bar": <0-based bar>, "over_bars": <int>}}, ...]}}
   }},
@@ -59,6 +61,9 @@ Rules:
 - Allowed roles: {", ".join(ALLOWED_ROLES)}. Include only the roles you want playing; omitting a role silences it.
 - Drum "pattern" is a step string over a 16th-note grid using x (hit), X (accent), . (rest);
   length 4, 8 or 16; or a named pattern: {", ".join(sorted(NAMED_PATTERNS))}.
+- The pad progression is voice-led automatically (minimal movement between chords) — think in
+  chord names, not voicings. Use "hold": true for sustained, breathing harmony (ambient/lofi);
+  false for stabbed/retriggered chords. Change chords every 2-4 bars for movement.
 - "controls" is optional timbral automation: CC 1 = energy/intensity, CC 74 = brightness/filter.
   Use slow ramps (2-8 bars) for builds and breakdowns — e.g. open CC 74 from 0.3 to 0.9 over the
   phrase into a peak. Values are normalized 0.0-1.0.

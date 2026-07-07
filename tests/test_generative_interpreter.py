@@ -187,3 +187,74 @@ def test_flat_ramp_emits_single_value():
     spec = make_controls_spec([{"cc": 1, "from": 0.5, "to": 0.5, "start_bar": 0, "over_bars": 4}])
     ccs = only(render(spec, 0), kind="cc", note=1)
     assert len(ccs) == 1 and ccs[0].velocity == 64
+
+
+# --- v3.0 slice 1: progressions, hold, drones (issue #62) -----------------------
+
+def pad_spec(pad_role, for_bars=8):
+    d = valid_spec_dict(for_bars=for_bars)
+    d["roles"] = {"pad": pad_role}
+    return PatternSpec.from_dict(d)
+
+
+def test_hold_sustains_until_next_change():
+    spec = pad_spec({"progression": [[0, "Am"], [4, "Fmaj7"]], "hold": True, "vel": 60})
+    events = render(spec, 0)
+    ons = only(events, kind="on", channel=PAD_CHANNEL)
+    offs = only(events, kind="off", channel=PAD_CHANNEL)
+    # exactly two attacks: bar 0 and bar 4 — no per-bar retrigger
+    assert {e.tick for e in ons} == {0, 4 * TICKS_PER_BAR}
+    assert {e.tick for e in offs} == {4 * TICKS_PER_BAR - 1, 8 * TICKS_PER_BAR - 1}
+
+
+def test_no_hold_retriggers_every_bar():
+    spec = pad_spec({"progression": [[0, "Am"], [4, "Fmaj7"]], "hold": False, "vel": 60})
+    ons = only(render(spec, 0), kind="on", channel=PAD_CHANNEL)
+    assert {e.tick for e in ons} == {b * TICKS_PER_BAR for b in range(8)}
+
+
+def test_progression_changes_chord_tones():
+    spec = pad_spec({"progression": [[0, "Am"], [4, "G"]], "hold": True, "vel": 60})
+    ons = only(render(spec, 0), kind="on", channel=PAD_CHANNEL)
+    first = sorted(e.note % 12 for e in ons if e.tick == 0)
+    second = sorted(e.note % 12 for e in ons if e.tick == 4 * TICKS_PER_BAR)
+    assert first == sorted([9, 0, 4])   # A C E
+    assert second == sorted([7, 11, 2])  # G B D
+
+
+def test_voice_leading_moves_less_than_root_position():
+    spec = pad_spec({"progression": [[0, "Am9"], [4, "Fmaj7"]], "hold": True, "vel": 60})
+    ons = only(render(spec, 0), kind="on", channel=PAD_CHANNEL)
+    prev = sorted(e.note for e in ons if e.tick == 0)
+    led = sorted(e.note for e in ons if e.tick == 4 * TICKS_PER_BAR)
+    from agent.generative.spec import chord_to_midi
+    root = chord_to_midi("Fmaj7", "close")
+    def movement(a, b):
+        return sum(min(abs(n - p) for p in a) for n in b)
+    assert movement(prev, led) <= movement(prev, root)
+
+
+def test_progression_change_past_phrase_ignored():
+    spec = pad_spec({"progression": [[0, "Am"], [12, "G"]], "hold": True, "vel": 60}, for_bars=8)
+    ons = only(render(spec, 0), kind="on", channel=PAD_CHANNEL)
+    assert {e.tick for e in ons} == {0}
+    assert all(e.note % 12 in (9, 0, 4) for e in ons)
+
+
+def test_bass_drone_clipped_to_phrase_end():
+    d = valid_spec_dict(for_bars=4)
+    d["roles"] = {"bass": {"notes": [[0, "A1", 32.0]], "vel": 60}}
+    events = render(PatternSpec.from_dict(d), 0)
+    offs = only(events, kind="off", channel=BASS_CHANNEL)
+    assert len(offs) == 1
+    assert offs[0].tick == 4 * TICKS_PER_BAR - 1
+
+
+def test_old_single_chord_render_unchanged():
+    """Back-compat: v0.x single-chord spec renders exactly as before."""
+    spec = make_spec(for_bars=2)
+    ons = only(render(spec, 0), kind="on", channel=PAD_CHANNEL)
+    offs = only(render(spec, 0), kind="off", channel=PAD_CHANNEL)
+    assert {e.tick for e in ons} == {0, TICKS_PER_BAR}
+    assert {e.tick for e in offs} == {TICKS_PER_BAR - 1, 2 * TICKS_PER_BAR - 1}
+    assert len(ons) == 10  # Am9 wide, 5 notes x 2 bars

@@ -363,6 +363,10 @@ Step 4 onward needs the audible end set up on this Windows box:
 1. **M-1 + M-2** — progressions, voice leading, cross-bar sustain. Ambient
    becomes *possible*: `--no-llm --genre ambient` seed spec sounds like a
    patient chord meditation, not a bar-stamped loop.
+   **✅ shipped 2026-07-07** (issue #62): `pad.progression`+`hold`,
+   `harmony.voice_lead` (movement-minimal, deterministic), bass drones loop
+   with a period of `ceil(beats/4)` bars and clip at phrase end;
+   `--genre deep|ambient|lofi` starter specs. Ear test pending.
 2. **M-3 + M-6** — scale guardrails + genre profiles w/ few-shot specs.
    The mind stops producing accidental dissonance and starts producing
    idiomatic material. (Prompt work + pure validation — cheap, high yield.)

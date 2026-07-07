@@ -109,7 +109,6 @@ def test_bad_drum_role_rejected(bad_role):
     [[-1, "A1", 1.0]],
     [[0, "H1", 1.0]],                  # bad note name
     [[0, "A1", 0]],                    # zero duration
-    [[0, "A1", 5.0]],                  # > 4 beats
     "A1",                              # not a list
 ])
 def test_bad_bass_notes_rejected(bad_notes):
@@ -214,5 +213,63 @@ def test_bad_control_ramp_rejected(bad_ramp):
 def test_controls_requires_nonempty_ramps():
     d = valid_spec_dict()
     d["roles"]["controls"] = {"ramps": []}
+    with pytest.raises(SpecError):
+        PatternSpec.from_dict(d)
+
+
+# --- v3.0 slice 1: progressions, hold, drones (issue #62) ----------------------
+
+def test_single_chord_is_one_entry_progression():
+    spec = PatternSpec.from_dict(valid_spec_dict())
+    pad = spec.roles["pad"]
+    assert pad.progression == ((0, "Am9"),)
+    assert pad.chord == "Am9"          # back-compat property
+    assert pad.hold is False
+
+
+def test_progression_parses():
+    d = valid_spec_dict()
+    d["roles"]["pad"] = {"progression": [[0, "Am9"], [2, "Fmaj7"], [4, "Cmaj7"]],
+                         "voicing": "wide", "hold": True, "vel": 60}
+    pad = PatternSpec.from_dict(d).roles["pad"]
+    assert pad.progression == ((0, "Am9"), (2, "Fmaj7"), (4, "Cmaj7"))
+    assert pad.hold is True
+    assert "pad=Am9-Fmaj7-Cmaj7/wide[hold]" in PatternSpec.from_dict(d).summary()
+
+
+@pytest.mark.parametrize("bad_prog", [
+    [],                                  # empty
+    [[2, "Am"]],                         # doesn't start at bar 0
+    [[0, "Am"], [0, "F"]],               # not strictly increasing
+    [[0, "Am"], [4, "F"], [2, "C"]],     # decreasing
+    [[0, "Hm"]],                         # invalid chord
+    [[0.5, "Am"]],                       # non-int bar
+    [[-1, "Am"]],
+    [[0, "Am", "extra"]],                # wrong arity
+    "Am-F",                              # not a list
+])
+def test_bad_progression_rejected(bad_prog):
+    d = valid_spec_dict()
+    d["roles"]["pad"] = {"progression": bad_prog}
+    with pytest.raises(SpecError):
+        PatternSpec.from_dict(d)
+
+
+def test_hold_must_be_boolean():
+    d = valid_spec_dict()
+    d["roles"]["pad"] = {"chord": "Am9", "hold": "yes"}
+    with pytest.raises(SpecError):
+        PatternSpec.from_dict(d)
+
+
+def test_bass_drone_duration_allowed():
+    d = valid_spec_dict()
+    d["roles"]["bass"] = {"notes": [[0, "A1", 32.0]], "vel": 60}
+    assert PatternSpec.from_dict(d).roles["bass"].notes[0][2] == 32.0
+
+
+def test_bass_duration_over_cap_rejected():
+    d = valid_spec_dict()
+    d["roles"]["bass"] = {"notes": [[0, "A1", 129.0]]}
     with pytest.raises(SpecError):
         PatternSpec.from_dict(d)

@@ -159,8 +159,10 @@ class BassRole:
             step, note_name, beats = item
             if not isinstance(step, int) or isinstance(step, bool) or not 0 <= step < STEPS_PER_BAR:
                 raise SpecError(f"{name}: step must be an int in [0, {STEPS_PER_BAR - 1}], got {step!r}")
-            if not isinstance(beats, (int, float)) or not 0 < beats <= 4.0:
-                raise SpecError(f"{name}: duration must be in (0, 4] beats, got {beats!r}")
+            # v3.0 (M-2): durations may span the whole phrase (drones). The
+            # interpreter clips the note-off at the phrase end.
+            if not isinstance(beats, (int, float)) or not 0 < beats <= BARS_MAX * 4:
+                raise SpecError(f"{name}: duration must be in (0, {BARS_MAX * 4}] beats, got {beats!r}")
             notes.append((step, note_to_midi(note_name), float(beats)))
         vel = _check_vel(d.get("vel", 90), name)
         return cls(notes=tuple(notes), vel=vel)
@@ -168,9 +170,15 @@ class BassRole:
 
 @dataclass(frozen=True)
 class PadRole:
-    chord: str
+    progression: tuple[tuple[int, str], ...]  # (bar, chord) — first entry at bar 0
     voicing: str = "close"
     vel: int = 60
+    hold: bool = False  # True: sustain each chord until the next change; False: retrigger per bar
+
+    @property
+    def chord(self) -> str:
+        """First chord — back-compat convenience for single-chord specs."""
+        return self.progression[0][1]
 
     @classmethod
     def from_dict(cls, name: str, d: dict) -> "PadRole":
@@ -179,10 +187,34 @@ class PadRole:
         voicing = d.get("voicing", "close")
         if voicing not in VOICINGS:
             raise SpecError(f"{name}: voicing must be one of {VOICINGS}, got {voicing!r}")
-        chord = d.get("chord", "")
-        chord_to_midi(chord, voicing)  # validate now, render later
+
+        raw_prog = d.get("progression")
+        if raw_prog is None:
+            # v0.x single-chord form stays valid: a 1-entry progression.
+            raw_prog = [[0, d.get("chord", "")]]
+        if not isinstance(raw_prog, list) or not raw_prog:
+            raise SpecError(f"{name}: 'progression' must be a non-empty list of [bar, chord]")
+        progression = []
+        prev_bar = None
+        for item in raw_prog:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                raise SpecError(f"{name}: each progression entry must be [bar, chord], got {item!r}")
+            bar, chord = item
+            if not isinstance(bar, int) or isinstance(bar, bool) or not 0 <= bar < BARS_MAX:
+                raise SpecError(f"{name}: progression bar must be an int in [0, {BARS_MAX - 1}], got {bar!r}")
+            if prev_bar is None and bar != 0:
+                raise SpecError(f"{name}: progression must start at bar 0, got bar {bar}")
+            if prev_bar is not None and bar <= prev_bar:
+                raise SpecError(f"{name}: progression bars must be strictly increasing, got {bar} after {prev_bar}")
+            chord_to_midi(chord, voicing)  # validate now, render later
+            progression.append((bar, chord))
+            prev_bar = bar
+
+        hold = d.get("hold", False)
+        if not isinstance(hold, bool):
+            raise SpecError(f"{name}: hold must be a boolean, got {hold!r}")
         vel = _check_vel(d.get("vel", 60), name)
-        return cls(chord=chord, voicing=voicing, vel=vel)
+        return cls(progression=tuple(progression), voicing=voicing, vel=vel, hold=hold)
 
 
 @dataclass(frozen=True)
@@ -299,7 +331,9 @@ class PatternSpec:
             elif isinstance(role, BassRole):
                 parts.append(f"bass={len(role.notes)}notes(v{role.vel})")
             elif isinstance(role, PadRole):
-                parts.append(f"pad={role.chord}/{role.voicing}(v{role.vel})")
+                chords = "-".join(c for _, c in role.progression)
+                parts.append(f"pad={chords}/{role.voicing}"
+                             + ("[hold]" if role.hold else "") + f"(v{role.vel})")
             else:  # ControlsRole
                 ramps = ",".join(f"cc{r.cc}:{r.from_val:.2f}->{r.to_val:.2f}" for r in role.ramps)
                 parts.append(f"controls=[{ramps}]")

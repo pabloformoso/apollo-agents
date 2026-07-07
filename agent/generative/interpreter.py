@@ -11,6 +11,7 @@ steps (TICKS_PER_STEP ticks each). Swing delays every odd 16th step by
 
 from __future__ import annotations
 
+import math
 import random
 from dataclasses import dataclass
 
@@ -67,14 +68,24 @@ def _drum_events(name: str, role: DrumRole, bar: int, rng: random.Random) -> lis
     return events
 
 
-def _bass_events(role: BassRole, bar: int, rng: random.Random) -> list[MidiEvent]:
+def _bass_events(role: BassRole, bar: int, rng: random.Random, phrase_ticks: int) -> list[MidiEvent]:
     events = []
     bar_tick = bar * TICKS_PER_BAR
     for step, note, beats in role.notes:
+        # M-2: a note loops with a period of however many bars it spans —
+        # short notes repeat every bar (v0.x behavior), a 32-beat drone
+        # attacks once and just sounds.
+        period_bars = max(1, math.ceil(beats / BEATS_PER_BAR))
+        if bar % period_bars != 0:
+            continue
         tick = bar_tick + step * TICKS_PER_STEP
         vel = _clamp_vel(role.vel + rng.randint(-VEL_JITTER, VEL_JITTER))
+        # Clip at phrase end so the next phrase's attack lands on a clean grid.
+        off = min(tick + max(1, int(round(beats * TICKS_PER_BEAT))), phrase_ticks - 1)
+        if off <= tick:
+            continue
         events.append(MidiEvent(tick, "on", BASS_CHANNEL, note, vel))
-        events.append(MidiEvent(tick + max(1, int(round(beats * TICKS_PER_BEAT))), "off", BASS_CHANNEL, note, 0))
+        events.append(MidiEvent(off, "off", BASS_CHANNEL, note, 0))
     return events
 
 
@@ -106,12 +117,33 @@ def _control_events(role: ControlsRole, total_bars: int) -> list[MidiEvent]:
     return events
 
 
-def _pad_events(role: PadRole, bar: int) -> list[MidiEvent]:
-    bar_tick = bar * TICKS_PER_BAR
+def _pad_phrase_events(role: PadRole, total_bars: int) -> list[MidiEvent]:
+    """Render the whole progression: voice-led changes, optional sustain.
+
+    First chord uses the spec's voicing; every later chord is voice-led
+    from the previous one (harmony.voice_lead — minimal movement, M-1).
+    hold=True sustains each chord until its next change; hold=False keeps
+    the v0.x behavior of retriggering on every bar.
+    """
+    from .harmony import voice_lead  # local import: keeps spec/harmony import order acyclic
+
+    changes = [(bar, chord) for bar, chord in role.progression if bar < total_bars]
+    if not changes:
+        return []
     events = []
-    for note in chord_to_midi(role.chord, role.voicing):
-        events.append(MidiEvent(bar_tick, "on", PAD_CHANNEL, note, role.vel))
-        events.append(MidiEvent(bar_tick + TICKS_PER_BAR - 1, "off", PAD_CHANNEL, note, 0))
+    notes: list[int] = []
+    for i, (start_bar, chord) in enumerate(changes):
+        end_bar = changes[i + 1][0] if i + 1 < len(changes) else total_bars
+        notes = chord_to_midi(chord, role.voicing) if i == 0 else voice_lead(notes, chord)
+        if role.hold:
+            spans = [(start_bar * TICKS_PER_BAR, end_bar * TICKS_PER_BAR - 1)]
+        else:
+            spans = [(bar * TICKS_PER_BAR, (bar + 1) * TICKS_PER_BAR - 1)
+                     for bar in range(start_bar, end_bar)]
+        for on_tick, off_tick in spans:
+            for note in notes:
+                events.append(MidiEvent(on_tick, "on", PAD_CHANNEL, note, role.vel))
+                events.append(MidiEvent(off_tick, "off", PAD_CHANNEL, note, 0))
     return events
 
 
@@ -119,9 +151,10 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
     """Render a full phrase (spec.for_bars bars) to a sorted event list."""
     rng = random.Random(seed)
     events: list[MidiEvent] = []
+    phrase_ticks = spec.for_bars * TICKS_PER_BAR
     # Iterate role-major in a fixed order so the RNG draw sequence is
     # independent of dict insertion order (determinism, FS1).
-    for name in ("kick", "snare", "hats", "bass", "pad"):
+    for name in ("kick", "snare", "hats", "bass"):
         role = spec.roles.get(name)
         if role is None:
             continue
@@ -129,9 +162,10 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
             if isinstance(role, DrumRole):
                 events.extend(_drum_events(name, role, bar, rng))
             elif isinstance(role, BassRole):
-                events.extend(_bass_events(role, bar, rng))
-            elif isinstance(role, PadRole):
-                events.extend(_pad_events(role, bar))
+                events.extend(_bass_events(role, bar, rng, phrase_ticks))
+    pad = spec.roles.get("pad")
+    if isinstance(pad, PadRole):
+        events.extend(_pad_phrase_events(pad, spec.for_bars))
     controls = spec.roles.get("controls")
     if isinstance(controls, ControlsRole):
         events.extend(_control_events(controls, spec.for_bars))
