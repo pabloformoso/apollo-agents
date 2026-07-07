@@ -1,0 +1,133 @@
+"""Real-Surge capture render (#68 plan B): surge-xt-cli + WASAPI loopback.
+
+Launches headless Surge CLI instances — one per MIDI port, each with its
+own patch from the registry (melodic roles on the main port, drums on the
+drum port) — plays a generative session into them, and records the sound
+card's loopback. Real Surge timbre, zero GUI, zero manual setup.
+
+    uv run python scripts/render_surge_live.py --genre lofi --phrases 2
+
+Requirements (machine-local, not CI): surge-xt-cli.exe (portable zip ships
+it; default path below or SURGE_XT_CLI env var), loopMIDI ports, the
+`soundcard` package (synth group), and an audible output device — the
+session PLAYS OUT LOUD while it records. Not deterministic (real-time):
+this is the ear/live path; the numpy renderer remains the CI path and
+surgepy (when built) the offline-deterministic one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from agent.generative.genres import GENRE_PACKS
+from agent.generative.patches import PATCH_REGISTRY
+
+DEFAULT_CLI = Path.home() / "AppData/Local/SurgeCLI/surge-xt-cli.exe"
+PATCH_DIRS = [Path(r"C:\ProgramData\Surge XT\patches_factory"),
+              Path(r"C:\ProgramData\Surge XT\patches_3rdparty")]
+
+
+def resolve_patch_path(name: str) -> Path | None:
+    for root in PATCH_DIRS:
+        if root.exists():
+            hits = sorted(root.rglob(f"{name}.fxp"))
+            if hits:
+                return hits[0]
+    return None
+
+
+def cli_path() -> Path:
+    path = Path(os.environ.get("SURGE_XT_CLI", DEFAULT_CLI))
+    if not path.exists():
+        raise SystemExit(f"surge-xt-cli not found at {path} — set SURGE_XT_CLI "
+                         "(the portable Surge zip ships it)")
+    return path
+
+
+def midi_index(cli: Path, port_substring: str) -> str:
+    out = subprocess.run([str(cli), "-l"], capture_output=True, text=True, timeout=60)
+    for line in (out.stdout + out.stderr).splitlines():
+        if "MIDI Device" in line and port_substring.lower() in line.lower():
+            return line.split("[")[1].split("]")[0]
+    raise SystemExit(f"no MIDI device matching {port_substring!r} in surge-xt-cli -l")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--genre", default="lofi", choices=sorted(GENRE_PACKS))
+    parser.add_argument("--phrases", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--port", default="loopMIDI Port")
+    parser.add_argument("--drum-port", default="loopMIDI Drums")
+    parser.add_argument("--speaker", default=None, help="substring of the output device to capture")
+    parser.add_argument("--llm", action="store_true")
+    parser.add_argument("-o", "--out", default=None)
+    args = parser.parse_args()
+
+    import numpy as np
+    import soundcard as sc
+    import soundfile as sf
+
+    cli = cli_path()
+    registry = PATCH_REGISTRY[args.genre]
+    # One CLI per port: melodic roles share the main port (pad patch — the
+    # dominant voice); drums get their own instance and patch. No explicit
+    # audio interface: the system default follows whatever the user hears
+    # (audio endpoints come and go — monitors sleep, headsets switch off).
+    instances = [(midi_index(cli, args.port), registry["pad"]["patch"])]
+    if "drums" in registry:
+        instances.append((midi_index(cli, args.drum_port), registry["drums"]["patch"]))
+
+    speaker = (next(s for s in sc.all_speakers() if args.speaker.lower() in s.name.lower())
+               if args.speaker else sc.default_speaker())
+    loopback = sc.get_microphone(speaker.name, include_loopback=True)
+    out_path = args.out or f"output/quality/surge-live-{args.genre}-{args.seed}.wav"
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    sr = 48000
+
+    procs = []
+    try:
+        for midi_idx, patch_name in instances:
+            patch = resolve_patch_path(patch_name)
+            if patch is None:
+                print(f"[warn] patch {patch_name!r} not found — CLI will use its default")
+            cmd = [str(cli), "--midi-input", midi_idx, "--no-stdin"]
+            if patch:
+                cmd += ["--init-patch", str(patch)]
+            procs.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+            print(f"[cli] midi[{midi_idx}] <- {patch_name}")
+        time.sleep(4)  # device + patch load
+
+        spike_cmd = [sys.executable, "scripts/spike_generative.py",
+                     "--genre", args.genre, "--phrases", str(args.phrases),
+                     "--seed", str(args.seed), "--drum-port", args.drum_port.split()[-1]]
+        if not args.llm:
+            spike_cmd.append("--no-llm")
+        chunks = []
+        with loopback.recorder(samplerate=sr) as rec:
+            spike = subprocess.Popen(spike_cmd, stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            while spike.poll() is None:
+                chunks.append(rec.record(numframes=sr // 4))
+            chunks.append(rec.record(numframes=sr))
+        audio = np.concatenate(chunks)
+        sf.write(out_path, audio, sr)
+        print(f"[capture] {len(audio) / sr:.1f}s peak {float(np.abs(audio).max()):.3f} -> {out_path}")
+        for line in (spike.stdout.read() or "").splitlines():
+            if "[reason]" in line or "[phrase" in line:
+                print(line)
+        return 0
+    finally:
+        for p in procs:
+            p.terminate()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
