@@ -1,0 +1,68 @@
+{
+  "ambient": {
+    "files": [
+      "LoFi-Slow_Oxide-b6be7470-9ba8-433b-95c6-935d782d6f8a.wav",
+      "LoFI_2-Ambient_Margin-5ef58920-f8a3-4d61-9176-dd9110aca3a5.wav",
+      "LoFI_2-Ambient_Margin_bis-caa7c8b3-9dbf-49f8-99d5-5e7e96cd74e3.wav",
+      "LoFI_2-Cloud_Pages_Turning-d91ccfc9-94a1-4b54-b0d9-b84a92a54864.wav",
+      "LoFI_2-Cloud_Pages_Turning-e0e77ac4-a4fc-408d-8b31-700f03008279.wav"
+    ],
+    "norm_target_lufs": -20.0,
+    "centroid_hz": {
+      "min": 797.9,
+      "max": 2123.1
+    },
+    "tilt_db_per_oct": {
+      "min": -12.57,
+      "max": -8.67
+    },
+    "advisory_lufs": {
+      "min": -19.8,
+      "max": -17.9
+    }
+  },
+  "deep": {
+    "files": [
+      "Deep_House_CC-Amber_Field-00d9a8d0-db72-4b62-8b18-081aec2e67d4.wav",
+      "Deep_House_CC-Amber_Field-e9644e3f-04af-4354-afb9-569475b9b14c.wav",
+      "Deep_House_CC-Brass_&_Dusk-3cc393e4-2de7-42f8-ba37-173cb31a3628.wav",
+      "Deep_House_CC-Brass_&_Dusk-f5da2289-f62b-4e7f-b349-437620a25506.wav",
+      "Deep_House_CC-Cedar_&_Rain-0803ea45-15ff-4253-8e8d-ff7ab8576784.wav"
+    ],
+    "norm_target_lufs": -20.0,
+    "centroid_hz": {
+      "min": 4336.9,
+      "max": 4773.8
+    },
+    "tilt_db_per_oct": {
+      "min": -3.89,
+      "max": -3.03
+    },
+    "advisory_lufs": {
+      "min": -18.0,
+      "max": -16.9
+    }
+  },
+  "lofi": {
+    "files": [
+      "LoFi-Slow_Oxide-b6be7470-9ba8-433b-95c6-935d782d6f8a.wav",
+      "LoFI_2-Ambient_Margin-5ef58920-f8a3-4d61-9176-dd9110aca3a5.wav",
+      "LoFI_2-Ambient_Margin_bis-caa7c8b3-9dbf-49f8-99d5-5e7e96cd74e3.wav",
+      "LoFI_2-Cloud_Pages_Turning-d91ccfc9-94a1-4b54-b0d9-b84a92a54864.wav",
+      "LoFI_2-Cloud_Pages_Turning-e0e77ac4-a4fc-408d-8b31-700f03008279.wav"
+    ],
+    "norm_target_lufs": -20.0,
+    "centroid_hz": {
+      "min": 797.9,
+      "max": 2123.1
+    },
+    "tilt_db_per_oct": {
+      "min": -12.57,
+      "max": -8.67
+    },
+    "advisory_lufs": {
+      "min": -19.8,
+      "max": -17.9
+    }
+  }
+}

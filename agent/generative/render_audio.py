@@ -46,19 +46,32 @@ def _kick(dur_s: float, vel: float) -> np.ndarray:
     return np.sin(phase) * np.exp(-t * 14.0) * vel
 
 
+def _lowpass(sig: np.ndarray, cutoff_hz: float) -> np.ndarray:
+    """Cheap deterministic FFT-domain 2nd-order-ish lowpass for short voices.
+
+    Unfiltered differentiated noise put the render's centroid near 10 kHz —
+    the quality bench (#71) flagged it against the catalog references; real
+    lofi/ambient sits dark. This keeps the noise voices genre-plausible.
+    """
+    spectrum = np.fft.rfft(sig)
+    freqs = np.fft.rfftfreq(len(sig), 1.0 / SR)
+    spectrum *= 1.0 / (1.0 + (freqs / cutoff_hz) ** 2)
+    return np.fft.irfft(spectrum, n=len(sig))
+
+
 def _snare(dur_s: float, vel: float, rng: np.random.Generator) -> np.ndarray:
     n = int(dur_s * SR)
     t = np.arange(n) / SR
-    noise = np.diff(rng.uniform(-1, 1, n + 1))  # differentiate -> brighter
+    noise = _lowpass(np.diff(rng.uniform(-1, 1, n + 1)), 3500.0)
     tone = np.sin(2 * np.pi * 185.0 * t) * np.exp(-t * 30.0)
-    return (noise * np.exp(-t * 25.0) * 0.8 + tone * 0.5) * vel
+    return (noise * np.exp(-t * 25.0) * 1.6 + tone * 0.5) * vel
 
 
 def _hat(dur_s: float, vel: float, rng: np.random.Generator) -> np.ndarray:
     n = int(dur_s * SR)
     t = np.arange(n) / SR
-    noise = np.diff(rng.uniform(-1, 1, n + 1))
-    return noise * np.exp(-t * 60.0) * vel
+    noise = _lowpass(np.diff(rng.uniform(-1, 1, n + 1)), 6500.0)
+    return noise * np.exp(-t * 60.0) * vel * 1.8
 
 
 def _tonal(note: int, dur_s: float, vel: float, *, partials, attack_s: float,
