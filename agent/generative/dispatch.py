@@ -44,6 +44,39 @@ def open_output(substring: str = "loopMIDI"):
     raise RuntimeError(f"no MIDI port matching {substring!r}; available: {names}")
 
 
+class SplitPort:
+    """Port-like router: drum-channel messages go to a second port (E-2).
+
+    Channel-split in one Surge instance covers bass (ch 1 -> Scene A) and
+    pad (ch 2 -> Scene B), but anything above the split channel also lands
+    in Scene B — so drums (ch 10) must leave the instance entirely. Wrap
+    the two real ports in a SplitPort and hand it anywhere a port goes;
+    with drum_port=None everything passes through to main (v0 behavior).
+    """
+
+    def __init__(self, main, drum_port=None, drum_channel: int = 9):
+        self._main = main
+        self._drums = drum_port
+        self._drum_channel = drum_channel
+
+    @property
+    def name(self) -> str:
+        if self._drums is None:
+            return self._main.name
+        return f"{self._main.name} + drums:{self._drums.name}"
+
+    def send(self, msg) -> None:
+        if self._drums is not None and getattr(msg, "channel", None) == self._drum_channel:
+            self._drums.send(msg)
+        else:
+            self._main.send(msg)
+
+    def close(self) -> None:
+        self._main.close()
+        if self._drums is not None:
+            self._drums.close()
+
+
 def event_to_message(ev: MidiEvent):
     """MidiEvent -> mido.Message. Pure conversion, unit-testable."""
     mido = _mido()

@@ -103,3 +103,38 @@ def test_values_always_7bit():
     live.trigger("peak", 0)
     for e in collect(live, 0, 2 * TICKS_PER_BAR):
         assert 0 <= e.velocity <= 127
+
+
+# --- v3.1 E-1: Surge macro contract (CC 41-48) + legacy mirror ------------------
+
+def test_macro_contract_cc_numbers():
+    from agent.generative.controls import CC_MOTION, CC_SPACE
+    assert (CC_ENERGY, CC_BRIGHTNESS, CC_SPACE, CC_MOTION) == (41, 42, 43, 44)
+    assert set(DEFAULT_LEVELS) == {41, 42, 43, 44}
+
+
+def test_energy_and_brightness_mirror_to_legacy_ccs():
+    live = LiveControls(ramp_bars=0.5)
+    live.trigger("darker", 0)
+    events = collect(live, 0, TICKS_PER_BAR)
+    by_note = {}
+    for e in events:
+        by_note.setdefault(e.note, []).append(e.velocity)
+    assert by_note[41] == by_note[1]    # energy mirrored to modwheel
+    assert by_note[42] == by_note[74]   # brightness mirrored to CC 74
+    assert 43 in by_note                # space has no legacy mirror
+    assert 74 not in DEFAULT_LEVELS
+
+
+def test_space_and_motion_intents():
+    from agent.generative.controls import CC_MOTION, CC_SPACE
+    assert match_intent("more space please")[CC_SPACE] == 0.9
+    assert match_intent("dry")[CC_SPACE] == 0.1
+    assert match_intent("add some motion")[CC_MOTION] == 0.8
+    assert match_intent("keep it still")[CC_MOTION] == 0.1
+
+
+def test_strip_closes_space_and_motion():
+    from agent.generative.controls import CC_MOTION, CC_SPACE
+    targets = match_intent("strip it back")
+    assert targets[CC_ENERGY] < 0.3 and targets[CC_SPACE] < 0.3 and targets[CC_MOTION] < 0.3

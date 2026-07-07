@@ -21,7 +21,8 @@ GENRE_PACKS: dict[str, dict] = {
 - Palette: kick + offbeat hats always; bass syncopated, rides the root and fifth;
   pad = lush minor 7th/9th chords, retriggered (hold=false) for pump, held for breakdowns.
 - Density: groove is king — change ONE element per phrase, keep the rest locked.
-- Builds via hats density and CC 74 opening; breakdowns drop the kick, hold the pad.""",
+- Builds via hats density and brightness (CC 42) opening; breakdowns drop the kick,
+  hold the pad, push space (CC 43).""",
         "starter": {
             "for_bars": 8,
             "bpm": 122,
@@ -43,7 +44,8 @@ GENRE_PACKS: dict[str, dict] = {
 - Palette: held pad progressions (hold=true, ALWAYS), chord changes every 2-4 bars,
   wide voicings; bass = long drones (16-32 beats) on the tonic or fifth.
 - Harmony is the melody: minor 9ths, maj7ths, sus chords. Movement comes from
-  voice-led changes and slow CC 74 swells (4-8 bars), never from rhythm.
+  voice-led changes and slow brightness (CC 42) / space (CC 43) swells over
+  4-8 bars, never from rhythm. Motion (CC 44) low and slow.
 - Density: LESS. If in doubt, remove a role. Silence is material.""",
         "starter": {
             "for_bars": 8,
@@ -53,7 +55,7 @@ GENRE_PACKS: dict[str, dict] = {
                 "pad": {"progression": [[0, "Am9"], [2, "Fmaj7"], [4, "Cmaj7"], [6, "Em7"]],
                         "voicing": "wide", "hold": True, "vel": 60},
                 "bass": {"notes": [[0, "A1", 32.0]], "vel": 58},
-                "controls": {"ramps": [{"cc": 74, "from": 0.25, "to": 0.55, "start_bar": 0, "over_bars": 8}]},
+                "controls": {"ramps": [{"cc": 42, "from": 0.25, "to": 0.55, "start_bar": 0, "over_bars": 8}]},
             },
             "reason": "seed meditation — Am9 to Em7 voice-led drift over a low A drone, filter breathing open",
             "rethink_in_bars": 8,
