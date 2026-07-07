@@ -376,6 +376,10 @@ Step 4 onward needs the audible end set up on this Windows box:
    doubling as few-shot) injected via `Mind(genre=...)`. Ear test pending.
 3. **M-5** — lofi feel (timing slop, ghost hats, swing depth). The drum grid
    stops sounding quantized. A/B by ear against a reference lofi loop.
+   **✅ shipped 2026-07-07** (issue #64): top-level `feel` (`timing_slop`,
+   `ghost_notes`), rendered from the seeded RNG — feel 0/0 is byte-identical
+   to pre-M-5 output; kick never drifts and never ghosts. Lofi pack ships
+   `{slop 0.5, ghosts 0.4}`. Ear test (A/B vs a reference loop) pending.
 4. **M-4 + M-7** — lead motifs + section arc. This is where "directed music"
    becomes "a piece with a shape".
 5. **M-8** — multi-timbral setup guide (Surge channel-split scenes A/B, or

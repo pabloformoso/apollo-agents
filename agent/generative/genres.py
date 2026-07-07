@@ -79,6 +79,7 @@ GENRE_PACKS: dict[str, dict] = {
                 "bass": {"notes": [[0, "A1", 3.0], [12, "E2", 2.0]], "vel": 76},
                 "pad": {"progression": [[0, "Am9"], [4, "Fmaj7"]], "voicing": "close", "hold": True, "vel": 58},
             },
+            "feel": {"timing_slop": 0.5, "ghost_notes": 0.4},
             "reason": "seed head-nod — dusty 78bpm two-chord loop, swung hats, lazy bass",
             "rethink_in_bars": 8,
         },

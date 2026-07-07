@@ -53,6 +53,7 @@ Output ONLY a JSON object (no prose, no markdown fences) with this exact shape:
     "controls": {{"ramps": [{{"cc": <0-127>, "from": <0.0-1.0>, "to": <0.0-1.0>,
                               "start_bar": <0-based bar>, "over_bars": <int>}}, ...]}}
   }},
+  "feel": {{"timing_slop": <0.0-1.0>, "ghost_notes": <0.0-1.0>}},
   "reason": "<one sentence: the musical WHY of this phrase>",
   "rethink_in_bars": <int, usually equal to for_bars>
 }}
@@ -64,6 +65,9 @@ Rules:
 - The pad progression is voice-led automatically (minimal movement between chords) — think in
   chord names, not voicings. Use "hold": true for sustained, breathing harmony (ambient/lofi);
   false for stabbed/retriggered chords. Change chords every 2-4 bars for movement.
+- "feel" is optional performance imperfection: timing_slop drifts snare/hats off the grid
+  (the kick never drifts), ghost_notes adds quiet extra hits. Lofi wants both high
+  (0.4-0.7); precise genres (techno, deep house) want 0.
 - "controls" is optional timbral automation: CC 1 = energy/intensity, CC 74 = brightness/filter.
   Use slow ramps (2-8 bars) for builds and breakdowns — e.g. open CC 74 from 0.3 to 0.9 over the
   phrase into a peak. Values are normalized 0.0-1.0.

@@ -270,6 +270,33 @@ _ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": 
                  "pad": PadRole, "controls": ControlsRole}
 
 
+@dataclass(frozen=True)
+class FeelSpec:
+    """M-5: performance imperfection, rendered deterministically from the seed.
+
+    timing_slop: probability a snare/hat hit drifts +-1 tick off the grid
+    (the kick never drifts — it anchors). ghost_notes: density of extra
+    low-velocity hats/snare hits on empty 16th steps. Both 0.0-1.0;
+    0/0 renders byte-identical to a spec with no feel at all.
+    """
+    timing_slop: float = 0.0
+    ghost_notes: float = 0.0
+
+    @classmethod
+    def from_dict(cls, d) -> "FeelSpec":
+        if d is None:
+            return cls()
+        if not isinstance(d, dict):
+            raise SpecError(f"feel must be an object, got {d!r}")
+        vals = {}
+        for key in ("timing_slop", "ghost_notes"):
+            v = d.get(key, 0.0)
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0.0 <= v <= 1.0:
+                raise SpecError(f"feel.{key} must be in [0.0, 1.0], got {v!r}")
+            vals[key] = float(v)
+        return cls(timing_slop=vals["timing_slop"], ghost_notes=vals["ghost_notes"])
+
+
 def _check_scale(key: str, roles: dict) -> None:
     """M-3: pitched notes must belong to the Camelot key's scale.
 
@@ -307,6 +334,7 @@ class PatternSpec:
     reason: str = ""
     rethink_in_bars: int = 0  # 0 -> defaults to for_bars
     chromatic: bool = False  # True: skip scale guardrails (must be justified in reason)
+    feel: FeelSpec = FeelSpec()  # no slop, no ghosts by default
 
     @classmethod
     def from_dict(cls, d: dict) -> "PatternSpec":
@@ -350,8 +378,11 @@ class PatternSpec:
         if not chromatic:
             _check_scale(key, roles)
 
+        feel = FeelSpec.from_dict(d.get("feel"))
+
         return cls(for_bars=for_bars, bpm=float(bpm), key=key, roles=roles,
-                   reason=reason.strip(), rethink_in_bars=rethink, chromatic=chromatic)
+                   reason=reason.strip(), rethink_in_bars=rethink, chromatic=chromatic,
+                   feel=feel)
 
     def summary(self) -> str:
         """One-line human/LLM-readable summary, used by state.py."""

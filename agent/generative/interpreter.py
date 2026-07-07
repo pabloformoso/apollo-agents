@@ -39,6 +39,13 @@ DRUM_HIT_TICKS = TICKS_PER_STEP // 2  # short percussive gate
 ACCENT_BOOST = 15
 VEL_JITTER = 5  # humanization bound: |rendered - spec vel| <= this (+accent)
 
+# M-5 feel bounds. Slop shifts snare/hat hits by at most one tick either way
+# (the kick never drifts — it anchors the groove); ghosts are sparse, quiet
+# insertions on empty 16th steps.
+SLOP_MAX_TICKS = 1
+GHOST_DENSITY = 0.15   # per-empty-step probability at ghost_notes=1.0
+GHOST_VEL_RATIO = 0.35
+
 
 @dataclass(frozen=True, order=True)
 class MidiEvent:
@@ -53,15 +60,26 @@ def _clamp_vel(v: int) -> int:
     return max(1, min(127, v))
 
 
-def _drum_events(name: str, role: DrumRole, bar: int, rng: random.Random) -> list[MidiEvent]:
+def _drum_events(name: str, role: DrumRole, bar: int, rng: random.Random,
+                 feel=None) -> list[MidiEvent]:
+    # feel=0/0 (or None) draws NOTHING extra from the RNG, so a spec without
+    # feel renders byte-identical to pre-M-5 output (determinism, FS1).
+    slop = feel.timing_slop if feel is not None and name != "kick" else 0.0
+    ghosts = feel.ghost_notes if feel is not None and name != "kick" else 0.0
     events = []
     note = DRUM_NOTES[name]
     bar_tick = bar * TICKS_PER_BAR
     swing_ticks = int(round(role.swing * TICKS_PER_STEP))
     for step, ch in enumerate(role.pattern):
-        if ch == ".":
-            continue
         tick = bar_tick + step * TICKS_PER_STEP + (swing_ticks if step % 2 == 1 else 0)
+        if ch == ".":
+            if ghosts > 0 and rng.random() < ghosts * GHOST_DENSITY:
+                vel = _clamp_vel(int(role.vel * GHOST_VEL_RATIO) + rng.randint(-VEL_JITTER, VEL_JITTER))
+                events.append(MidiEvent(tick, "on", DRUM_CHANNEL, note, vel))
+                events.append(MidiEvent(tick + DRUM_HIT_TICKS, "off", DRUM_CHANNEL, note, 0))
+            continue
+        if slop > 0 and rng.random() < slop:
+            tick = max(0, tick + rng.choice((-SLOP_MAX_TICKS, SLOP_MAX_TICKS)))
         vel = role.vel + (ACCENT_BOOST if ch == "X" else 0) + rng.randint(-VEL_JITTER, VEL_JITTER)
         events.append(MidiEvent(tick, "on", DRUM_CHANNEL, note, _clamp_vel(vel)))
         events.append(MidiEvent(tick + DRUM_HIT_TICKS, "off", DRUM_CHANNEL, note, 0))
@@ -160,7 +178,7 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
             continue
         for bar in range(spec.for_bars):
             if isinstance(role, DrumRole):
-                events.extend(_drum_events(name, role, bar, rng))
+                events.extend(_drum_events(name, role, bar, rng, spec.feel))
             elif isinstance(role, BassRole):
                 events.extend(_bass_events(role, bar, rng, phrase_ticks))
     pad = spec.roles.get("pad")
