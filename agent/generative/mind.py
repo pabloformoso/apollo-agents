@@ -48,6 +48,7 @@ Output ONLY a JSON object (no prose, no markdown fences) with this exact shape:
     "hats":  {{"pattern": "<steps>", "vel": <1-127>, "swing": <0.0-0.5>, "density": ..., "fill": ...}},
     "perc":  {{"pattern": "<steps>", "vel": <1-127>}},   // rimshot; also: "shaker", "clap"
     "bass":  {{"notes": [[<step 0-15>, "<note e.g. A1>", <beats>], ...], "vel": <1-127>}},
+    "lead":  {{"notes": [[<step 0-15>, "<note C4-B6, e.g. E5>", <beats>], ...], "vel": <1-127>}},
     "pad":   {{"progression": [[<bar, first must be 0>, "<chord e.g. Am9>"], [4, "Fmaj7"], ...],
                "voicing": "close|wide", "hold": <true = sustain until next change, false = retrigger each bar>,
                "vel": <1-127>}},
@@ -81,6 +82,9 @@ Rules:
 - Keep bpm and key stable unless the intent demands a change; evolve gradually, phrase by phrase.
 - Respect the standing intent above all. "darker" -> lower velocities, sparser hats, minor colors.
   "build"/"lift" -> add density, open the hats, raise velocities toward a peak.
+- If the state carries a "lead_motif", VARY it (transpose, invert, augment, or answer it) and
+  name the variation in "reason" — do not reinvent the melody every phrase. Lead lives in
+  C4-B6 and obeys the scale like bass.
 - If the state carries an "arc", you are inside that section: steer energy and density
   toward its targets (density dials and velocities before pattern rewrites), and prepare
   the transition when section_phrase approaches its end (a fill, a CC swell).

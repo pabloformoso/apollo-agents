@@ -22,6 +22,7 @@ from .interpreter import (
     BASS_CHANNEL,
     DRUM_CHANNEL,
     DRUM_NOTES,
+    LEAD_CHANNEL,
     PAD_CHANNEL,
     TICKS_PER_BEAT,
     MidiEvent,
@@ -33,7 +34,7 @@ from .spec import PatternSpec
 SR = 44100
 
 _GAINS = {"kick": 0.9, "snare": 0.55, "hats": 0.3, "perc": 0.4, "shaker": 0.22,
-          "clap": 0.5, "bass": 0.55, "pad": 0.4}
+          "clap": 0.5, "bass": 0.55, "pad": 0.4, "lead": 0.45}
 
 
 def _midi_to_freq(note: int) -> float:
@@ -98,6 +99,12 @@ def _bass(note: int, dur_s: float, vel: float) -> np.ndarray:
                   attack_s=0.005, release_s=0.05)
 
 
+def _lead(note: int, dur_s: float, vel: float) -> np.ndarray:
+    # brighter than bass, longer gate/release — the melodic surface (S-5)
+    return _tonal(note, dur_s, vel, partials=((1, 1.0), (2, 0.55), (3, 0.28), (5, 0.08)),
+                  attack_s=0.01, release_s=0.15, detune=0.001)
+
+
 def _pad(note: int, dur_s: float, vel: float) -> np.ndarray:
     attack = min(0.4, dur_s * 0.25)
     return _tonal(note, dur_s, vel, partials=((1, 1.0), (2, 0.4), (4, 0.1)),
@@ -145,6 +152,8 @@ def render_audio(spec: PatternSpec, seed: int = 0) -> np.ndarray:
             sig = _bass(note, dur_s, vel) * _GAINS["bass"]
         elif channel == PAD_CHANNEL:
             sig = _pad(note, dur_s, vel) * _GAINS["pad"]
+        elif channel == LEAD_CHANNEL:
+            sig = _lead(note, dur_s, vel) * _GAINS["lead"]
         else:
             continue
         end = min(start + len(sig), n_total)

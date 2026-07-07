@@ -19,6 +19,7 @@ from .spec import (
     BassRole,
     ControlsRole,
     DrumRole,
+    LeadRole,
     PadRole,
     PatternSpec,
     STEPS_PER_BAR,
@@ -33,6 +34,7 @@ TICKS_PER_STEP = TICKS_PER_BAR // STEPS_PER_BAR  # 6
 DRUM_CHANNEL = 9  # GM drums (0-indexed)
 BASS_CHANNEL = 0
 PAD_CHANNEL = 1
+LEAD_CHANNEL = 2  # S-5 (#74): unassigned before, passes through SplitPort untouched
 
 DRUM_NOTES = {"kick": 36, "snare": 38, "hats": 42, "perc": 37, "shaker": 70, "clap": 39}
 
@@ -185,6 +187,24 @@ def _control_events(role: ControlsRole, total_bars: int) -> list[MidiEvent]:
     return events
 
 
+def _lead_events(role: LeadRole, bar: int, rng: random.Random, phrase_ticks: int) -> list[MidiEvent]:
+    """Same looping/clipping semantics as bass, on the lead channel."""
+    events = []
+    bar_tick = bar * TICKS_PER_BAR
+    for step, note, beats in role.notes:
+        period_bars = max(1, math.ceil(beats / BEATS_PER_BAR))
+        if bar % period_bars != 0:
+            continue
+        tick = bar_tick + step * TICKS_PER_STEP
+        vel = _clamp_vel(role.vel + rng.randint(-VEL_JITTER, VEL_JITTER))
+        off = min(tick + max(1, int(round(beats * TICKS_PER_BEAT))), phrase_ticks - 1)
+        if off <= tick:
+            continue
+        events.append(MidiEvent(tick, "on", LEAD_CHANNEL, note, vel))
+        events.append(MidiEvent(off, "off", LEAD_CHANNEL, note, 0))
+    return events
+
+
 def _pad_phrase_events(role: PadRole, total_bars: int) -> list[MidiEvent]:
     """Render the whole progression: voice-led changes, optional sustain.
 
@@ -224,7 +244,7 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
     # independent of dict insertion order (determinism, FS1). New S-3 roles
     # sit AFTER hats and BEFORE bass so pre-S-3 specs keep their exact RNG
     # draw order (byte-identical output).
-    for name in ("kick", "snare", "hats", "perc", "shaker", "clap", "bass"):
+    for name in ("kick", "snare", "hats", "perc", "shaker", "clap", "bass", "lead"):
         role = spec.roles.get(name)
         if role is None:
             continue
@@ -243,6 +263,8 @@ def render(spec: PatternSpec, seed: int = 0) -> list[MidiEvent]:
                 events.extend(_drum_events(name, role, bar, rng, spec.feel, pattern=bar_pattern))
             elif isinstance(role, BassRole):
                 events.extend(_bass_events(role, bar, rng, phrase_ticks))
+            elif isinstance(role, LeadRole):
+                events.extend(_lead_events(role, bar, rng, phrase_ticks))
     pad = spec.roles.get("pad")
     if isinstance(pad, PadRole):
         events.extend(_pad_phrase_events(pad, spec.for_bars))
