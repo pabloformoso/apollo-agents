@@ -18,6 +18,11 @@ python main.py --name "midnight-lofi" --genre "lofi - ambient" --duration 60
 
 # Run the conversational agent
 uv run python agent/run.py
+
+# Generative MIDI spike (needs `uv sync --group synth`, loopMIDI running,
+# a synth listening on the port — see docs/reasoned-generative-engine.md)
+uv run python scripts/spike_generative.py            # LLM-driven; type "darker"/"build"/"quit"
+uv run python scripts/spike_generative.py --no-llm   # loop the seed groove only
 ```
 
 ## Web app

@@ -1,7 +1,13 @@
 # Reasoned Generative Engine — Spec, Assumptions, Dependencies & Backlog
 
-> Status: **investigation / pre-spec**. Nothing here is committed work. This is the
-> thinking artifact for a future capability. No code is implied to exist yet.
+> Status: **spike built & validated (2026-07-07)**. The §11 thin vertical exists:
+> `agent/generative/` + `scripts/spike_generative.py` + `tests/test_generative_*.py`
+> (105 tests). Measured on the target Windows box: clock jitter p99 ≈ 0.1 ms
+> (A3 ✅, wildly under budget); LLM (Azure) fits an 8-bar phrase but missed a
+> 4-bar boundary once — reject-and-hold looped the phrase as designed (A1 ✅ at
+> 8 bars, marginal at 4). The mind produced a musically coherent, reasoned
+> mutation on the first try (A2/A4 ✅ pending ear test). Next: ear test, then
+> EPIC C polish (true reason-ahead) and EPIC D/E.
 >
 > Lineage: descends from the author's *Archaeopteryx* (Ruby generative MIDI engine,
 > EuRuKo 2009) — but replaces **probabilistic matrices** with **reasoned acts**: an

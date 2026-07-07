@@ -1,0 +1,253 @@
+"""Pattern-spec: the slow-plane -> fast-plane contract (FS1-FS4).
+
+A PatternSpec is the ONLY thing the mind hands to the muscle. It is:
+- self-contained (the fast plane needs no LLM to interpret it),
+- validated on ingest (bad input raises SpecError; the engine keeps
+  playing the previous spec — reject-and-hold),
+- carries `reason` (accountability, FS4) and `rethink_in_bars`
+  (slow-plane cadence control).
+
+Theory-light by design (Q3): drum roles are 16th-note step strings,
+bass is an explicit note list, pad is a chord name. The musicality
+lives in the mind, the schema stays dumb.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+STEPS_PER_BAR = 16  # 16th-note grid
+
+BPM_MIN, BPM_MAX = 60.0, 200.0
+BARS_MIN, BARS_MAX = 1, 32
+VEL_MIN, VEL_MAX = 1, 127
+SWING_MIN, SWING_MAX = 0.0, 0.5
+
+_CAMELOT_RE = re.compile(r"^(1[0-2]|[1-9])[AB]$")
+_NOTE_RE = re.compile(r"^([A-G])([#b]?)(-?\d)$")
+_CHORD_RE = re.compile(r"^([A-G][#b]?)(maj7|maj9|m7b5|min7|min9|min|m7|m9|m6|m|7|9|6|add9|sus2|sus4|dim|aug)?$")
+
+DRUM_ROLES = ("kick", "snare", "hats")
+PITCHED_ROLES = ("bass", "pad")
+ALLOWED_ROLES = DRUM_ROLES + PITCHED_ROLES
+
+VOICINGS = ("close", "wide")
+
+# Named drum patterns expand to a 16-step string. 'x' = hit, 'X' = accent.
+NAMED_PATTERNS = {
+    "4-on-floor": "x...x...x...x...",
+    "offbeat": "..x...x...x...x.",
+    "8ths": "x.x.x.x.x.x.x.x.",
+    "16ths": "xxxxxxxxxxxxxxxx",
+    "backbeat": "....x.......x...",
+}
+
+_PATTERN_CHARS = set("xX.")
+
+_NOTE_PC = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+
+CHORD_QUALITIES = {
+    "": (0, 4, 7),
+    "m": (0, 3, 7),
+    "min": (0, 3, 7),
+    "6": (0, 4, 7, 9),
+    "m6": (0, 3, 7, 9),
+    "7": (0, 4, 7, 10),
+    "9": (0, 4, 7, 10, 14),
+    "maj7": (0, 4, 7, 11),
+    "maj9": (0, 4, 7, 11, 14),
+    "m7": (0, 3, 7, 10),
+    "min7": (0, 3, 7, 10),
+    "m9": (0, 3, 7, 10, 14),
+    "min9": (0, 3, 7, 10, 14),
+    "m7b5": (0, 3, 6, 10),
+    "add9": (0, 4, 7, 14),
+    "sus2": (0, 2, 7),
+    "sus4": (0, 5, 7),
+    "dim": (0, 3, 6),
+    "aug": (0, 4, 8),
+}
+
+
+class SpecError(ValueError):
+    """A pattern-spec failed validation. The engine must reject-and-hold."""
+
+
+def note_to_midi(name: str) -> int:
+    """'A1' -> 33 (scientific pitch, C4 = 60)."""
+    m = _NOTE_RE.match(name or "")
+    if not m:
+        raise SpecError(f"invalid note name: {name!r}")
+    letter, accidental, octave = m.group(1), m.group(2), int(m.group(3))
+    pc = _NOTE_PC[letter] + (1 if accidental == "#" else -1 if accidental == "b" else 0)
+    midi = 12 * (octave + 1) + pc
+    if not 0 <= midi <= 127:
+        raise SpecError(f"note out of MIDI range: {name!r}")
+    return midi
+
+
+def chord_to_midi(chord: str, voicing: str = "close") -> list[int]:
+    """'Am9' -> MIDI note numbers around octave 3/4. Deterministic."""
+    m = _CHORD_RE.match(chord or "")
+    if not m:
+        raise SpecError(f"invalid chord name: {chord!r}")
+    root_name, quality = m.group(1), m.group(2) or ""
+    intervals = CHORD_QUALITIES[quality]
+    pc = _NOTE_PC[root_name[0]] + (1 if root_name.endswith("#") else -1 if root_name.endswith("b") else 0)
+    root = 48 + (pc % 12)  # around C3
+    notes = [root + i for i in intervals]
+    if voicing == "wide":
+        notes = [root - 12] + notes[1:]
+    return notes
+
+
+def expand_pattern(pattern: str) -> str:
+    """Named pattern or raw step string -> canonical 16-step string."""
+    if pattern in NAMED_PATTERNS:
+        return NAMED_PATTERNS[pattern]
+    if not pattern or set(pattern) - _PATTERN_CHARS:
+        raise SpecError(
+            f"invalid pattern {pattern!r}: use a named pattern "
+            f"({', '.join(sorted(NAMED_PATTERNS))}) or steps of x/X/."
+        )
+    if STEPS_PER_BAR % len(pattern) != 0:
+        raise SpecError(f"pattern length {len(pattern)} does not divide {STEPS_PER_BAR}")
+    return "".join(ch + "." * (STEPS_PER_BAR // len(pattern) - 1) for ch in pattern)
+
+
+def _check_vel(value, role: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not VEL_MIN <= value <= VEL_MAX:
+        raise SpecError(f"{role}: velocity must be an int in [{VEL_MIN}, {VEL_MAX}], got {value!r}")
+    return value
+
+
+@dataclass(frozen=True)
+class DrumRole:
+    pattern: str  # canonical 16-step string
+    vel: int = 100
+    swing: float = 0.0
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict) -> "DrumRole":
+        if not isinstance(d, dict):
+            raise SpecError(f"{name}: role must be an object, got {d!r}")
+        pattern = expand_pattern(d.get("pattern", ""))
+        vel = _check_vel(d.get("vel", 100), name)
+        swing = d.get("swing", 0.0)
+        if not isinstance(swing, (int, float)) or not SWING_MIN <= swing <= SWING_MAX:
+            raise SpecError(f"{name}: swing must be in [{SWING_MIN}, {SWING_MAX}], got {swing!r}")
+        return cls(pattern=pattern, vel=vel, swing=float(swing))
+
+
+@dataclass(frozen=True)
+class BassRole:
+    notes: tuple[tuple[int, int, float], ...]  # (step 0-15, midi note, duration in beats)
+    vel: int = 90
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict) -> "BassRole":
+        if not isinstance(d, dict):
+            raise SpecError(f"{name}: role must be an object, got {d!r}")
+        raw = d.get("notes")
+        if not isinstance(raw, list) or not raw:
+            raise SpecError(f"{name}: 'notes' must be a non-empty list of [step, note, beats]")
+        notes = []
+        for item in raw:
+            if not isinstance(item, (list, tuple)) or len(item) != 3:
+                raise SpecError(f"{name}: each note must be [step, note, beats], got {item!r}")
+            step, note_name, beats = item
+            if not isinstance(step, int) or isinstance(step, bool) or not 0 <= step < STEPS_PER_BAR:
+                raise SpecError(f"{name}: step must be an int in [0, {STEPS_PER_BAR - 1}], got {step!r}")
+            if not isinstance(beats, (int, float)) or not 0 < beats <= 4.0:
+                raise SpecError(f"{name}: duration must be in (0, 4] beats, got {beats!r}")
+            notes.append((step, note_to_midi(note_name), float(beats)))
+        vel = _check_vel(d.get("vel", 90), name)
+        return cls(notes=tuple(notes), vel=vel)
+
+
+@dataclass(frozen=True)
+class PadRole:
+    chord: str
+    voicing: str = "close"
+    vel: int = 60
+
+    @classmethod
+    def from_dict(cls, name: str, d: dict) -> "PadRole":
+        if not isinstance(d, dict):
+            raise SpecError(f"{name}: role must be an object, got {d!r}")
+        voicing = d.get("voicing", "close")
+        if voicing not in VOICINGS:
+            raise SpecError(f"{name}: voicing must be one of {VOICINGS}, got {voicing!r}")
+        chord = d.get("chord", "")
+        chord_to_midi(chord, voicing)  # validate now, render later
+        vel = _check_vel(d.get("vel", 60), name)
+        return cls(chord=chord, voicing=voicing, vel=vel)
+
+
+_ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": BassRole, "pad": PadRole}
+
+
+@dataclass(frozen=True)
+class PatternSpec:
+    for_bars: int
+    bpm: float
+    key: str  # Camelot, consistent with tracks.json
+    roles: dict = field(default_factory=dict)
+    reason: str = ""
+    rethink_in_bars: int = 0  # 0 -> defaults to for_bars
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "PatternSpec":
+        """Validate a raw dict (e.g. straight from the LLM). Raises SpecError."""
+        if not isinstance(d, dict):
+            raise SpecError(f"spec must be an object, got {type(d).__name__}")
+
+        for_bars = d.get("for_bars")
+        if not isinstance(for_bars, int) or isinstance(for_bars, bool) or not BARS_MIN <= for_bars <= BARS_MAX:
+            raise SpecError(f"for_bars must be an int in [{BARS_MIN}, {BARS_MAX}], got {for_bars!r}")
+
+        bpm = d.get("bpm")
+        if not isinstance(bpm, (int, float)) or not BPM_MIN <= bpm <= BPM_MAX:
+            raise SpecError(f"bpm must be in [{BPM_MIN}, {BPM_MAX}], got {bpm!r}")
+
+        key = d.get("key", "")
+        if not isinstance(key, str) or not _CAMELOT_RE.match(key):
+            raise SpecError(f"key must be Camelot (1A-12B), got {key!r}")
+
+        raw_roles = d.get("roles")
+        if not isinstance(raw_roles, dict) or not raw_roles:
+            raise SpecError("roles must be a non-empty object")
+        roles = {}
+        for name, role_dict in raw_roles.items():
+            role_cls = _ROLE_CLASSES.get(name)
+            if role_cls is None:
+                raise SpecError(f"unknown role {name!r}: allowed roles are {ALLOWED_ROLES}")
+            roles[name] = role_cls.from_dict(name, role_dict)
+
+        reason = d.get("reason", "")
+        if not isinstance(reason, str) or not reason.strip():
+            raise SpecError("reason is required — every spec must state why (FS4)")
+
+        rethink = d.get("rethink_in_bars", for_bars)
+        if not isinstance(rethink, int) or isinstance(rethink, bool) or not BARS_MIN <= rethink <= BARS_MAX:
+            raise SpecError(f"rethink_in_bars must be an int in [{BARS_MIN}, {BARS_MAX}], got {rethink!r}")
+
+        return cls(for_bars=for_bars, bpm=float(bpm), key=key, roles=roles,
+                   reason=reason.strip(), rethink_in_bars=rethink)
+
+    def summary(self) -> str:
+        """One-line human/LLM-readable summary, used by state.py."""
+        parts = []
+        for name in ALLOWED_ROLES:
+            role = self.roles.get(name)
+            if role is None:
+                continue
+            if isinstance(role, DrumRole):
+                parts.append(f"{name}={role.pattern}(v{role.vel}"
+                             + (f",sw{role.swing:.2f})" if role.swing else ")"))
+            elif isinstance(role, BassRole):
+                parts.append(f"bass={len(role.notes)}notes(v{role.vel})")
+            else:
+                parts.append(f"pad={role.chord}/{role.voicing}(v{role.vel})")
+        return f"{self.bpm:g}bpm {self.key} {self.for_bars}bars | " + " ".join(parts)
