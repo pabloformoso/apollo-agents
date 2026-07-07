@@ -28,9 +28,11 @@ _CAMELOT_RE = re.compile(r"^(1[0-2]|[1-9])[AB]$")
 _NOTE_RE = re.compile(r"^([A-G])([#b]?)(-?\d)$")
 _CHORD_RE = re.compile(r"^([A-G][#b]?)(maj7|maj9|m7b5|min7|min9|min|m7|m9|m6|m|7|9|6|add9|sus2|sus4|dim|aug)?$")
 
-DRUM_ROLES = ("kick", "snare", "hats")
+DRUM_ROLES = ("kick", "snare", "hats", "perc", "shaker", "clap")
 PITCHED_ROLES = ("bass", "pad")
 ALLOWED_ROLES = DRUM_ROLES + PITCHED_ROLES + ("controls",)
+
+FILL_MODES = ("none", "auto")
 
 VOICINGS = ("close", "wide")
 
@@ -41,6 +43,12 @@ NAMED_PATTERNS = {
     "8ths": "x.x.x.x.x.x.x.x.",
     "16ths": "xxxxxxxxxxxxxxxx",
     "backbeat": "....x.......x...",
+    # v3.2 S-3 additions
+    "half-time": "x.......x.......",
+    "garage": "x..x..x...x..x..",
+    "shaker-groove": "xxXxxxXxxxXxxxXx",
+    "rim-sync": "..x...x.....x..x",
+    "clap-24": "....x.......x...",
 }
 
 _PATTERN_CHARS = set("xX.")
@@ -127,6 +135,8 @@ class DrumRole:
     pattern: str  # canonical 16-step string
     vel: int = 100
     swing: float = 0.0
+    density: float | None = None  # None = written pattern as-is (byte-identical path)
+    fill: str = "none"  # "auto" = deterministic last-bar variation
 
     @classmethod
     def from_dict(cls, name: str, d: dict) -> "DrumRole":
@@ -137,7 +147,16 @@ class DrumRole:
         swing = d.get("swing", 0.0)
         if not isinstance(swing, (int, float)) or not SWING_MIN <= swing <= SWING_MAX:
             raise SpecError(f"{name}: swing must be in [{SWING_MIN}, {SWING_MAX}], got {swing!r}")
-        return cls(pattern=pattern, vel=vel, swing=float(swing))
+        density = d.get("density")
+        if density is not None:
+            if not isinstance(density, (int, float)) or isinstance(density, bool) \
+                    or not 0.0 <= density <= 1.0:
+                raise SpecError(f"{name}: density must be in [0.0, 1.0], got {density!r}")
+            density = float(density)
+        fill = d.get("fill", "none")
+        if fill not in FILL_MODES:
+            raise SpecError(f"{name}: fill must be one of {FILL_MODES}, got {fill!r}")
+        return cls(pattern=pattern, vel=vel, swing=float(swing), density=density, fill=fill)
 
 
 @dataclass(frozen=True)
@@ -266,8 +285,8 @@ class ControlsRole:
         return cls(ramps=tuple(ControlRamp.from_dict(r) for r in raw))
 
 
-_ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": BassRole,
-                 "pad": PadRole, "controls": ControlsRole}
+_ROLE_CLASSES = {**{name: DrumRole for name in DRUM_ROLES},
+                 "bass": BassRole, "pad": PadRole, "controls": ControlsRole}
 
 
 @dataclass(frozen=True)

@@ -32,7 +32,8 @@ from .spec import PatternSpec
 
 SR = 44100
 
-_GAINS = {"kick": 0.9, "snare": 0.55, "hats": 0.3, "bass": 0.55, "pad": 0.4}
+_GAINS = {"kick": 0.9, "snare": 0.55, "hats": 0.3, "perc": 0.4, "shaker": 0.22,
+          "clap": 0.5, "bass": 0.55, "pad": 0.4}
 
 
 def _midi_to_freq(note: int) -> float:
@@ -131,13 +132,15 @@ def render_audio(spec: PatternSpec, seed: int = 0) -> np.ndarray:
         dur_s = max(0.01, (off_tick - on_tick) * sec_per_tick)
         vel = (velocity / 127.0) ** 1.5
         if channel == DRUM_CHANNEL:
-            name = drum_names.get(note)
+            name = drum_names.get(note, "hats")
             if name == "kick":
                 sig = _kick(0.35, vel) * _GAINS["kick"]
-            elif name == "snare":
-                sig = _snare(0.25, vel, rng) * _GAINS["snare"]
-            else:
-                sig = _hat(0.1, vel, rng) * _GAINS["hats"]
+            elif name in ("snare", "clap"):
+                sig = _snare(0.25, vel, rng) * _GAINS[name]
+            elif name == "perc":
+                sig = _snare(0.09, vel, rng) * _GAINS["perc"]  # rimshot-ish: short snare burst
+            else:  # hats, shaker
+                sig = _hat(0.1, vel, rng) * _GAINS[name]
         elif channel == BASS_CHANNEL:
             sig = _bass(note, dur_s, vel) * _GAINS["bass"]
         elif channel == PAD_CHANNEL:

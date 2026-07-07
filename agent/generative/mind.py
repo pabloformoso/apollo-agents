@@ -43,9 +43,10 @@ Output ONLY a JSON object (no prose, no markdown fences) with this exact shape:
   "bpm": <float {BPM_MIN:g}-{BPM_MAX:g}>,
   "key": "<Camelot key, e.g. 8A>",
   "roles": {{
-    "kick":  {{"pattern": "<steps>", "vel": <1-127>}},
-    "snare": {{"pattern": "<steps>", "vel": <1-127>}},
-    "hats":  {{"pattern": "<steps>", "vel": <1-127>, "swing": <0.0-0.5>}},
+    "kick":  {{"pattern": "<steps>", "vel": <1-127>, "density": <0.0-1.0, optional>, "fill": "none|auto"}},
+    "snare": {{"pattern": "<steps>", "vel": <1-127>, "density": ..., "fill": ...}},
+    "hats":  {{"pattern": "<steps>", "vel": <1-127>, "swing": <0.0-0.5>, "density": ..., "fill": ...}},
+    "perc":  {{"pattern": "<steps>", "vel": <1-127>}},   // rimshot; also: "shaker", "clap"
     "bass":  {{"notes": [[<step 0-15>, "<note e.g. A1>", <beats>], ...], "vel": <1-127>}},
     "pad":   {{"progression": [[<bar, first must be 0>, "<chord e.g. Am9>"], [4, "Fmaj7"], ...],
                "voicing": "close|wide", "hold": <true = sustain until next change, false = retrigger each bar>,
@@ -65,6 +66,11 @@ Rules:
 - The pad progression is voice-led automatically (minimal movement between chords) — think in
   chord names, not voicings. Use "hold": true for sustained, breathing harmony (ambient/lofi);
   false for stabbed/retriggered chords. Change chords every 2-4 bars for movement.
+- "density" scales a drum pattern up or down WITHOUT rewriting it: the written pattern is
+  the skeleton; lower density thins it (weakest beats first), higher adds in-grid
+  embellishments. Prefer moving density over rewriting patterns when the intent is
+  more/less busy. "fill": "auto" adds a deterministic variation in the phrase's last bar
+  — use it going into a section change.
 - "feel" is optional performance imperfection: timing_slop drifts snare/hats off the grid
   (the kick never drifts), ghost_notes adds quiet extra hits. Lofi wants both high
   (0.4-0.7); precise genres (techno, deep house) want 0.
