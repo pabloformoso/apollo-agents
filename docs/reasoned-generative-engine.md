@@ -370,6 +370,10 @@ Step 4 onward needs the audible end set up on this Windows box:
 2. **M-3 + M-6** — scale guardrails + genre profiles w/ few-shot specs.
    The mind stops producing accidental dissonance and starts producing
    idiomatic material. (Prompt work + pure validation — cheap, high yield.)
+   **✅ shipped 2026-07-07** (issue #63): `scales.py` (Camelot→scale, minor
+   admits the raised 7th), guardrails in `PatternSpec.from_dict` with
+   `"chromatic": true` escape hatch; `genres.py` packs (brief + starter
+   doubling as few-shot) injected via `Mind(genre=...)`. Ear test pending.
 3. **M-5** — lofi feel (timing slop, ghost hats, swing depth). The drum grid
    stops sounding quantized. A/B by ear against a reference lofi loop.
 4. **M-4 + M-7** — lead motifs + section arc. This is where "directed music"

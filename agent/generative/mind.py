@@ -72,6 +72,9 @@ Rules:
   "build"/"lift" -> add density, open the hats, raise velocities toward a peak.
 - Do not repeat the recent reasons — if the state shows a plateau, change something meaningful.
 - The "reason" must state a concrete musical decision, not a vibe description.
+- All bass notes and chord tones must belong to the Camelot key's scale (minor keys also
+  allow the raised 7th). To go outside it deliberately, set "chromatic": true at the top
+  level AND justify the color in "reason" — otherwise the spec is rejected.
 """
 
 
@@ -147,10 +150,18 @@ def _default_llm(system: str, user: str) -> str:
 
 
 class Mind:
-    """state + intent -> validated PatternSpec. llm is injectable for tests."""
+    """state + intent -> validated PatternSpec. llm is injectable for tests.
 
-    def __init__(self, llm=None):
+    genre: key into genres.GENRE_PACKS — appends the genre brief + few-shot
+    example to the system prompt so every phrase stays in idiom (M-6).
+    """
+
+    def __init__(self, llm=None, genre: str | None = None):
         self._llm = llm or _default_llm
+        self._system = SYSTEM_PROMPT
+        if genre:
+            from .genres import genre_prompt_section
+            self._system = SYSTEM_PROMPT + genre_prompt_section(genre)
 
     def next_spec(self, state: dict, intent: str) -> PatternSpec:
         user = (
@@ -158,7 +169,7 @@ class Mind:
             f"Standing intent: {intent.strip() or 'none'}\n\n"
             "Produce the pattern-spec for the next phrase."
         )
-        raw = self._llm(SYSTEM_PROMPT, user)
+        raw = self._llm(self._system, user)
         try:
             return PatternSpec.from_dict(_extract_json(raw))
         except (SpecError, MindError) as first_err:
@@ -166,7 +177,7 @@ class Mind:
                 f"{user}\n\nYour previous reply was rejected: {first_err}\n"
                 "Reply again with ONLY a valid JSON pattern-spec."
             )
-            raw = self._llm(SYSTEM_PROMPT, retry)
+            raw = self._llm(self._system, retry)
             try:
                 return PatternSpec.from_dict(_extract_json(raw))
             except (SpecError, MindError) as second_err:

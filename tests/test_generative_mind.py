@@ -89,3 +89,42 @@ def test_fenced_reply_accepted():
         return f"```json\n{json.dumps(valid_spec_dict())}\n```"
 
     assert isinstance(Mind(llm=llm).next_spec(make_state(), "x"), PatternSpec)
+
+
+# --- v3.0 slice 2: genre packs reach the system prompt (M-6) --------------------
+
+def test_genre_brief_lands_in_system_prompt():
+    captured = {}
+
+    def llm(system, user):
+        captured["system"] = system
+        return json.dumps(valid_spec_dict())
+
+    Mind(llm=llm, genre="lofi").next_spec(make_state(), "x")
+    assert "GENRE: lofi hip-hop" in captured["system"]
+    assert '"bpm": 78' in captured["system"]          # few-shot example present
+    assert captured["system"].startswith(SYSTEM_PROMPT)  # base contract intact
+
+
+def test_no_genre_keeps_bare_prompt():
+    captured = {}
+
+    def llm(system, user):
+        captured["system"] = system
+        return json.dumps(valid_spec_dict())
+
+    Mind(llm=llm).next_spec(make_state(), "x")
+    assert captured["system"] == SYSTEM_PROMPT
+
+
+def test_retry_uses_the_genre_prompt_too():
+    systems = []
+    replies = [json.dumps(valid_spec_dict(bpm=999)), json.dumps(valid_spec_dict())]
+
+    def llm(system, user):
+        systems.append(system)
+        return replies[len(systems) - 1]
+
+    Mind(llm=llm, genre="ambient").next_spec(make_state(), "x")
+    assert len(systems) == 2 and systems[0] == systems[1]
+    assert "GENRE: ambient" in systems[1]

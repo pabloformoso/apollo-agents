@@ -270,6 +270,34 @@ _ROLE_CLASSES = {"kick": DrumRole, "snare": DrumRole, "hats": DrumRole, "bass": 
                  "pad": PadRole, "controls": ControlsRole}
 
 
+def _check_scale(key: str, roles: dict) -> None:
+    """M-3: pitched notes must belong to the Camelot key's scale.
+
+    Local import — scales.py imports SpecError from this module, so the
+    dependency must stay one-way at import time.
+    """
+    from .scales import camelot_scale, key_name, pc_name
+
+    scale = camelot_scale(key)
+    for name, role in roles.items():
+        if isinstance(role, BassRole):
+            for _step, note, _beats in role.notes:
+                if note % 12 not in scale:
+                    raise SpecError(
+                        f"{name}: {pc_name(note)} is outside {key} ({key_name(key)}) — "
+                        f'stay in the scale or set "chromatic": true and justify it in reason'
+                    )
+        elif isinstance(role, PadRole):
+            for _bar, chord in role.progression:
+                for note in chord_to_midi(chord, "close"):
+                    if note % 12 not in scale:
+                        raise SpecError(
+                            f"{name}: chord {chord} contains {pc_name(note)}, outside {key} "
+                            f'({key_name(key)}) — stay in the scale or set "chromatic": true '
+                            f"and justify it in reason"
+                        )
+
+
 @dataclass(frozen=True)
 class PatternSpec:
     for_bars: int
@@ -278,6 +306,7 @@ class PatternSpec:
     roles: dict = field(default_factory=dict)
     reason: str = ""
     rethink_in_bars: int = 0  # 0 -> defaults to for_bars
+    chromatic: bool = False  # True: skip scale guardrails (must be justified in reason)
 
     @classmethod
     def from_dict(cls, d: dict) -> "PatternSpec":
@@ -315,8 +344,14 @@ class PatternSpec:
         if not isinstance(rethink, int) or isinstance(rethink, bool) or not BARS_MIN <= rethink <= BARS_MAX:
             raise SpecError(f"rethink_in_bars must be an int in [{BARS_MIN}, {BARS_MAX}], got {rethink!r}")
 
+        chromatic = d.get("chromatic", False)
+        if not isinstance(chromatic, bool):
+            raise SpecError(f"chromatic must be a boolean, got {chromatic!r}")
+        if not chromatic:
+            _check_scale(key, roles)
+
         return cls(for_bars=for_bars, bpm=float(bpm), key=key, roles=roles,
-                   reason=reason.strip(), rethink_in_bars=rethink)
+                   reason=reason.strip(), rethink_in_bars=rethink, chromatic=chromatic)
 
     def summary(self) -> str:
         """One-line human/LLM-readable summary, used by state.py."""

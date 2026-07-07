@@ -39,49 +39,8 @@ from agent.generative.mind import Mind, MindError
 from agent.generative.spec import PatternSpec
 from agent.generative.state import build_state
 
-STARTER_SPECS = {
-    "deep": {
-        "for_bars": 8,
-        "bpm": 122,
-        "key": "8A",
-        "roles": {
-            "kick": {"pattern": "4-on-floor", "vel": 110},
-            "hats": {"pattern": "offbeat", "vel": 80, "swing": 0.12},
-            "bass": {"notes": [[0, "A1", 1.0], [6, "A1", 0.5], [10, "E2", 0.5], [12, "G1", 1.0]], "vel": 92},
-            "pad": {"chord": "Am9", "voicing": "wide", "vel": 55},
-        },
-        "reason": "seed groove — establish a deep 122bpm Am foundation before the mind takes over",
-        "rethink_in_bars": 8,
-    },
-    # v3.0 slice 1 (issue #62): patient, voice-led, no grid — a chord meditation.
-    "ambient": {
-        "for_bars": 8,
-        "bpm": 70,
-        "key": "8A",
-        "roles": {
-            "pad": {"progression": [[0, "Am9"], [2, "Fmaj7"], [4, "Cmaj7"], [6, "Em7"]],
-                    "voicing": "wide", "hold": True, "vel": 60},
-            "bass": {"notes": [[0, "A1", 32.0]], "vel": 58},
-            "controls": {"ramps": [{"cc": 74, "from": 0.25, "to": 0.55, "start_bar": 0, "over_bars": 8}]},
-        },
-        "reason": "seed meditation — Am9 to Em7 voice-led drift over a low A drone, filter breathing open",
-        "rethink_in_bars": 8,
-    },
-    "lofi": {
-        "for_bars": 8,
-        "bpm": 78,
-        "key": "8A",
-        "roles": {
-            "kick": {"pattern": "x......x..x.....", "vel": 96},
-            "snare": {"pattern": "....x.......x...", "vel": 70},
-            "hats": {"pattern": "x.x.x.x.x.x.x.x.", "swing": 0.3, "vel": 52},
-            "bass": {"notes": [[0, "A1", 3.0], [12, "E2", 2.0]], "vel": 76},
-            "pad": {"progression": [[0, "Am9"], [4, "Fmaj7"]], "voicing": "close", "hold": True, "vel": 58},
-        },
-        "reason": "seed head-nod — dusty 78bpm two-chord loop, swung hats, lazy bass",
-        "rethink_in_bars": 8,
-    },
-}
+# Starter specs + genre briefs live in one place (M-6).
+from agent.generative.genres import GENRE_PACKS
 
 
 _EOF = "\x00eof"  # sentinel: stdin closed (terminal gone / piped input exhausted)
@@ -96,8 +55,8 @@ def _intent_reader(q: "queue.Queue[str]") -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--port", default="loopMIDI", help="substring of the MIDI output port name")
-    parser.add_argument("--genre", default="deep", choices=sorted(STARTER_SPECS),
-                        help="starter spec / musical register")
+    parser.add_argument("--genre", default="deep", choices=sorted(GENRE_PACKS),
+                        help="genre pack: starter spec + idiom brief for the mind")
     parser.add_argument("--bpm", type=float, default=None, help="override starter BPM")
     parser.add_argument("--key", default=None, help="override starter Camelot key")
     parser.add_argument("--bars", type=int, default=None, help="override bars per phrase")
@@ -109,7 +68,7 @@ def main() -> int:
 
     load_dotenv()
 
-    starter = dict(STARTER_SPECS[args.genre])
+    starter = dict(GENRE_PACKS[args.genre]["starter"])
     if args.bpm:
         starter["bpm"] = args.bpm
     if args.key:
@@ -120,7 +79,7 @@ def main() -> int:
 
     port = open_output(args.port)
     print(f"[spike] MIDI out: {port.name}")
-    mind = None if args.no_llm else Mind()
+    mind = None if args.no_llm else Mind(genre=args.genre)
     intent = args.intent
     reasons: list[str] = [spec.reason]
 
