@@ -23,6 +23,12 @@ GENRE_PACKS: dict[str, dict] = {
 - Density: groove is king — change ONE element per phrase, keep the rest locked.
 - Builds via hats density and brightness (CC 42) opening; breakdowns drop the kick,
   hold the pad, push space (CC 43).""",
+        "arc": [
+            {"name": "intro", "phrases": 2, "energy_target": 0.4, "density_target": 0.4},
+            {"name": "build", "phrases": 2, "energy_target": 0.7, "density_target": 0.65},
+            {"name": "peak", "phrases": 3, "energy_target": 0.95, "density_target": 0.85},
+            {"name": "breakdown", "phrases": 2, "energy_target": 0.45, "density_target": 0.35},
+        ],
         "starter": {
             "for_bars": 8,
             "bpm": 122,
@@ -47,6 +53,11 @@ GENRE_PACKS: dict[str, dict] = {
   voice-led changes and slow brightness (CC 42) / space (CC 43) swells over
   4-8 bars, never from rhythm. Motion (CC 44) low and slow.
 - Density: LESS. If in doubt, remove a role. Silence is material.""",
+        "arc": [
+            {"name": "settle", "phrases": 3, "energy_target": 0.3, "density_target": 0.2},
+            {"name": "bloom", "phrases": 4, "energy_target": 0.5, "density_target": 0.3},
+            {"name": "recede", "phrases": 3, "energy_target": 0.25, "density_target": 0.15},
+        ],
         "starter": {
             "for_bars": 8,
             "bpm": 70,
@@ -70,6 +81,11 @@ GENRE_PACKS: dict[str, dict] = {
 - Imperfection is the aesthetic: velocities low and uneven, density modest.
 - Evolve by swapping ONE chord or ONE drum pattern per phrase; the loop must
   stay recognizable — listeners are studying to this.""",
+        "arc": [
+            {"name": "loop", "phrases": 4, "energy_target": 0.55, "density_target": 0.5},
+            {"name": "breather", "phrases": 1, "energy_target": 0.35, "density_target": 0.3},
+            {"name": "loop-return", "phrases": 3, "energy_target": 0.6, "density_target": 0.55},
+        ],
         "starter": {
             "for_bars": 8,
             "bpm": 78,

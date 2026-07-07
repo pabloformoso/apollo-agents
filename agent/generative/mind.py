@@ -81,6 +81,9 @@ Rules:
 - Keep bpm and key stable unless the intent demands a change; evolve gradually, phrase by phrase.
 - Respect the standing intent above all. "darker" -> lower velocities, sparser hats, minor colors.
   "build"/"lift" -> add density, open the hats, raise velocities toward a peak.
+- If the state carries an "arc", you are inside that section: steer energy and density
+  toward its targets (density dials and velocities before pattern rewrites), and prepare
+  the transition when section_phrase approaches its end (a fill, a CC swell).
 - Do not repeat the recent reasons — if the state shows a plateau, change something meaningful.
 - The "reason" must state a concrete musical decision, not a vibe description.
 - All bass notes and chord tones must belong to the Camelot key's scale (minor keys also
