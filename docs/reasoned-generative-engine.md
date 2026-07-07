@@ -321,6 +321,71 @@ Step 4 onward needs the audible end set up on this Windows box:
 
 ---
 
+## 12. v0.3 — MUSICAL SENSE (ambient & lofi first)
+
+> Planned 2026-07-07 after the spike was accepted. Goal: stop sounding like a
+> validated grid and start sounding like *music from the channel's genres*.
+> Ambient + lofi chosen first deliberately: they are Apollo's home genres
+> (`tracks/lofi - ambient/`), tempo-tolerant, and forgiving of note-level
+> simplicity while demanding exactly the things the spec can't do yet —
+> harmony that moves, notes that breathe, and feel.
+
+### 12.1 What "musical sense" decomposes into
+
+| Gap today | What ambient/lofi need | Work item |
+|---|---|---|
+| Pad = 1 static chord, retriggered every bar | **Progressions**: chords change on chosen bars, sustain across bars, smooth **voice leading** between them | M-1 |
+| Notes confined to one bar (≤4 beats) | **Drones/ties**: durations in bars, whole-phrase swells | M-2 |
+| Key is metadata only — consonance is luck | **Scale guardrails**: Camelot → scale; validate bass/lead against it (reject-and-hold, like everything else) | M-3 |
+| No melody surface | **`lead` role**: sparse phrase-level motifs, longer notes, octave range | M-4 |
+| Humanization = velocity jitter only | **Feel profiles**: seeded micro-timing slop, ghost notes, swing depth per genre (lofi: sloppy-warm; ambient: near-rubato) | M-5 |
+| Mind reinvents the genre every phrase | **Genre profiles**: tempo range, role palette, density defaults, feel profile, few-shot example specs — injected into the mind's prompt (`--genre lofi`) | M-6 |
+| No arc — every phrase is "now" | **Section plan**: state carries a lightweight arc (intro → main → breakdown → outro) the mind proposes and then follows/revises | M-7 |
+| One Surge = one timbre | **Multi-timbral routing**: per-role MIDI channels are already emitted; document Surge channel-split / second instance / port-per-role. Real fix is EPIC-B-class, not spec-class | M-8 (doc + setup first) |
+
+### 12.2 Spec evolution (backward compatible)
+
+- `pad.progression`: `[[bar, "Am9"], [4, "Fmaj7"], ...]` — replaces single
+  `chord` (which remains valid = 1-entry progression). `hold: true` sustains
+  through the next change instead of retriggering. Voicing chooses the
+  **inversion minimizing voice movement** from the previous chord
+  (deterministic, unit-testable — this is the single highest musical-value
+  item in the plan).
+- `bass.notes` / `lead.notes` durations allowed up to `for_bars * 4` beats.
+- top-level `"feel"`: `{"timing_slop": 0-1, "ghost_notes": 0-1}` — rendered
+  by the interpreter from the seeded RNG (determinism preserved).
+- `key` gains teeth: notes outside the Camelot scale are rejected unless the
+  spec sets `"chromatic": true` (escape hatch the mind must justify in
+  `reason`).
+
+### 12.3 Ordered slices (each independently shippable, daily-cycle sized)
+
+1. **M-1 + M-2** — progressions, voice leading, cross-bar sustain. Ambient
+   becomes *possible*: `--no-llm --genre ambient` seed spec sounds like a
+   patient chord meditation, not a bar-stamped loop.
+2. **M-3 + M-6** — scale guardrails + genre profiles w/ few-shot specs.
+   The mind stops producing accidental dissonance and starts producing
+   idiomatic material. (Prompt work + pure validation — cheap, high yield.)
+3. **M-5** — lofi feel (timing slop, ghost hats, swing depth). The drum grid
+   stops sounding quantized. A/B by ear against a reference lofi loop.
+4. **M-4 + M-7** — lead motifs + section arc. This is where "directed music"
+   becomes "a piece with a shape".
+5. **M-8** — multi-timbral setup guide (Surge channel-split scenes A/B, or
+   2nd instance on the port) so pad ≠ bass ≠ drums timbre. No code, pure doc,
+   do whenever the single-timbre pain peaks.
+
+### 12.4 Explicitly NOT in v0.3
+- Audio analysis / mixing of the generative output into the WAV pipeline.
+- New sound sources (still loopMIDI → whatever listens).
+- MCP surface (unchanged: option B waits until the core sounds good).
+- Odd meters, tempo automation (techno/deep-house pressure, not ambient/lofi).
+
+### 12.5 Success test (ear, not metrics)
+Play 3 minutes of `--genre lofi` to someone who knows the channel: do they
+ask "which track is that?" rather than "what is that?" — that's the bar.
+
+---
+
 ## 8. Risks (eyes open)
 - R1. Phrase-level control ≠ note-level expressivity — accepted cost of the latency budget.
 - R2. LLM pattern quality is "functional/directable", not virtuosic (N3). Win = control + memory.
