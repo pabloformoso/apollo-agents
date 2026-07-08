@@ -92,3 +92,32 @@ def test_split_port_close_closes_both():
 
 def test_split_port_name_mentions_both():
     assert "drums:" in SplitPort(FakePort("a"), FakePort("b")).name
+
+
+def test_split_port_drum_velocity_boost():
+    main, drums = FakePort(), FakePort()
+    port = SplitPort(main, drums, drum_vel_scale=1.5)
+    port.send(event_to_message(MidiEvent(0, "on", DRUM_CHANNEL, 36, 80)))
+    port.send(event_to_message(MidiEvent(3, "off", DRUM_CHANNEL, 36, 0)))
+    port.send(event_to_message(MidiEvent(0, "on", 0, 33, 80)))
+    assert drums.sent[0].velocity == 120   # boosted
+    assert drums.sent[1].type == "note_off"  # offs untouched
+    assert main.sent[0].velocity == 80     # melodic roles untouched
+
+
+def test_split_port_boost_clamps_to_midi_range():
+    main, drums = FakePort(), FakePort()
+    port = SplitPort(main, drums, drum_vel_scale=2.0)
+    port.send(event_to_message(MidiEvent(0, "on", DRUM_CHANNEL, 36, 100)))
+    assert drums.sent[0].velocity == 127
+
+
+def test_split_port_main_velocity_duck():
+    main, drums = FakePort(), FakePort()
+    port = SplitPort(main, drums, main_vel_scale=0.5)
+    port.send(event_to_message(MidiEvent(0, "on", 1, 60, 80)))   # pad -> ducked
+    port.send(event_to_message(MidiEvent(0, "cc", 0, 41, 64)))   # CCs untouched
+    port.send(event_to_message(MidiEvent(0, "on", DRUM_CHANNEL, 36, 80)))  # drums untouched
+    assert main.sent[0].velocity == 40
+    assert main.sent[1].value == 64
+    assert drums.sent[0].velocity == 80
