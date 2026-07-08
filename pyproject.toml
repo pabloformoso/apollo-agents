@@ -67,10 +67,11 @@ youtube = [
 ]
 
 [tool.uv]
-# `uv run` syncs default groups only — without this, a plain `uv run`
-# uninstalls the synth deps (mido/rtmidi/soundcard) and the generative
-# scripts break for anyone not typing --group synth.
-default-groups = ["dev", "synth"]
+# `uv run` syncs default groups only — anything not listed here gets
+# UNINSTALLED by a plain `uv run`, which kept breaking either the
+# generative scripts (synth) or the web test suite (web) depending on
+# who synced last. This project's local dev = all three.
+default-groups = ["dev", "synth", "web"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
