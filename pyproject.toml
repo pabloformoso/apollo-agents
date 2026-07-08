@@ -66,5 +66,11 @@ youtube = [
     "google-auth-oauthlib>=1.0.0",
 ]
 
+[tool.uv]
+# `uv run` syncs default groups only — without this, a plain `uv run`
+# uninstalls the synth deps (mido/rtmidi/soundcard) and the generative
+# scripts break for anyone not typing --group synth.
+default-groups = ["dev", "synth"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
