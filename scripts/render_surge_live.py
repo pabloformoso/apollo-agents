@@ -98,6 +98,11 @@ def main() -> int:
     parser.add_argument("--port", default="loopMIDI Port")
     parser.add_argument("--drum-port", default="loopMIDI Drums")
     parser.add_argument("--speaker", default=None, help="substring of the output device to capture")
+    parser.add_argument("--drum-boost", type=float, default=1.0,
+                        help="drum velocity scale (note: Drum One ignores velocity)")
+    parser.add_argument("--pad-duck", type=float, default=0.55,
+                        help="melodic-port velocity scale — EP/pad patches ARE velocity-"
+                             "sensitive, so ducking them rebalances the mix toward drums")
     parser.add_argument("--llm", action="store_true")
     parser.add_argument("-o", "--out", default=None)
     args = parser.parse_args()
@@ -144,7 +149,8 @@ def main() -> int:
 
         spike_cmd = [sys.executable, "scripts/spike_generative.py",
                      "--genre", args.genre, "--phrases", str(args.phrases),
-                     "--seed", str(args.seed), "--drum-port", args.drum_port.split()[-1]]
+                     "--seed", str(args.seed), "--drum-port", args.drum_port.split()[-1],
+                     "--drum-boost", str(args.drum_boost), "--pad-duck", str(args.pad_duck)]
         if not args.llm:
             spike_cmd.append("--no-llm")
         chunks = []
