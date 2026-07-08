@@ -29,7 +29,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from agent.generative.genres import GENRE_PACKS
 from agent.generative.patches import PATCH_REGISTRY
 
-DEFAULT_CLI = Path.home() / "AppData/Local/SurgeCLI/surge-xt-cli.exe"
+# Candidate CLI locations, most-specific first. ProgramData is the
+# machine-global copy (works from elevated/other-user terminals whose
+# Path.home() is not C:\Users\pablo).
+CLI_CANDIDATES = [
+    Path(r"C:\ProgramData\SurgeCLI\surge-xt-cli.exe"),
+    Path.home() / "AppData/Local/SurgeCLI/surge-xt-cli.exe",
+    Path(r"C:\Users\pablo\AppData\Local\SurgeCLI\surge-xt-cli.exe"),
+    Path(r"C:\Program Files\Surge Synth Team\Surge XT\surge-xt-cli.exe"),
+]
 PATCH_DIRS = [Path(r"C:\ProgramData\Surge XT\patches_factory"),
               Path(r"C:\ProgramData\Surge XT\patches_3rdparty")]
 
@@ -44,11 +52,17 @@ def resolve_patch_path(name: str) -> Path | None:
 
 
 def cli_path() -> Path:
-    path = Path(os.environ.get("SURGE_XT_CLI", DEFAULT_CLI))
-    if not path.exists():
-        raise SystemExit(f"surge-xt-cli not found at {path} — set SURGE_XT_CLI "
-                         "(the portable Surge zip ships it)")
-    return path
+    env = os.environ.get("SURGE_XT_CLI")
+    candidates = ([Path(env)] if env else []) + CLI_CANDIDATES
+    for path in candidates:
+        if path.exists():
+            return path
+    tried = "\n  ".join(str(p) for p in candidates)
+    raise SystemExit(
+        f"surge-xt-cli not found. Tried:\n  {tried}\n"
+        f"(Path.home() here = {Path.home()}) — set SURGE_XT_CLI to the exe; "
+        "the portable Surge zip ships it."
+    )
 
 
 def _cli_devices(cli: Path) -> str:
