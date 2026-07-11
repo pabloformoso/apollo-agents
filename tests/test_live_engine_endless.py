@@ -15,6 +15,7 @@ import pytest
 from agent.live_engine import (
     ENDLESS_APPEND_CAP,
     ENDLESS_GRACE_SEC,
+    ENDLESS_NO_REPEAT_WINDOW,
     ENDLESS_WARNING,
     PLAYLIST_RUNNING_LOW,
     SESSION_ENDED,
@@ -23,6 +24,7 @@ from agent.live_engine import (
     LiveEngineBrowser,
     _autoplay_pick,
     _camelot_distance,
+    _recent_window_ids,
 )
 
 
@@ -662,6 +664,102 @@ def test_inflight_extend_recycles_played_tracks_when_catalog_exhausted(monkeypat
     assert len(engine.playlist) == 3
     assert SESSION_ENDED not in rec.types()
     assert ENDLESS_WARNING not in rec.types()
+
+
+# ---------------------------------------------------------------------------
+# v3.6.1 — no-repeat window on the recycle path
+# ---------------------------------------------------------------------------
+
+def test_recent_window_ids_takes_last_n_up_to_current():
+    playlist = [_track(x) for x in "abcde"]
+    assert _recent_window_ids(playlist, 4, 3) == ["c", "d", "e"]
+    # Window wider than what's been played → everything so far.
+    assert _recent_window_ids(playlist, 1, 20) == ["a", "b"]
+    # Tracks after idx haven't played and must not count.
+    assert _recent_window_ids(playlist, 0, 20) == ["a"]
+
+
+def test_no_repeat_window_default_is_about_an_hour():
+    # 20 tracks ≈ 1 h of music at typical (~3 min) track lengths.
+    assert ENDLESS_NO_REPEAT_WINDOW == 20
+
+
+def test_no_repeat_window_overridable_via_env_var(monkeypatch):
+    monkeypatch.setenv("APOLLO_ENDLESS_NO_REPEAT_WINDOW", "5")
+    import importlib
+
+    import agent.live_engine as engine_mod
+    importlib.reload(engine_mod)
+    try:
+        assert engine_mod.ENDLESS_NO_REPEAT_WINDOW == 5
+    finally:
+        monkeypatch.delenv("APOLLO_ENDLESS_NO_REPEAT_WINDOW", raising=False)
+        importlib.reload(engine_mod)
+
+
+def test_autoplay_pick_recycle_skips_recent_window():
+    """Recycling must rotate the catalog: a track heard within the
+    recent window loses to one heard longer ago, even when the recent
+    one ranks better on (Δbpm, camelot)."""
+    catalog = [
+        _track("old", genre_folder="lofi - ambient", bpm=90),   # worse Δbpm
+        _track("fresh", genre_folder="lofi - ambient", bpm=77),  # better Δbpm
+    ]
+    current = _track("playing", genre_folder="lofi - ambient", bpm=76)
+    exclude = {"old", "fresh", "playing"}  # catalog exhausted → recycle tier
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", exclude,
+        allow_repeats=True, recent_ids=["fresh", "playing"],
+    )
+    assert pick is not None and pick["id"] == "old"
+
+
+def test_autoplay_pick_recycle_degrades_when_window_covers_catalog():
+    """A window wider than the in-genre catalog must fall back to the
+    v2.6.0 rule (avoid back-to-back only) instead of ending the set."""
+    catalog = [
+        _track("a", genre_folder="lofi - ambient", bpm=77),
+        _track("b", genre_folder="lofi - ambient", bpm=90),
+    ]
+    current = _track("b", genre_folder="lofi - ambient", bpm=90)
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", {"a", "b"},
+        allow_repeats=True, recent_ids=["a", "b"],
+    )
+    # Everything is "recent" → degrade: anything but the current track.
+    assert pick is not None and pick["id"] == "a"
+
+
+def test_engine_recycle_respects_no_repeat_window(monkeypatch):
+    """Engine-level: with the window monkeypatched to 2, the in-flight
+    recycle must skip the two most recently played tracks and reach
+    back for the older one."""
+    monkeypatch.setattr("agent.live_engine.ENDLESS_NO_REPEAT_WINDOW", 2)
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    # 'c' is playing; recent window (2) = [b, c] → must pick 'a' even
+    # though 'b' is the closer BPM match to 'c'.
+    engine.play([
+        _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=70),
+        _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=79),
+        _track("c", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+    ])
+    engine._endless_mode = True
+    engine._idx = 2
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [
+            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=70),
+            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=79),
+            _track("c", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+        ],
+    )
+    engine.report_playback_pos(track_id="c", current_time=35.0)  # poke
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    rec.events.clear()
+    engine.report_playback_pos(track_id="c", current_time=50.0)
+    assert engine.playlist[-1]["id"] == "a"
+    assert SESSION_ENDED not in rec.types()
 
 
 def test_track_over_bypasses_grace_and_extends_immediately(monkeypatch):

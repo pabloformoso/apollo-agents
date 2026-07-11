@@ -132,6 +132,14 @@ def _env_int(name: str, default: int) -> int:
 
 ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 
+# v3.6.1 — no-repeat window for the recycle path. Once endless mode has
+# exhausted the genre and starts recycling played tracks, skip anything
+# heard within the last N tracks (20 ≈ an hour of music at typical track
+# lengths). Degrades gracefully when the window is wider than the
+# in-genre catalog — keeping the stream alive beats strict no-repeat.
+# Override via APOLLO_ENDLESS_NO_REPEAT_WINDOW.
+ENDLESS_NO_REPEAT_WINDOW = _env_int("APOLLO_ENDLESS_NO_REPEAT_WINDOW", 20)
+
 # ---------------------------------------------------------------------------
 # Audio constants
 # ---------------------------------------------------------------------------
@@ -489,6 +497,9 @@ class LiveEngineLocal:
         with self._lock:
             catalog = list(self._catalog_cache)
             exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
         # Pull genre from the current track (catalog entries are tagged
         # with ``genre_folder``); falling back to the loose ``genre``
         # field keeps the path resilient against legacy entries.
@@ -496,7 +507,10 @@ class LiveEngineLocal:
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
         if pick is None:
             self._emit(
                 ENDLESS_WARNING,
@@ -1607,6 +1621,9 @@ class LiveEngineBrowser:
         catalog = _load_catalog()
         with self._lock:
             exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
         genre = (
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
@@ -1618,7 +1635,10 @@ class LiveEngineBrowser:
             f"exclude_size={len(exclude)}",
             flush=True,
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
         if pick is None:
             print(
                 f"[engine _maybe_end_or_extend] DECISION: _autoplay_pick returned None — "
@@ -1678,12 +1698,18 @@ class LiveEngineBrowser:
         with self._lock:
             self._extend_attempted = True
             exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
         catalog = _load_catalog()
         genre = (
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
         print(
             f"[engine _try_endless_extend_inflight] genre={genre!r} "
             f"catalog_size={len(catalog)} exclude_size={len(exclude)} "
@@ -2089,6 +2115,17 @@ def _camelot_distance(a: str | None, b: str | None) -> float:
     return float(cyclic)
 
 
+def _recent_window_ids(playlist: list[dict], idx: int, window: int) -> list[str]:
+    """Ids of the last ``window`` tracks played, up to and including ``idx``.
+
+    Shared by the three endless-extension call sites so they all hand
+    ``_autoplay_pick`` the same notion of "recently heard". Caller holds
+    whatever lock guards ``playlist``.
+    """
+    lo = max(0, idx + 1 - window)
+    return [t["id"] for t in playlist[lo: idx + 1] if t.get("id")]
+
+
 def _autoplay_pick(
     current_track: dict | None,
     catalog: list[dict],
@@ -2096,6 +2133,7 @@ def _autoplay_pick(
     exclude_ids: set[str],
     *,
     allow_repeats: bool = False,
+    recent_ids: list[str] | None = None,
 ) -> dict | None:
     """Choose the best in-genre continuation track.
 
@@ -2107,9 +2145,14 @@ def _autoplay_pick(
     nothing matches.
 
     When ``allow_repeats=True`` and the exclude-filtered candidate set
-    is empty, recycle from the full in-genre catalog excluding only the
-    track currently playing — this is what makes a true 24/7 endless
-    stream possible once a small catalog has been fully cycled.
+    is empty, recycle from the full in-genre catalog — this is what
+    makes a true 24/7 endless stream possible once a small catalog has
+    been fully cycled. Recycling avoids ``recent_ids`` (v3.6.1 — the
+    last ``ENDLESS_NO_REPEAT_WINDOW`` tracks played, ~1 h of music) so
+    a long stream rotates the catalog instead of ping-ponging between
+    the two most compatible tracks. If the window is wider than the
+    in-genre catalog, it degrades to only avoiding the currently
+    playing track: keeping the stream alive beats strict no-repeat.
 
     Pure / module-level so the engine watchdog can call it without
     touching ``self``, and so tests can exercise it without spinning up
@@ -2131,13 +2174,23 @@ def _autoplay_pick(
         if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
     ]
     if not candidates and allow_repeats:
-        # Endless mode: catalog exhausted for this genre. Recycle any
-        # in-genre track that isn't the one currently playing so the
-        # stream stays alive — back-to-back repeats are still avoided.
+        # Endless mode: catalog exhausted for this genre. Recycle,
+        # skipping anything heard in the recent window (plus the track
+        # currently playing, in case the caller passed no window).
+        recent = set(recent_ids or ())
+        recent.add(cur_id)
         candidates = [
             t for t in catalog
-            if t.get("id") and t["id"] != cur_id and in_genre(t)
+            if t.get("id") and t["id"] not in recent and in_genre(t)
         ]
+        if not candidates:
+            # Window wider than the in-genre catalog — degrade to the
+            # v2.6.0 rule (avoid back-to-back only) so the stream
+            # survives tiny catalogs.
+            candidates = [
+                t for t in catalog
+                if t.get("id") and t["id"] != cur_id and in_genre(t)
+            ]
     if not candidates:
         return None
     candidates.sort(
