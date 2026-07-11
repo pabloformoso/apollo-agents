@@ -1128,6 +1128,39 @@ async def live_session_ws(
 
     phase_task = asyncio.create_task(run_phase())
 
+    # ── v3.6.3: server-side stall watchdog ─────────────────────────────
+    # The browser engine is ping-driven; if the operator tab freezes
+    # (Chrome Energy Saver) or a deck never starts, no ping ever crosses
+    # a threshold again and the session wedges in silence (observed live
+    # 2026-07-11). Poll the engine's stall check so the backend can
+    # synthesise the missing track_ended and keep the set moving — any
+    # attached OBS viewer follows the resulting load command and the
+    # stream stays audible. Module attribute lookups (not from-imports)
+    # so tests can monkeypatch the cadence/margin.
+    import agent.live_engine as live_engine_mod  # noqa: PLC0415
+
+    async def run_stall_watchdog() -> None:
+        while True:
+            await asyncio.sleep(live_engine_mod.LIVE_STALL_CHECK_SEC)
+            try:
+                # to_thread: a forced advance can run the endless
+                # fallback, which reads tracks.json from disk.
+                forced = await asyncio.to_thread(engine.check_stall)
+            except Exception as exc:  # noqa: BLE001 — watchdog must outlive hiccups
+                print(
+                    f"[live-ws {session_id}] check_stall failed: {exc}",
+                    flush=True,
+                )
+                continue
+            if forced:
+                print(
+                    f"[live-ws {session_id}] stall watchdog forced advance "
+                    f"past {forced!r}",
+                    flush=True,
+                )
+
+    stall_task = asyncio.create_task(run_stall_watchdog())
+
     # ── v2.7.2: YouTube Live Chat ingest (session-scoped) ──────────────
     # The poller now lives in ``youtube_runtime`` keyed by
     # (user_id, session_id) — one poller per session regardless of how
@@ -1328,6 +1361,12 @@ async def live_session_ws(
             phase_task.cancel()
             try:
                 await phase_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if not stall_task.done():
+            stall_task.cancel()
+            try:
+                await stall_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         # v2.7.2: detach from the session-scoped YT runtime. If we were

@@ -132,6 +132,21 @@ def _env_int(name: str, default: int) -> int:
 
 ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 
+# v3.6.3 — server-side stall watchdog for the browser engine. The
+# engine is ping-driven; a frozen operator tab (Chrome Energy Saver /
+# Page Lifecycle freeze) stops pinging mid-track and nothing ever
+# advances — observed live 2026-07-11: a 3.5 h endless set died in
+# silence mid-'Slow Oxide' with a perfectly healthy backend. The live
+# WS polls ``LiveEngineBrowser.check_stall()`` every
+# LIVE_STALL_CHECK_SEC; the engine force-advances once wall clock is
+# past the current track's expected end + LIVE_STALL_MARGIN_SEC AND the
+# reported position hasn't moved for that same margin. With an OBS
+# viewer attached (which follows engine commands and is never frozen
+# while rendered), the stream keeps playing even with the operator tab
+# frozen.
+LIVE_STALL_CHECK_SEC = _env_int("APOLLO_LIVE_STALL_CHECK_SEC", 15)
+LIVE_STALL_MARGIN_SEC = _env_int("APOLLO_LIVE_STALL_MARGIN_SEC", 45)
+
 # v3.6.1 — no-repeat window for the recycle path. Once endless mode has
 # exhausted the genre and starts recycling played tracks, skip anything
 # heard within the last N tracks (20 ≈ an hour of music at typical track
@@ -1134,6 +1149,14 @@ class LiveEngineBrowser:
         # re-armed on every track advance.
         self._extend_attempted: bool = False
 
+        # v3.6.3 — stall-watchdog bookkeeping. ``_track_started_mono``
+        # anchors the wall-clock expectation for the current track;
+        # ``_last_pos_change_mono`` records the last time the reported
+        # position actually MOVED (not merely arrived — a stuck deck
+        # pings a frozen position forever).
+        self._track_started_mono: float | None = None
+        self._last_pos_change_mono: float | None = None
+
         # v3.0 — phase-lock plan for the UPCOMING transition. Rebuilt
         # every time the current track changes (in ``play``,
         # ``_emit_next_track``, ``_begin_crossfade``, ``skip_track``).
@@ -1185,6 +1208,8 @@ class LiveEngineBrowser:
             self._low_water_at = None
             self._endless_appended = 0
             self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
 
         first = self.playlist[0]
         # v3.0 — build the phase-lock plan for the first → second
@@ -1233,7 +1258,17 @@ class LiveEngineBrowser:
             # right after skip_track has flipped self._idx).
             if track_id and current_track.get("id") and track_id != current_track.get("id"):
                 return
+            prev_pos = self._reported_pos_sec
             self._reported_pos_sec = float(current_time)
+            # v3.6.3 — stall-watchdog signal: only count the position as
+            # "alive" when it actually MOVES. A deck that failed to
+            # decode keeps pinging a frozen ~0; a frozen tab pings
+            # nothing at all — both leave this timestamp stale.
+            if (
+                self._last_pos_change_mono is None
+                or abs(self._reported_pos_sec - prev_pos) > 0.5
+            ):
+                self._last_pos_change_mono = time.monotonic()
             cf_sec = self._cf_point_seconds(current_track)
             secs_to_cf = cf_sec - self._reported_pos_sec
             approached = self._approached
@@ -1402,6 +1437,8 @@ class LiveEngineBrowser:
             self._reported_pos_sec = 0.0
             self._state = "playing"
             self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
 
         # v3.0 — rebuild the phase-lock plan for the new
         # (current → next-next) pair so the next ``approaching_crossfade``
@@ -1465,6 +1502,8 @@ class LiveEngineBrowser:
             self._reported_pos_sec = 0.0
             self._state = "playing"
             self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
             new_track = self.playlist[next_idx]
         # v3.0 — rebuild for the (skipped-to → next-after-that) pair.
         self._rebuild_transition_plan()
@@ -1723,6 +1762,57 @@ class LiveEngineBrowser:
         self.append_track(pick)
         return True
 
+    def check_stall(self) -> str | None:
+        """Force-advance when the browser stopped driving playback (v3.6.3).
+
+        The browser engine has no clock of its own — every transition is
+        triggered by ``playback_pos`` pings or the browser's ``ended``
+        event. A frozen operator tab (Chrome Energy Saver) or a deck
+        that never started (decode failure) therefore wedges the whole
+        session in silence with a healthy backend. The live WS calls
+        this every ``LIVE_STALL_CHECK_SEC``.
+
+        Fires only when BOTH hold:
+        - wall clock is past the current track's expected end
+          (``_track_started_mono`` + duration) + ``LIVE_STALL_MARGIN_SEC``
+        - the reported position hasn't MOVED for that same margin
+          (an ``extend_track``-stretched set keeps moving, so it never
+          trips this).
+
+        On fire it synthesises the ``track_ended`` the browser never
+        sent — the normal advance/endless-extend machinery does the
+        rest, and any attached viewer (OBS) picks up the resulting
+        ``load`` command and keeps the stream audible. Returns the
+        stalled track id when it forced an advance, else None.
+        """
+        with self._lock:
+            if self._state != "playing" or self._idx >= len(self.playlist):
+                return None
+            track = self.playlist[self._idx]
+            started = self._track_started_mono
+            last_change = self._last_pos_change_mono
+            duration = float(track.get("duration_sec") or 0.0)
+        if started is None:
+            return None
+        now = time.monotonic()
+        # Unknown/zero duration (bad catalog row) → generous fixed
+        # ceiling so one malformed entry can't disable the watchdog.
+        expected_end = started + (duration if duration > 0 else 600.0)
+        if now < expected_end + LIVE_STALL_MARGIN_SEC:
+            return None
+        if last_change is not None and (now - last_change) < LIVE_STALL_MARGIN_SEC:
+            return None
+        tid = str(track.get("id") or "")
+        print(
+            f"[engine check_stall] no playback progress on {tid!r} "
+            f"({(track.get('display_name') or '?')[:40]!r}) for "
+            f"{now - (last_change or started):.0f}s and "
+            f"{now - expected_end:.0f}s past expected end — forcing advance",
+            flush=True,
+        )
+        self.report_track_ended(tid)
+        return tid
+
     def set_crossfade_point(self, position_sec: float) -> str:
         """Manually set where the crossfade begins in the current track."""
         with self._lock:
@@ -1807,6 +1897,8 @@ class LiveEngineBrowser:
             self._reported_pos_sec = 0.0
             self._state = "playing"
             self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
         # Rebuild for the (to_track → after_to_track) pair so the next
         # transition's anchors are ready by the time the new current
         # track's ``approaching_crossfade`` fires.
