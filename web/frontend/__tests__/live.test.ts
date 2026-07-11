@@ -1258,6 +1258,83 @@ describe("useLiveSession", () => {
     expect(userMsgs[0].text).toBe("hi");
   });
 
+  // ── v3.6.2 — late viewer-flag flip must abandon the primary socket ─────
+  it("reconnects to the /viewer path when the viewer flag flips after mount", async () => {
+    // The /live page resolves ?viewer=1 in a post-mount effect, so the
+    // hook can mount with viewer=false and flip a tick later. Pre-fix
+    // the WS effect ignored the flip (viewerMode wasn't a dep) and an
+    // OBS Browser Source stayed connected as PRIMARY — its eventual
+    // disconnect tore the whole session down (finally → engine.stop()).
+    const { rerender } = renderHook(
+      ({ viewer }: { viewer: boolean }) =>
+        useLiveSession("sid-late-viewer", { viewer }),
+      { initialProps: { viewer: false } },
+    );
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain("/live/stream");
+
+    rerender({ viewer: true });
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-late-viewer/live/viewer",
+    );
+    expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
+  });
+
+  // ── v3.6.2 — unplayable track must not strand the session ──────────────
+  it("sends a synthetic track_ended when the buffer fetch 404s", async () => {
+    // A stale catalog id (session created before a --build-catalog
+    // rebuild) 404s on the stream fetch. The deck never starts, so no
+    // natural 'ended' can fire — the hook must report track_ended
+    // itself so the engine skips to the next (playable) track.
+    // Match by URL (not call order) — the hook may fetch other things.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: unknown) =>
+        String(url).includes("/api/tracks/ghost-1/stream")
+          ? { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }
+          : { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) },
+    );
+    renderHook(() => useLiveSession("sid-404"));
+    await flushOpen();
+    const ghost = { id: "ghost-1", display_name: "Deleted" };
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: ghost,
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: ghost,
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
+    expect(sent).toContainEqual({ type: "track_ended", track_id: "ghost-1" });
+  });
+
+  it("does NOT send track_ended on buffer 404 in viewer mode", async () => {
+    // Viewers are read-only mirrors — a viewer's failed fetch must not
+    // advance the operator's engine.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: unknown) =>
+        String(url).includes("/api/tracks/ghost-2/stream")
+          ? { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }
+          : { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) },
+    );
+    renderHook(() => useLiveSession("sid-404-viewer", { viewer: true }));
+    await flushOpen();
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: { id: "ghost-2", display_name: "Deleted" },
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    expect(FakeWebSocket.lastInstance!.sent).toEqual([]);
+  });
+
   // ── v2.7.3 — WS auto-reconnect with exponential backoff ────────────────
   // Backoff schedule mirrors the prod constant in lib/live.ts:
   // 1s / 2s / 4s / 8s / 15s, 5 attempts max.

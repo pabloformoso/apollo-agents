@@ -855,6 +855,24 @@ export function useLiveSession(
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
         console.warn("[live] decodeAudioData failed on load:", err);
+        // v3.6.2 — an unplayable track (404 from a stale catalog id,
+        // decode error, network drop) must not strand the session: the
+        // deck never starts, so no natural ``ended`` ever fires and the
+        // engine waits forever on a track that will never play. Report
+        // a synthetic track_ended so LiveEngineBrowser skips to the
+        // next track (or endless-extends past it).
+        if (!viewerModeRef.current) {
+          const ws = wsRef.current;
+          if (ws && ws.readyState === WebSocket.OPEN && track.id) {
+            try {
+              ws.send(
+                JSON.stringify({ type: "track_ended", track_id: track.id }),
+              );
+            } catch {
+              /* ignore — the operator can still skip manually */
+            }
+          }
+        }
         return;
       }
 
@@ -1553,7 +1571,14 @@ export function useLiveSession(
     // by the rules of React they MUST NOT appear in the dep array.
     // ``reconnectKey`` IS a dep — bumping it via ``reconnectNow`` is the
     // signal to re-run this effect after the user clicks Reconnect.
-  }, [sessionId, reconnectKey]);
+    // ``viewerMode`` IS a dep (v3.6.2) — the /live page resolves
+    // ``?viewer=1`` in a post-mount effect, so the first connect can
+    // race it and land on the PRIMARY endpoint. A wrongly-primary
+    // OBS Browser Source displaces the operator and its disconnect
+    // tears the whole session down (``finally`` → ``engine.stop()``).
+    // Re-running the effect on the flip closes the wrong socket and
+    // reconnects to ``/live/viewer``.
+  }, [sessionId, reconnectKey, viewerMode]);
 
   // v2.7.3 — manual "try again" trigger surfaced to the UI. Clears the
   // exhausted flag so the banner doesn't render twice during the
