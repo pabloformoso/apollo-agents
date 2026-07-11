@@ -854,6 +854,13 @@ export function useLiveSession(
       try {
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
+        // NOTE (v3.6.2): a failed load leaves the deck INERT by design
+        // for now — the whole E2E substrate drives the UI against
+        // 404ing mock streams and relies on that. Stale-playlist 404s
+        // are prevented upstream (the live WS validates the playlist
+        // against the catalog before the engine starts). Turning this
+        // into a skip (synthetic track_ended) needs playable E2E audio
+        // first — tracked as follow-up.
         console.warn("[live] decodeAudioData failed on load:", err);
         return;
       }
@@ -1553,7 +1560,14 @@ export function useLiveSession(
     // by the rules of React they MUST NOT appear in the dep array.
     // ``reconnectKey`` IS a dep — bumping it via ``reconnectNow`` is the
     // signal to re-run this effect after the user clicks Reconnect.
-  }, [sessionId, reconnectKey]);
+    // ``viewerMode`` IS a dep (v3.6.2) — the /live page resolves
+    // ``?viewer=1`` in a post-mount effect, so the first connect can
+    // race it and land on the PRIMARY endpoint. A wrongly-primary
+    // OBS Browser Source displaces the operator and its disconnect
+    // tears the whole session down (``finally`` → ``engine.stop()``).
+    // Re-running the effect on the flip closes the wrong socket and
+    // reconnects to ``/live/viewer``.
+  }, [sessionId, reconnectKey, viewerMode]);
 
   // v2.7.3 — manual "try again" trigger surfaced to the UI. Clears the
   // exhausted flag so the banner doesn't render twice during the

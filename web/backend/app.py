@@ -981,6 +981,40 @@ async def live_session_ws(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # v3.6.2 — drop playlist entries whose id no longer exists in the
+    # catalog. Sessions created before a ``--build-catalog`` rebuild
+    # keep the OLD track ids in their stored playlist; the browser's
+    # buffer fetch then 404s on the first stale track and the whole
+    # live session sits in silence with no recovery path (found live
+    # 2026-07-11: a May session opened for a stream referenced deleted
+    # ``LoFi-*`` files). Filtering here keeps the engine, the frontend
+    # deck, and the ``/api/tracks/{id}/stream`` endpoint consistent —
+    # they all resolve against the same ``pipeline.load_catalog``.
+    try:
+        catalog_tracks, _ = await asyncio.to_thread(pipeline.load_catalog, None)
+        catalog_ids = {t.get("id") for t in catalog_tracks if t.get("id")}
+    except pipeline.CatalogUnavailable:
+        catalog_ids = None  # no catalog to validate against — let it ride
+    if catalog_ids is not None:
+        fresh = [t for t in playlist if t.get("id") in catalog_ids]
+        dropped = len(playlist) - len(fresh)
+        if dropped:
+            print(
+                f"[live-ws {session_id}] dropped {dropped} stale playlist "
+                f"track(s) missing from the current catalog "
+                f"({len(fresh)} remain)",
+                flush=True,
+            )
+            playlist = fresh
+    if not playlist:
+        print(
+            f"[live-ws {session_id}] every playlist track is stale — "
+            "closing; regenerate the session against the current catalog",
+            flush=True,
+        )
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     # v2.7.2 — clean displacement of a prior primary on the same slot.
     # Without this, a refresh (or a second tab landing on /live without
     # ?viewer=1) silently overwrites the dict entry and the existing

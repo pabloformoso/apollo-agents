@@ -86,4 +86,26 @@ def mock_pipeline(monkeypatch):
     monkeypatch.setattr(pipeline, "load_memory", fakes.fake_memory)
     monkeypatch.setattr(pipeline, "write_session_record", fakes.fake_write)
     monkeypatch.setattr(pipeline, "check_catalog", fakes.fake_check_catalog)
+
+    # v3.6.2 — the live WS handler validates the session playlist
+    # against ``load_catalog`` before starting the engine. Tests seed
+    # playlists with ids t1/t2 (see ``_seed_playlist``), so the fake
+    # catalog must contain them; without this stub the handler would
+    # read the developer's REAL tracks.json (or CatalogUnavailable in
+    # CI) and the seeded tracks would be dropped as stale.
+    def fake_load_catalog(genre=None):
+        tracks = [
+            {"id": "t1", "display_name": "Track One", "bpm": 124.0,
+             "camelot_key": "8A", "duration_sec": 30.0, "hot_cues": [],
+             "genre_folder": "techno"},
+            {"id": "t2", "display_name": "Track Two", "bpm": 126.0,
+             "camelot_key": "9A", "duration_sec": 30.0, "hot_cues": [],
+             "genre_folder": "techno"},
+            {"id": "t3", "display_name": "Track Three", "bpm": 125.0,
+             "camelot_key": "8B", "duration_sec": 30.0, "hot_cues": [],
+             "genre_folder": "techno"},
+        ]
+        return tracks, ["techno"]
+
+    monkeypatch.setattr(pipeline, "load_catalog", fake_load_catalog)
     return pipeline
