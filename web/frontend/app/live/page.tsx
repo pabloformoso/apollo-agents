@@ -100,12 +100,20 @@ export default function LivePage() {
   // no-op in the underlying hook. We only hide two buttons here:
   // ``Quit`` (viewers can't end the session) and the OBS feed copy
   // (would just produce a self-referential URL).
-  const [isViewer, setIsViewer] = useState(false);
+  // v3.6.2 — three-state: ``null`` = not yet resolved (first render,
+  // before the mount effect reads the URL). The WS hook must NOT
+  // connect until this is known: a ``?viewer=1`` page whose first
+  // connect races the flag lands on the PRIMARY ``/live/stream``
+  // endpoint, displaces the operator tab, and its own teardown then
+  // stops the engine (``finally`` → ``engine.stop()``) — an OBS
+  // Browser Source that silently kills the session it's mirroring.
+  const [viewerFlag, setViewerFlag] = useState<boolean | null>(null);
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
-    setIsViewer(params.get("viewer") === "1");
+    setViewerFlag(params.get("viewer") === "1");
   }, []);
+  const isViewer = viewerFlag === true;
 
   // Read the active mode from the URL hash on mount + sync future
   // changes back to the hash so reloads / "Show controls" navigation
@@ -122,7 +130,11 @@ export default function LivePage() {
     }
   }, [mode]);
 
-  const live = useLiveSession(sessionId, { viewer: isViewer });
+  // Hold the WS back (sessionId=null) until the viewer flag is
+  // resolved — see the ``viewerFlag`` comment above.
+  const live = useLiveSession(viewerFlag === null ? null : sessionId, {
+    viewer: isViewer,
+  });
 
   useEffect(() => {
     if (!sessionId) return;

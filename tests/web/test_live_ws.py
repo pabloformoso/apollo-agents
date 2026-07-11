@@ -312,3 +312,115 @@ def test_live_ws_set_endless_mode_survives_backend_restart(
         "endless_mode flag must survive a uvicorn reload — pre-fix this "
         "was False because the WS handler skipped store.save()."
     )
+
+
+# ---------------------------------------------------------------------------
+# v3.6.2 — stale-playlist validation at live start
+# ---------------------------------------------------------------------------
+
+def _ghost(track_id: str) -> dict:
+    """A playlist entry whose id does NOT exist in the (fake) catalog —
+    simulates a session created before a ``--build-catalog`` rebuild."""
+    return {
+        "id": track_id,
+        "display_name": f"Deleted {track_id}",
+        "bpm": 120.0,
+        "camelot_key": "8A",
+        "duration_sec": 30.0,
+        "hot_cues": [],
+    }
+
+
+def test_live_ws_drops_stale_playlist_tracks(auth_client, auth_token, mock_pipeline):
+    """Tracks missing from the current catalog are filtered out before
+    the engine starts. Found live 2026-07-11: a stale session's first
+    track 404'd in the browser and the whole set sat in silence."""
+    from web.backend.session_store import store
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    s = store.get(sid)
+    s.context_variables["playlist"] = [
+        _ghost("ghost-1"),
+        {
+            "id": "t1",
+            "display_name": "Track One",
+            "bpm": 124.0,
+            "camelot_key": "8A",
+            "duration_sec": 30.0,
+            "hot_cues": [],
+        },
+        _ghost("ghost-2"),
+        {
+            "id": "t2",
+            "display_name": "Track Two",
+            "bpm": 126.0,
+            "camelot_key": "9A",
+            "duration_sec": 30.0,
+            "hot_cues": [],
+        },
+    ]
+    store.save(s)
+
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        first = ws.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws.receive_json()
+        assert first["type"] == "live_state"
+        ids = [t["id"] for t in first["data"]["playlist"]]
+        assert ids == ["t1", "t2"], "stale ids must be dropped, order kept"
+
+        # The engine must start on the first LIVE track, not the ghost.
+        for _ in range(8):
+            ev = ws.receive_json()
+            if ev.get("type") == "track_started":
+                assert ev["track"]["id"] == "t1"
+                break
+        else:
+            raise AssertionError("track_started never arrived")
+
+
+def test_live_ws_closes_when_every_track_is_stale(
+    auth_client, auth_token, mock_pipeline
+):
+    """A playlist that is 100% stale is indistinguishable from an empty
+    one — close the socket instead of starting an engine that can only
+    404 its way through dead tracks."""
+    import pytest as _pytest
+    from starlette.websockets import WebSocketDisconnect as _WsDisconnect
+
+    from web.backend.session_store import store
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    s = store.get(sid)
+    s.context_variables["playlist"] = [_ghost("ghost-1"), _ghost("ghost-2")]
+    store.save(s)
+
+    with _pytest.raises(_WsDisconnect):
+        with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+            ws.receive_json()
+
+
+def test_live_ws_keeps_playlist_when_catalog_unavailable(
+    auth_client, auth_token, mock_pipeline, monkeypatch
+):
+    """No catalog to validate against (fresh checkout, CI) → let the
+    playlist through unchanged rather than nuking the session."""
+    from web.backend import pipeline as pl
+    from web.backend.session_store import store
+
+    def _raise(_genre=None):
+        raise pl.CatalogUnavailable("no catalog")
+
+    monkeypatch.setattr(pl, "load_catalog", _raise)
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    s = store.get(sid)
+    s.context_variables["playlist"] = [_ghost("ghost-1"), _ghost("ghost-2")]
+    store.save(s)
+
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        first = ws.receive_json()
+        while first.get("type") == "youtube_status":
+            first = ws.receive_json()
+        assert first["type"] == "live_state"
+        assert len(first["data"]["playlist"]) == 2

@@ -1258,6 +1258,63 @@ describe("useLiveSession", () => {
     expect(userMsgs[0].text).toBe("hi");
   });
 
+  // ── v3.6.2 — late viewer-flag flip must abandon the primary socket ─────
+  it("reconnects to the /viewer path when the viewer flag flips after mount", async () => {
+    // The /live page resolves ?viewer=1 in a post-mount effect, so the
+    // hook can mount with viewer=false and flip a tick later. Pre-fix
+    // the WS effect ignored the flip (viewerMode wasn't a dep) and an
+    // OBS Browser Source stayed connected as PRIMARY — its eventual
+    // disconnect tore the whole session down (finally → engine.stop()).
+    const { rerender } = renderHook(
+      ({ viewer }: { viewer: boolean }) =>
+        useLiveSession("sid-late-viewer", { viewer }),
+      { initialProps: { viewer: false } },
+    );
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain("/live/stream");
+
+    rerender({ viewer: true });
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-late-viewer/live/viewer",
+    );
+    expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
+  });
+
+  // ── v3.6.2 — a failed buffer load stays inert (E2E substrate contract) ──
+  it("does not send anything when the buffer fetch 404s", async () => {
+    // Deliberate: an unplayable track leaves the deck inert (warn only).
+    // Stale playlists are filtered server-side before the engine starts;
+    // the E2E suite drives the UI against 404ing mock streams and
+    // depends on the deck staying quiet. If this behavior changes,
+    // playable E2E audio must land first.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: unknown) =>
+        String(url).includes("/api/tracks/ghost-1/stream")
+          ? { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }
+          : { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) },
+    );
+    renderHook(() => useLiveSession("sid-404"));
+    await flushOpen();
+    const ghost = { id: "ghost-1", display_name: "Deleted" };
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: ghost,
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: ghost,
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
+    expect(
+      sent.filter((m: { type: string }) => m.type === "track_ended"),
+    ).toEqual([]);
+  });
+
   // ── v2.7.3 — WS auto-reconnect with exponential backoff ────────────────
   // Backoff schedule mirrors the prod constant in lib/live.ts:
   // 1s / 2s / 4s / 8s / 15s, 5 attempts max.
