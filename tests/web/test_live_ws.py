@@ -424,3 +424,59 @@ def test_live_ws_keeps_playlist_when_catalog_unavailable(
             first = ws.receive_json()
         assert first["type"] == "live_state"
         assert len(first["data"]["playlist"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# v3.6.3 — server-side stall watchdog (WS integration)
+# ---------------------------------------------------------------------------
+
+def test_stall_watchdog_forces_advance_when_pings_stop(
+    auth_client, auth_token, mock_pipeline, monkeypatch
+):
+    """No playback_pos pings ever arrive (frozen tab). The WS-side
+    watchdog must synthesise the advance: track_started for t2 shows up
+    without the client sending anything."""
+    import agent.live_engine as le
+
+    monkeypatch.setattr(le, "LIVE_STALL_CHECK_SEC", 0.05)
+    monkeypatch.setattr(le, "LIVE_STALL_MARGIN_SEC", 0)
+
+    from web.backend.session_store import store
+
+    sid = auth_client.post("/api/sessions").json()["id"]
+    s = store.get(sid)
+    s.context_variables["playlist"] = [
+        {
+            "id": "t1",
+            "display_name": "Track One",
+            "bpm": 124.0,
+            "camelot_key": "8A",
+            "duration_sec": 0.01,
+            "hot_cues": [],
+        },
+        {
+            "id": "t2",
+            "display_name": "Track Two",
+            "bpm": 126.0,
+            "camelot_key": "9A",
+            "duration_sec": 0.01,
+            "hot_cues": [],
+        },
+    ]
+    store.save(s)
+
+    with auth_client.websocket_connect(f"/ws/live/{sid}?token={auth_token}") as ws:
+        saw_t2 = False
+        # The watchdog fires within ~0.05 s; drain frames until the
+        # forced advance lands on t2 (session_ended terminates the drain
+        # defensively — it means the whole playlist stalled through).
+        for _ in range(30):
+            ev = ws.receive_json()
+            if ev.get("type") == "track_started" and (
+                (ev.get("track") or {}).get("id") == "t2"
+            ):
+                saw_t2 = True
+                break
+            if ev.get("type") == "session_ended":
+                break
+        assert saw_t2, "watchdog never forced the advance to t2"
