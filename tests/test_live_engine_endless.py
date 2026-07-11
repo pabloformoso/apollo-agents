@@ -15,6 +15,7 @@ import pytest
 from agent.live_engine import (
     ENDLESS_APPEND_CAP,
     ENDLESS_GRACE_SEC,
+    ENDLESS_NO_REPEAT_WINDOW,
     ENDLESS_WARNING,
     PLAYLIST_RUNNING_LOW,
     SESSION_ENDED,
@@ -23,6 +24,7 @@ from agent.live_engine import (
     LiveEngineBrowser,
     _autoplay_pick,
     _camelot_distance,
+    _recent_window_ids,
 )
 
 
@@ -530,3 +532,292 @@ def test_track_ended_with_endless_and_auto_pick_advances_naturally(monkeypatch):
     assert SESSION_ENDED not in types
     # New track is loaded as the current one.
     assert engine.playlist[engine._idx]["id"] == "next"
+
+
+# ---------------------------------------------------------------------------
+# v3.6 — the 2026-07-10 live deadlock regressions
+# ---------------------------------------------------------------------------
+
+def test_running_low_fires_while_last_track_plays():
+    """v2.6.0 nested the low-water poke inside the APPROACHING_CF block,
+    which required a next track — so the poke could never fire while
+    the LAST track played. Regression: single-track playlist, endless
+    ON, ping inside the warn window → PLAYLIST_RUNNING_LOW must fire."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60)])
+    engine._endless_mode = True
+    rec.events.clear()
+    # cf point = 60 - 12 - 5 = 43 s; 35 s in → secs_to_cf = 8 < 30.
+    engine.report_playback_pos(track_id="a", current_time=35.0)
+    assert PLAYLIST_RUNNING_LOW in rec.types()
+    # One-shot per low-water window.
+    n = rec.types().count(PLAYLIST_RUNNING_LOW)
+    engine.report_playback_pos(track_id="a", current_time=36.0)
+    assert rec.types().count(PLAYLIST_RUNNING_LOW) == n
+
+
+def test_running_low_refires_for_appended_tail_track(monkeypatch):
+    """The full 2026-07-10 death spiral: original playlist runs out, the
+    fallback appends a tail track — that tail track must RE-poke when
+    it approaches its own end, so extension keeps cascading instead of
+    dying one track after the original set."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60, bpm=76)])
+    engine._endless_mode = True
+    # Poke fires for 'a' (last track, no successor).
+    engine.report_playback_pos(track_id="a", current_time=35.0)
+    assert PLAYLIST_RUNNING_LOW in rec.types()
+    # LLM appends a continuation → low-water re-arms.
+    engine.append_track(_track("b", duration_sec=60, bpm=78))
+    rec.events.clear()
+    # Crossfade into 'b' at the cf point.
+    engine.report_playback_pos(track_id="a", current_time=43.5)
+    assert engine.playlist[engine._idx]["id"] == "b"
+    # 'b' (now the last track) approaches its end → poke must re-fire.
+    engine.report_playback_pos(track_id="b", current_time=35.0)
+    assert PLAYLIST_RUNNING_LOW in rec.types()
+
+
+def test_inflight_extend_appends_at_cf_point_and_crossfades(monkeypatch):
+    """Past the crossfade point on the last track with nothing queued,
+    endless mode must extend WHILE audio still plays (the deck dies at
+    the end and takes the ping stream with it). The next ping then
+    crossfades seamlessly into the appended track."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76)])
+    engine._endless_mode = True
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [_track("auto", genre_folder="lofi - ambient", bpm=78)],
+    )
+    # Poke at the approach edge starts the grace clock…
+    engine.report_playback_pos(track_id="a", current_time=35.0)
+    # …pretend the grace window has since elapsed.
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    rec.events.clear()
+    # Past the cf point (43 s) but before the end (60 s): extend now.
+    engine.report_playback_pos(track_id="a", current_time=50.0)
+    assert engine.playlist[-1]["id"] == "auto"
+    assert SESSION_ENDED not in rec.types()
+    assert TRACK_ENDED not in rec.types()  # 'a' is still playing
+    # Next ping sees the successor → seamless crossfade, no silence.
+    engine.report_playback_pos(track_id="a", current_time=50.3)
+    types = rec.types()
+    assert TRACK_STARTED in types
+    assert engine.playlist[engine._idx]["id"] == "auto"
+
+
+def test_inflight_extend_is_one_shot_per_track(monkeypatch):
+    """A fruitless catalog scan at the cf point must not repeat at ping
+    rate (~4 Hz) for the rest of the track."""
+    calls = {"n": 0}
+
+    def _counting_catalog():
+        calls["n"] += 1
+        return []
+
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60)])
+    engine._endless_mode = True
+    # Fire the poke at the approach edge FIRST (it owns _low_water_at),
+    # then age the clock past the grace window.
+    engine.report_playback_pos(track_id="a", current_time=35.0)
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    monkeypatch.setattr("agent.live_engine._load_catalog", _counting_catalog)
+    engine.report_playback_pos(track_id="a", current_time=50.0)
+    engine.report_playback_pos(track_id="a", current_time=51.0)
+    engine.report_playback_pos(track_id="a", current_time=52.0)
+    assert calls["n"] == 1
+
+
+def test_inflight_extend_recycles_played_tracks_when_catalog_exhausted(monkeypatch):
+    """The new in-flight extension path must honour allow_repeats: when
+    every in-genre track is already in the playlist, it recycles a
+    previously-played one (never the currently-playing track) instead
+    of letting the set die."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([
+        _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76),
+        _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+    ])
+    engine._endless_mode = True
+    engine._idx = 1  # 'b' is playing and is the last track
+    # Catalog == playlist: nothing fresh left in the genre.
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [
+            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76),
+            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+        ],
+    )
+    engine.report_playback_pos(track_id="b", current_time=35.0)  # poke
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    rec.events.clear()
+    engine.report_playback_pos(track_id="b", current_time=50.0)
+    # Recycled 'a' (not 'b' — no back-to-back repeat), session alive.
+    assert engine.playlist[-1]["id"] == "a"
+    assert len(engine.playlist) == 3
+    assert SESSION_ENDED not in rec.types()
+    assert ENDLESS_WARNING not in rec.types()
+
+
+# ---------------------------------------------------------------------------
+# v3.6.1 — no-repeat window on the recycle path
+# ---------------------------------------------------------------------------
+
+def test_recent_window_ids_takes_last_n_up_to_current():
+    playlist = [_track(x) for x in "abcde"]
+    assert _recent_window_ids(playlist, 4, 3) == ["c", "d", "e"]
+    # Window wider than what's been played → everything so far.
+    assert _recent_window_ids(playlist, 1, 20) == ["a", "b"]
+    # Tracks after idx haven't played and must not count.
+    assert _recent_window_ids(playlist, 0, 20) == ["a"]
+
+
+def test_no_repeat_window_default_is_about_an_hour():
+    # 20 tracks ≈ 1 h of music at typical (~3 min) track lengths.
+    assert ENDLESS_NO_REPEAT_WINDOW == 20
+
+
+def test_no_repeat_window_overridable_via_env_var(monkeypatch):
+    monkeypatch.setenv("APOLLO_ENDLESS_NO_REPEAT_WINDOW", "5")
+    import importlib
+
+    import agent.live_engine as engine_mod
+    importlib.reload(engine_mod)
+    try:
+        assert engine_mod.ENDLESS_NO_REPEAT_WINDOW == 5
+    finally:
+        monkeypatch.delenv("APOLLO_ENDLESS_NO_REPEAT_WINDOW", raising=False)
+        importlib.reload(engine_mod)
+
+
+def test_autoplay_pick_recycle_skips_recent_window():
+    """Recycling must rotate the catalog: a track heard within the
+    recent window loses to one heard longer ago, even when the recent
+    one ranks better on (Δbpm, camelot)."""
+    catalog = [
+        _track("old", genre_folder="lofi - ambient", bpm=90),   # worse Δbpm
+        _track("fresh", genre_folder="lofi - ambient", bpm=77),  # better Δbpm
+    ]
+    current = _track("playing", genre_folder="lofi - ambient", bpm=76)
+    exclude = {"old", "fresh", "playing"}  # catalog exhausted → recycle tier
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", exclude,
+        allow_repeats=True, recent_ids=["fresh", "playing"],
+    )
+    assert pick is not None and pick["id"] == "old"
+
+
+def test_autoplay_pick_recycle_degrades_when_window_covers_catalog():
+    """A window wider than the in-genre catalog must fall back to the
+    v2.6.0 rule (avoid back-to-back only) instead of ending the set."""
+    catalog = [
+        _track("a", genre_folder="lofi - ambient", bpm=77),
+        _track("b", genre_folder="lofi - ambient", bpm=90),
+    ]
+    current = _track("b", genre_folder="lofi - ambient", bpm=90)
+    pick = _autoplay_pick(
+        current, catalog, "lofi - ambient", {"a", "b"},
+        allow_repeats=True, recent_ids=["a", "b"],
+    )
+    # Everything is "recent" → degrade: anything but the current track.
+    assert pick is not None and pick["id"] == "a"
+
+
+def test_engine_recycle_respects_no_repeat_window(monkeypatch):
+    """Engine-level: with the window monkeypatched to 2, the in-flight
+    recycle must skip the two most recently played tracks and reach
+    back for the older one."""
+    monkeypatch.setattr("agent.live_engine.ENDLESS_NO_REPEAT_WINDOW", 2)
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    # 'c' is playing; recent window (2) = [b, c] → must pick 'a' even
+    # though 'b' is the closer BPM match to 'c'.
+    engine.play([
+        _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=70),
+        _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=79),
+        _track("c", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+    ])
+    engine._endless_mode = True
+    engine._idx = 2
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [
+            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=70),
+            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=79),
+            _track("c", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+        ],
+    )
+    engine.report_playback_pos(track_id="c", current_time=35.0)  # poke
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    rec.events.clear()
+    engine.report_playback_pos(track_id="c", current_time=50.0)
+    assert engine.playlist[-1]["id"] == "a"
+    assert SESSION_ENDED not in rec.types()
+
+
+def test_track_over_bypasses_grace_and_extends_immediately(monkeypatch):
+    """THE deadlock: the appended tail track ends, the gate said 'start
+    grace timer and wait for the next poll' — but after a natural
+    ``ended`` the browser never polls again, so the engine hung in
+    silence until the user refreshed (observed live 2026-07-10). When
+    the track is truly over, the gate must skip the grace and run the
+    fallback immediately."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76)])
+    engine._endless_mode = True
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [_track("rescue", genre_folder="lofi - ambient", bpm=78)],
+    )
+    # Note: NO low_water_at pre-set — this is the exact logged state
+    # ("start grace timer (PLAYLIST_RUNNING_LOW never fired)").
+    assert engine._low_water_at is None
+    rec.events.clear()
+    engine.report_track_ended("a")
+    types = rec.types()
+    assert SESSION_ENDED not in types
+    assert TRACK_STARTED in types
+    assert engine.playlist[engine._idx]["id"] == "rescue"
+
+
+def test_track_over_with_no_candidates_ends_cleanly(monkeypatch):
+    """track_over + empty catalog must still end the session cleanly
+    (warning + SESSION_ENDED) rather than hanging."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([_track("a", duration_sec=60)])
+    engine._endless_mode = True
+    monkeypatch.setattr("agent.live_engine._load_catalog", lambda: [])
+    rec.events.clear()
+    engine.report_track_ended("a")
+    types = rec.types()
+    assert ENDLESS_WARNING in types
+    assert SESSION_ENDED in types
+
+
+def test_play_resets_endless_bookkeeping():
+    """A re-``play()`` after a WS reconnect must not inherit a
+    minutes-old grace clock or a spent in-flight latch. ``_endless_mode``
+    itself is owned by the WS handler and must survive."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec)
+    engine.play([_track("a")])
+    engine._endless_mode = True
+    engine._low_water_fired = True
+    engine._low_water_at = time.monotonic() - 300
+    engine._endless_appended = 7
+    engine._extend_attempted = True
+    engine.play([_track("b")])
+    assert engine._low_water_fired is False
+    assert engine._low_water_at is None
+    assert engine._endless_appended == 0
+    assert engine._extend_attempted is False
+    assert engine._endless_mode is True
