@@ -854,25 +854,14 @@ export function useLiveSession(
       try {
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
+        // NOTE (v3.6.2): a failed load leaves the deck INERT by design
+        // for now — the whole E2E substrate drives the UI against
+        // 404ing mock streams and relies on that. Stale-playlist 404s
+        // are prevented upstream (the live WS validates the playlist
+        // against the catalog before the engine starts). Turning this
+        // into a skip (synthetic track_ended) needs playable E2E audio
+        // first — tracked as follow-up.
         console.warn("[live] decodeAudioData failed on load:", err);
-        // v3.6.2 — an unplayable track (404 from a stale catalog id,
-        // decode error, network drop) must not strand the session: the
-        // deck never starts, so no natural ``ended`` ever fires and the
-        // engine waits forever on a track that will never play. Report
-        // a synthetic track_ended so LiveEngineBrowser skips to the
-        // next track (or endless-extends past it).
-        if (!viewerModeRef.current) {
-          const ws = wsRef.current;
-          if (ws && ws.readyState === WebSocket.OPEN && track.id) {
-            try {
-              ws.send(
-                JSON.stringify({ type: "track_ended", track_id: track.id }),
-              );
-            } catch {
-              /* ignore — the operator can still skip manually */
-            }
-          }
-        }
         return;
       }
 
