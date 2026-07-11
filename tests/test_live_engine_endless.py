@@ -632,6 +632,38 @@ def test_inflight_extend_is_one_shot_per_track(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_inflight_extend_recycles_played_tracks_when_catalog_exhausted(monkeypatch):
+    """The new in-flight extension path must honour allow_repeats: when
+    every in-genre track is already in the playlist, it recycles a
+    previously-played one (never the currently-playing track) instead
+    of letting the set die."""
+    rec = _Recorder()
+    engine = LiveEngineBrowser(emitter=rec, approach_warn_sec=30)
+    engine.play([
+        _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76),
+        _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+    ])
+    engine._endless_mode = True
+    engine._idx = 1  # 'b' is playing and is the last track
+    # Catalog == playlist: nothing fresh left in the genre.
+    monkeypatch.setattr(
+        "agent.live_engine._load_catalog",
+        lambda: [
+            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76),
+            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+        ],
+    )
+    engine.report_playback_pos(track_id="b", current_time=35.0)  # poke
+    engine._low_water_at = time.monotonic() - (ENDLESS_GRACE_SEC + 1)
+    rec.events.clear()
+    engine.report_playback_pos(track_id="b", current_time=50.0)
+    # Recycled 'a' (not 'b' — no back-to-back repeat), session alive.
+    assert engine.playlist[-1]["id"] == "a"
+    assert len(engine.playlist) == 3
+    assert SESSION_ENDED not in rec.types()
+    assert ENDLESS_WARNING not in rec.types()
+
+
 def test_track_over_bypasses_grace_and_extends_immediately(monkeypatch):
     """THE deadlock: the appended tail track ends, the gate said 'start
     grace timer and wait for the next poll' — but after a natural
