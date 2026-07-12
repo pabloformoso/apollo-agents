@@ -33,6 +33,7 @@ from agent.run import (  # noqa: E402
     _build_anthropic_schemas,
     _build_openai_schemas,
     _run_tool,
+    parse_textual_tool_call,
 )
 
 # ---------------------------------------------------------------------------
@@ -581,7 +582,7 @@ async def _run_openai_streaming(
 
     sys_messages = [{"role": "system", "content": system}] + messages
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
         full_text = ""
         tool_calls_acc: dict[int, dict] = {}
 
@@ -635,6 +636,43 @@ async def _run_openai_streaming(
                 results.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
             sys_messages.extend(results)
         else:
+            # v3.6.4 — textual-tool-call shim (mirror of the sync loop in
+            # agent/run.py). gemma-4-e4b via LM Studio answers tool turns
+            # with the literal text ``pick_next_track(...)`` and no
+            # structured tool_calls; recover, execute, and keep looping so
+            # the model can wrap up with real text. Note: the textualized
+            # call already streamed to the UI as text_delta — cosmetic,
+            # the frontend chat panel shows it as a code-ish line.
+            shim = parse_textual_tool_call(full_text, tool_index)
+            if shim is not None:
+                name, inputs = shim
+                print(
+                    f"[llm-shim] textual tool call recovered: {name}({inputs})",
+                    flush=True,
+                )
+                synthetic_id = f"shim-{turn}"
+                sys_messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": synthetic_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": _json.dumps(inputs)},
+                    }],
+                })
+                await emit({"type": "tool_call", "name": name, "input": inputs})
+                _install_progress_hook(ctx, name, emit)
+                try:
+                    result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                finally:
+                    ctx.pop("_progress", None)
+                await emit({"type": "tool_result", "name": name, "result": str(result)})
+                sys_messages.append({
+                    "role": "tool",
+                    "tool_call_id": synthetic_id,
+                    "content": str(result),
+                })
+                continue
             sys_messages.append({"role": "assistant", "content": full_text})
             final_text = full_text
             break
