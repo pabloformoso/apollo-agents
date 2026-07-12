@@ -48,6 +48,12 @@ import { Banner, toast } from "@/components/ember/feedback";
 
 type Mode = "audience" | "cabin" | "immersive";
 
+// v3.7.1 — how many dj_chat entries the feeds render (the fixed
+// overlay the OBS Browser Source captures, and the booth panel). Was 4;
+// bumped to 10 so audience conversations stay on screen long enough to
+// read on stream.
+const CHAT_FEED_VISIBLE = 10;
+
 const MODES: ReadonlyArray<[Mode, string]> = [
   ["audience", "Audience"],
   ["cabin", "Booth"],
@@ -486,7 +492,7 @@ export default function LivePage() {
           aria-label="apollo chat"
           className="fixed bottom-9 left-9 z-20 max-w-[34ch] flex flex-col gap-1.5 pointer-events-none"
         >
-          {live.djChat.slice(-4).map((m, i) => (
+          {live.djChat.slice(-CHAT_FEED_VISIBLE).map((m, i) => (
             <div
               key={`${m.ts}-${i}`}
               className="font-display italic text-lg text-cream/85 leading-snug bg-black/35 px-3 py-1.5 backdrop-blur-sm"
@@ -717,7 +723,7 @@ export default function LivePage() {
                 )}
 
                 <div className="mt-3 flex flex-col gap-1.5 max-h-[110px] overflow-auto">
-                  {live.djChat.slice(-4).map((m, i) => (
+                  {live.djChat.slice(-CHAT_FEED_VISIBLE).map((m, i) => (
                     <div
                       key={`${m.ts}-${i}`}
                       className="font-display italic text-base text-mute"
