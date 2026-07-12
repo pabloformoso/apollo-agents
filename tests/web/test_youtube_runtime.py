@@ -304,3 +304,88 @@ async def test_snapshot_returns_state_without_affecting_ref_count(fresh_registry
     await sub.detach()
     await asyncio.sleep(0.25)
     assert await fresh_registry.snapshot(1, "s1") is None
+
+
+# ---------------------------------------------------------------------------
+# v3.7.1 — broadcast rediscovery after an early no_broadcast
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_no_broadcast_rediscovers_and_connects(
+    fresh_registry, fake_yt, monkeypatch
+):
+    """The live failure 2026-07-12: the page attaches BEFORE the YouTube
+    broadcast flips live, discovery returns None, and chat stayed dead
+    for the whole stream. The rediscovery loop must connect once the
+    broadcast appears and push the state flip to attached subscribers."""
+    monkeypatch.setattr(fresh_registry, "REDISCOVER_INTERVAL_SEC", 0.05)
+    fake_yt["broadcast"] = None  # page connects too early
+
+    statuses: list[dict] = []
+
+    async def on_message(author, text, ts, is_first):
+        pass
+
+    async def on_status(payload):
+        statuses.append(dict(payload))
+
+    sub, snapshot = await fresh_registry.attach(1, "s-early", on_message, on_status)
+    assert snapshot["state"] == "no_broadcast"
+    assert fake_yt["poll_calls"] == []
+
+    # A couple of probe intervals with the broadcast still absent.
+    await asyncio.sleep(0.12)
+    assert fake_yt["poll_calls"] == []
+
+    # OBS starts, YouTube flips live.
+    fake_yt["broadcast"] = {
+        "id": "bc-late", "title": "Apollo Live",
+        "live_chat_id": "lcid-late", "channel_id": "UCowner",
+    }
+    await asyncio.sleep(0.15)
+
+    # Poller connected against the late broadcast…
+    assert fake_yt["poll_calls"], "poller never started after rediscovery"
+    assert fake_yt["poll_calls"][0]["live_chat_id"] == "lcid-late"
+    # …and every attached WS got the state flip (UI pill goes green).
+    assert any(s.get("state") == "connected" for s in statuses)
+
+    snap = await fresh_registry.snapshot(1, "s-early")
+    assert snap and snap["state"] == "connected"
+
+    await sub.detach()
+    await asyncio.sleep(0.2)
+
+
+@pytest.mark.asyncio
+async def test_rediscovery_task_dies_with_teardown(
+    fresh_registry, fake_yt, monkeypatch
+):
+    """Detaching the last subscriber must cancel the rediscovery loop
+    after the grace window — no orphan task probing quota forever."""
+    monkeypatch.setattr(fresh_registry, "REDISCOVER_INTERVAL_SEC", 0.05)
+    fake_yt["broadcast"] = None
+
+    probes = {"n": 0}
+    from web.backend import youtube_chat
+
+    async def counting_discover(creds):
+        probes["n"] += 1
+        return None
+
+    monkeypatch.setattr(youtube_chat, "discover_active_broadcast", counting_discover)
+
+    async def on_message(author, text, ts, is_first):
+        pass
+
+    async def noop_status(p):
+        pass
+
+    sub, snapshot = await fresh_registry.attach(1, "s-gone", on_message, noop_status)
+    assert snapshot["state"] == "no_broadcast"
+    await sub.detach()
+    # Grace (0.05s) elapses → teardown cancels the rediscover task.
+    await asyncio.sleep(0.25)
+    settled = probes["n"]
+    await asyncio.sleep(0.25)
+    assert probes["n"] == settled, "rediscovery kept probing after teardown"

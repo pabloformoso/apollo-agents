@@ -420,13 +420,25 @@ def _play_audio(path: str, block: bool = True) -> str:
 # Tool functions
 # ---------------------------------------------------------------------------
 
-def list_genres(context_variables: dict) -> str:
-    """List all available genre folders from the track catalog."""
+def _load_catalog_genres() -> list[str]:
+    """Return the sorted genre_folder set from tracks.json ([] if absent).
+
+    v3.7.3 — shared by the ``list_genres`` tool and the dynamic Genre
+    Guard prompt (``agent.run.genre_guard_system``) so both always speak
+    from the same catalog.
+    """
     if not _CATALOG_PATH.exists():
-        return "Error: tracks.json not found. Run 'python main.py --build-catalog' first."
+        return []
     with open(_CATALOG_PATH, encoding="utf-8") as f:
         data = json.load(f)
-    genres = sorted({t["genre_folder"] for t in data["tracks"]})
+    return sorted({t["genre_folder"] for t in data["tracks"] if t.get("genre_folder")})
+
+
+def list_genres(context_variables: dict) -> str:
+    """List all available genre folders from the track catalog."""
+    genres = _load_catalog_genres()
+    if not genres:
+        return "Error: tracks.json not found. Run 'python main.py --build-catalog' first."
     return "Available genres:\n" + "\n".join(f"  - {g}" for g in genres)
 
 

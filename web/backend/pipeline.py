@@ -33,6 +33,8 @@ from agent.run import (  # noqa: E402
     _build_anthropic_schemas,
     _build_openai_schemas,
     _run_tool,
+    enforce_mentioned_genre,
+    genre_guard_system,
     parse_textual_tool_call,
 )
 
@@ -709,9 +711,26 @@ async def phase_genre_guard(
 ) -> dict | None:
     """Run Genre Guard. Returns {genre, duration_min, mood} or None."""
     history.append({"role": "user", "content": message})
-    response = await run_agent_streaming(_GENRE_GUARD_SYSTEM, _GENRE_TOOLS, history, ctx, emit)
+    # v3.7.3 — dynamic prompt (real catalog genres injected) + a
+    # deterministic backstop: if the user literally named an available
+    # genre and the model confirmed a different, unmentioned one, the
+    # user wins. Small local models pattern-matched 'aural' requests
+    # onto the prompt's lofi example (observed 2026-07-12).
+    try:
+        from agent.tools import _load_catalog_genres  # noqa: PLC0415
+        genres = _load_catalog_genres()
+    except Exception:  # noqa: BLE001 — no catalog → generic prompt, no backstop
+        genres = []
+    system = genre_guard_system(genres or None)
+    response = await run_agent_streaming(system, _GENRE_TOOLS, history, ctx, emit)
     history.append({"role": "assistant", "content": response})
-    return _parse_confirmed_block(response)
+    parsed = _parse_confirmed_block(response)
+    # Every user turn counts — the genre may have been named before the
+    # final confirmation message.
+    user_text = " ".join(
+        str(m.get("content") or "") for m in history if m.get("role") == "user"
+    )
+    return enforce_mentioned_genre(user_text, parsed, genres)
 
 
 async def _hydrate_user_context(ctx: dict) -> None:

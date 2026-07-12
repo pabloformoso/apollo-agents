@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -56,6 +57,18 @@ log = logging.getLogger(__name__)
 #: the chat backlog mid-stream. Conservative — short enough that an
 #: idle session doesn't burn quota forever.
 _GRACE_SEC: float = 30.0
+
+#: v3.7.1 — how often to re-probe for an active broadcast after an
+#: initial ``no_broadcast``. The natural setup order (open the live
+#: page → start OBS → YouTube flips the broadcast live ~30-60s later)
+#: means the one-shot discovery almost always ran too early — observed
+#: live 2026-07-12: a whole stream with chat ingest dead because the
+#: page connected 2 minutes before the broadcast existed. Cost:
+#: liveBroadcasts.list is 1 quota unit per probe — 60/hour is noise
+#: against the 10k daily budget.
+REDISCOVER_INTERVAL_SEC: float = float(
+    os.getenv("APOLLO_YT_REDISCOVER_SEC", "60")
+)
 
 
 # v3.7.0 — the fourth argument is ``is_first``: True when this is the
@@ -259,8 +272,18 @@ class _Registry:
         if broadcast is None:
             rt.state = {"state": "no_broadcast"}
             print(
-                f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] state=no_broadcast",
+                f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] "
+                f"state=no_broadcast — re-probing every "
+                f"{REDISCOVER_INTERVAL_SEC:.0f}s",
                 flush=True,
+            )
+            # v3.7.1 — don't give up. Keep re-probing while subscribers
+            # are attached; the moment the broadcast goes live, connect
+            # the poller and push the state flip to every WS. Tracked as
+            # ``poller_task`` so the normal teardown path cancels it.
+            rt.poller_task = asyncio.create_task(
+                self._rediscover_loop(rt, creds),
+                name=f"yt-rediscover-{rt.session_id[:8]}",
             )
             return
 
@@ -278,6 +301,56 @@ class _Registry:
             f"poller_task spawned (broadcast={broadcast['id']})",
             flush=True,
         )
+
+    async def _rediscover_loop(self, rt: _Runtime, creds) -> None:
+        """Re-probe for an active broadcast until one appears (v3.7.1).
+
+        Runs as the runtime's ``poller_task`` while in ``no_broadcast``:
+        every ``REDISCOVER_INTERVAL_SEC`` it asks YouTube again, and on
+        success flips the state, notifies every attached WS (the UI
+        pill goes green without a refresh), and hands the task over to
+        the normal poller loop. Probes are skipped while no subscribers
+        are attached (grace window) so an abandoned session doesn't
+        burn quota.
+        """
+        try:
+            while not rt.stop_event.is_set():
+                await asyncio.sleep(REDISCOVER_INTERVAL_SEC)
+                if rt.stop_event.is_set():
+                    return
+                if not rt.subscribers:
+                    continue
+                try:
+                    broadcast = await youtube_chat.discover_active_broadcast(creds)
+                except Exception as exc:  # noqa: BLE001 — transient API errors must not kill the loop
+                    log.warning("youtube_runtime: rediscover probe failed: %s", exc)
+                    continue
+                if broadcast is None:
+                    continue
+                rt.broadcast = broadcast
+                rt.state = {
+                    "state": "connected",
+                    "broadcast": {"id": broadcast["id"], "title": broadcast["title"]},
+                }
+                print(
+                    f"[yt-runtime u={rt.user_id} s={rt.session_id[:8]}] "
+                    f"rediscovered broadcast={broadcast['id']} — starting poller",
+                    flush=True,
+                )
+                for sub in list(rt.subscribers):
+                    try:
+                        await sub.on_status(dict(rt.state))
+                    except Exception as exc:  # noqa: BLE001
+                        log.exception(
+                            "youtube_runtime: on_status raised during rediscovery: %s",
+                            exc,
+                        )
+                # Same task becomes the poller wrapper — teardown keeps
+                # cancelling ``poller_task`` exactly as before.
+                await self._run_poller(rt, creds)
+                return
+        except asyncio.CancelledError:
+            raise
 
     async def _run_poller(self, rt: _Runtime, creds) -> None:
         """Wrapper around :func:`youtube_chat.poll_live_chat` that fans
