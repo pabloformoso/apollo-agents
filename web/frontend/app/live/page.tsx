@@ -246,11 +246,16 @@ export default function LivePage() {
     );
   }
 
+  // v3.7.2 — this label describes the APOLLO ENGINE connection (this
+  // page's WS to the backend), not YouTube. It used to read
+  // "broadcasting", which operators read as "YouTube broadcast
+  // connected" while chat ingest was actually dead (2026-07-12) — the
+  // YT pill below is the only element that speaks for YouTube.
   const broadcastingLabel =
     live.state === "ended"
       ? "⊘ session ended"
       : live.connected
-        ? "● broadcasting"
+        ? "● engine live"
         : "○ connecting…";
 
   return (
@@ -346,35 +351,35 @@ export default function LivePage() {
               }}
               title={
                 live.youtube.state === "connected"
-                  ? `YouTube Live: chat ingest from "${live.youtube.broadcastTitle ?? "active broadcast"}"`
+                  ? `YouTube chat CONNECTED — ingesting from "${live.youtube.broadcastTitle ?? "active broadcast"}"`
                   : live.youtube.state === "no_broadcast"
-                    ? "YouTube linked, but no active broadcast — click to open YouTube Studio"
+                    ? "Account linked, waiting for the broadcast to go live — auto-retrying every 60 s. Click to open YouTube Studio."
                     : live.youtube.state === "quota_exceeded"
                       ? "YouTube API quota exceeded — polling at reduced cadence (60 s)"
                       : live.youtube.state === "disconnected"
-                        ? `YouTube disconnected${live.youtube.reason ? ` (${live.youtube.reason})` : ""} — click to reconnect`
+                        ? `YouTube account NOT linked${live.youtube.reason ? ` (${live.youtube.reason})` : ""} — click to connect`
                         : "YouTube error — see console"
               }
               className={
                 "px-3.5 py-2 text-xs font-sans transition-colors border " +
                 (live.youtube.state === "connected"
-                  ? "bg-red-600/15 text-red-300 border-red-600/40"
+                  ? "bg-neon/10 text-neon border-neon/40"
                   : live.youtube.state === "quota_exceeded"
                     ? "bg-warn/10 text-warn border-warn/40 cursor-default"
                     : live.youtube.state === "no_broadcast"
-                      ? "bg-transparent text-mute border-line2 hover:text-ember-text cursor-pointer"
-                      : "bg-transparent text-faint border-line2 hover:text-ember-text cursor-pointer")
+                      ? "bg-warn/10 text-warn border-warn/40 animate-pulse cursor-pointer"
+                      : "bg-red-600/10 text-red-300 border-red-600/40 hover:text-ember-text cursor-pointer")
               }
             >
-              ▶ YT:{" "}
+              ▶ YT chat:{" "}
               {live.youtube.state === "connected"
-                ? (live.youtube.broadcastTitle?.slice(0, 24) ?? "live")
+                ? `on · ${live.youtube.broadcastTitle?.slice(0, 20) ?? "live"}`
                 : live.youtube.state === "no_broadcast"
-                  ? "no broadcast"
+                  ? "waiting for broadcast…"
                   : live.youtube.state === "quota_exceeded"
                     ? "quota"
                     : live.youtube.state === "disconnected"
-                      ? "disconnected"
+                      ? "account not linked"
                       : "error"}
             </button>
           )}
