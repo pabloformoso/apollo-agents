@@ -19,6 +19,7 @@ import {
   type MicPerceptionApi,
   type PerceptionSample,
 } from "@/lib/mic_perception";
+import GreetingOverlay from "./GreetingOverlay";
 import VisualLayer from "./VisualLayer";
 
 interface LiveStageProps {
@@ -189,6 +190,9 @@ export default function LiveStage({
       data-testid="live-stage"
       className="flex flex-col gap-6 px-4 py-6 md:px-8 max-w-5xl mx-auto"
     >
+      {/* v3.7.0 — on-stream greeting toasts (fixed bottom-left; the OBS
+          Browser Source captures them with the rest of the page). */}
+      <GreetingOverlay greetings={live.greetings} />
       {/* Header */}
       <header className="flex flex-col gap-2">
         <div className="flex items-center justify-between gap-4">

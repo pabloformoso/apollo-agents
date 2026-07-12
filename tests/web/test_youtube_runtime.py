@@ -158,14 +158,16 @@ async def test_message_fans_out_to_all_subscribers(fresh_registry, monkeypatch):
 
     monkeypatch.setattr(youtube_chat, "poll_live_chat", fake_poll)
 
-    received_a: list[str] = []
-    received_b: list[str] = []
+    received_a: list[tuple[str, bool]] = []
+    received_b: list[tuple[str, bool]] = []
 
-    async def a_on_message(author, text, ts):
-        received_a.append(text)
+    # v3.7.0 — on_message carries is_first (author's first message this
+    # stream) as its fourth argument.
+    async def a_on_message(author, text, ts, is_first):
+        received_a.append((text, is_first))
 
-    async def b_on_message(author, text, ts):
-        received_b.append(text)
+    async def b_on_message(author, text, ts, is_first):
+        received_b.append((text, is_first))
 
     async def noop_status(p): pass
 
@@ -176,8 +178,14 @@ async def test_message_fans_out_to_all_subscribers(fresh_registry, monkeypatch):
     await asyncio.sleep(0.01)
     assert "fn" in captured_on_message, "poller didn't start"
     await captured_on_message["fn"]("alice", "hello", 1)
-    assert received_a == ["hello"]
-    assert received_b == ["hello"]
+    assert received_a == [("hello", True)]
+    assert received_b == [("hello", True)]
+
+    # Second message from the same chatter: fans out again, but is_first
+    # is computed ONCE runtime-side — both subscribers see False.
+    await captured_on_message["fn"]("alice", "again", 2)
+    assert received_a[-1] == ("again", False)
+    assert received_b[-1] == ("again", False)
 
     await sub_a.detach()
     await sub_b.detach()
