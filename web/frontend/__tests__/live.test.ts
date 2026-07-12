@@ -1281,6 +1281,32 @@ describe("useLiveSession", () => {
     expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
   });
 
+  // ── v3.7.0 — chat_greeting feed ─────────────────────────────────────────
+  it("appends chat_greeting events to the greetings feed with stable ids", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-greet"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "chat_greeting",
+        author: "marta",
+        kind: "first",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "chat_greeting",
+        author: "kenji",
+        kind: "first",
+      });
+    });
+    const gs = result.current.greetings;
+    expect(gs).toHaveLength(2);
+    expect(gs[0].author).toBe("marta");
+    expect(gs[1].author).toBe("kenji");
+    expect(gs[0].kind).toBe("first");
+    // Burst-safe identity: ids are distinct and increasing even when
+    // both events land in the same millisecond.
+    expect(gs[1].id).toBeGreaterThan(gs[0].id);
+  });
+
   // ── v3.6.2 — a failed buffer load stays inert (E2E substrate contract) ──
   it("does not send anything when the buffer fetch 404s", async () => {
     // Deliberate: an unplayable track leaves the deck inert (warn only).
