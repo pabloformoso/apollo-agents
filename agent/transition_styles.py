@@ -39,6 +39,63 @@ class TransitionStyle(str, Enum):
 
     SMOOTH_BLEND = "smooth_blend"
     BASS_SWAP = "bass_swap"
+    # v3.7.0 — beatless-genre "drift". One long equal-power crossfade at
+    # native playback rate: no tempo match, no grid warp, no bass swap, no
+    # anchor repositioning. Chosen by the per-genre transition PROFILE
+    # (see ``profile_for_genre`` below), not by ``pick_transition_style`` —
+    # the profile gates the whole DJ-mix machinery off BEFORE the picker
+    # ever runs, so DRIFT is never the picker's return value.
+    DRIFT = "drift"
+
+
+# --- Per-genre transition profiles (v3.7.0) --------------------------------
+# The picker above decides *how* a beatmatched DJ crossfade sounds. This
+# layer decides, one step earlier, WHETHER a genre should be DJ-mixed at
+# all. Beatless / frequency-based collections (space drones, healing
+# tones — the ``aural`` set) have no valid beat structure: tempo-matching
+# them produces audible wow/flutter + pitch shift, grid-warp rides a
+# hallucinated madmom beatgrid, and bass-swap reads as a dropout on a pad.
+# For those genres we want a single long native-rate crossfade instead.
+
+
+@dataclass(frozen=True)
+class TransitionProfile:
+    """How a genre should be transitioned at the mix level.
+
+    ``dj_mix=False`` means "no tempo match, no grid warp, no bass swap,
+    no downbeat repositioning" — i.e. drift mode. ``crossfade_sec`` is an
+    optional override for the engine's default blend length; ``None``
+    leaves the engine default (``self.crossfade_sec``) in place.
+    """
+
+    dj_mix: bool
+    crossfade_sec: Optional[float] = None
+
+
+# Default for any genre without an explicit entry: full DJ treatment, no
+# crossfade-length override. Kept as a module singleton so ``profile_for_genre``
+# returns the SAME object for every unknown genre (identity-comparable in tests).
+_DEFAULT_TRANSITION_PROFILE = TransitionProfile(dj_mix=True, crossfade_sec=None)
+
+# Keyed by lowercased ``genre_folder`` (falling back to ``genre``). Extend
+# code-side as new beatless collections land — there is deliberately no UI
+# for editing these yet (see the change proposal's non-goals).
+GENRE_TRANSITION_PROFILES: dict[str, TransitionProfile] = {
+    "aural": TransitionProfile(dj_mix=False, crossfade_sec=24.0),
+}
+
+
+def profile_for_genre(genre: Optional[str]) -> TransitionProfile:
+    """Return the transition profile for a genre string.
+
+    Case-insensitive match against ``GENRE_TRANSITION_PROFILES`` keys.
+    Unknown or ``None`` genres get the default profile (``dj_mix=True``,
+    ``crossfade_sec=None``) — the pre-v3.7 behaviour, so every existing
+    beatmatched genre is untouched.
+    """
+    if not genre:
+        return _DEFAULT_TRANSITION_PROFILE
+    return GENRE_TRANSITION_PROFILES.get(genre.strip().lower(), _DEFAULT_TRANSITION_PROFILE)
 
 
 # --- Bass-swap defaults ----------------------------------------------------
@@ -170,11 +227,17 @@ def serialise_choice(choice: TransitionStyleChoice) -> dict:
 
     Frontend contract:
 
-    - ``transition_style``: ``"smooth_blend"`` | ``"bass_swap"`` — the
-      switch the deck looks at.
+    - ``transition_style``: ``"smooth_blend"`` | ``"bass_swap"`` |
+      ``"drift"`` — the switch the deck looks at.
     - ``bass_swap``: present iff ``transition_style == "bass_swap"``. The
       keys mirror ``BassSwapParams`` but with explicit time units in the
       names so the JS side doesn't have to guess.
+
+    v3.7.0 — a DRIFT choice serialises as ``{"transition_style": "drift"}``
+    with no ``bass_swap`` block (drift carries no per-deck automation; the
+    frontend runs a plain native-rate equal-power crossfade). It falls out
+    of the same code path as SMOOTH_BLEND — DRIFT is not BASS_SWAP, so the
+    sub-block is simply never added.
     """
     payload: dict = {"transition_style": choice.style.value}
     if choice.style is TransitionStyle.BASS_SWAP and choice.bass_swap is not None:
