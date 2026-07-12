@@ -123,3 +123,64 @@ def test_override_preserves_dict_identity_semantics():
     got = enforce_mentioned_genre("sesion aural", original, GENRES)
     assert original["genre"] == "lofi - ambient"
     assert got["genre"] == "aural"
+
+
+# ---------------------------------------------------------------------------
+# v3.7.4 — propose_playlist: the confirmed ctx genre beats the LLM argument
+# ---------------------------------------------------------------------------
+
+def _mini_catalog(tmp_path, monkeypatch):
+    import json
+
+    import agent.tools as tools_mod
+
+    catalog = {
+        "tracks": [
+            {"id": f"aural-{i}", "display_name": f"Aural {i}", "file": f"tracks/aural/a{i}.wav",
+             "genre_folder": "aural", "genre": "aural", "bpm": 57.0 + i,
+             "camelot_key": "8A", "duration_sec": 180.0, "variant_of": None}
+            for i in range(6)
+        ] + [
+            {"id": f"lofi-{i}", "display_name": f"Lofi {i}", "file": f"tracks/lofi/l{i}.wav",
+             "genre_folder": "lofi - ambient", "genre": "lofi - ambient", "bpm": 75.0 + i,
+             "camelot_key": "9A", "duration_sec": 180.0, "variant_of": None}
+            for i in range(6)
+        ]
+    }
+    p = tmp_path / "tracks.json"
+    p.write_text(json.dumps(catalog), encoding="utf-8")
+    monkeypatch.setattr(tools_mod, "_CATALOG_PATH", p)
+    return tools_mod
+
+
+def test_propose_playlist_ctx_genre_beats_llm_argument(tmp_path, monkeypatch):
+    """THE live bug: guard confirmed 'aural', the planner LLM called
+    propose_playlist(genre='lofi - ambient') anyway. The confirmed ctx
+    genre must win — playlist AND ctx stay aural."""
+    tools_mod = _mini_catalog(tmp_path, monkeypatch)
+    ctx = {"genre": "aural"}
+    out = tools_mod.propose_playlist("lofi - ambient", 30, "chill", ctx)
+    assert "Error" not in out
+    assert ctx["genre"] == "aural"
+    assert all(t["genre_folder"] == "aural" for t in ctx["playlist"])
+
+
+def test_propose_playlist_ctx_genre_match_is_case_insensitive(tmp_path, monkeypatch):
+    """'Aural' vs 'aural' is agreement, not an override — no log spam,
+    same result."""
+    tools_mod = _mini_catalog(tmp_path, monkeypatch)
+    ctx = {"genre": "Aural"}
+    out = tools_mod.propose_playlist("aural", 30, "chill", ctx)
+    assert "Error" not in out
+    assert all(t["genre_folder"] == "aural" for t in ctx["playlist"])
+
+
+def test_propose_playlist_without_ctx_genre_uses_argument(tmp_path, monkeypatch):
+    """No confirmed genre in ctx (direct tool use / tests) → the
+    argument keeps working exactly as before."""
+    tools_mod = _mini_catalog(tmp_path, monkeypatch)
+    ctx = {}
+    out = tools_mod.propose_playlist("lofi - ambient", 30, "chill", ctx)
+    assert "Error" not in out
+    assert ctx["genre"] == "lofi - ambient"
+    assert all(t["genre_folder"] == "lofi - ambient" for t in ctx["playlist"])

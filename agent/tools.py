@@ -496,6 +496,22 @@ def propose_playlist(
     if not _CATALOG_PATH.exists():
         return "Error: tracks.json not found. Run --build-catalog first."
 
+    # v3.7.4 — the CONFIRMED genre in ctx is authoritative over the
+    # LLM's tool argument. Small local models sometimes call this tool
+    # with their prior ("lofi - ambient") instead of the genre the
+    # guard just confirmed ("aural"), and this tool used to obey AND
+    # overwrite ctx.genre with the wrong value — making the whole
+    # session coherent with the model's whim (observed live
+    # 2026-07-12: guard confirmed aural, planner built lofi anyway).
+    confirmed_genre = (context_variables.get("genre") or "").strip()
+    if confirmed_genre and confirmed_genre.lower() != genre.strip().lower():
+        print(
+            f"[propose_playlist] genre override: LLM asked for {genre!r} but "
+            f"ctx has confirmed {confirmed_genre!r} — trusting the confirmed genre",
+            flush=True,
+        )
+        genre = confirmed_genre
+
     with open(_CATALOG_PATH, encoding="utf-8") as f:
         data = json.load(f)
 
