@@ -1171,22 +1171,45 @@ async def live_session_ws(
     # respawning the poller / re-fetching chat backlog.
     from . import youtube_runtime  # noqa: PLC0415 — optional dep lazy
 
-    async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
-        """Per-WS callback: emit dj_chat visibility + enqueue for agent."""
+    from .chat_names import build_greeting_event, sanitize_display_name
+
+    async def _on_yt_message(author: str, text: str, ts_ms: int, is_first: bool) -> None:
+        """Per-WS callback: emit dj_chat visibility + enqueue for agent.
+
+        v3.7.0 — ``is_first`` (author's first message this stream,
+        computed once in youtube_runtime) drives the greeting overlay:
+        a ``chat_greeting`` event fans out to the operator page and
+        every OBS viewer, and the DJ's copy of the message is tagged so
+        the LLM greets by name via emit_chat.
+        """
         # Diagnostic — surfaces in .tmp/backend.log so we can confirm
         # the poller is firing when audience messages don't appear in
         # the UI. Cheap enough to keep in prod for now.
         print(
-            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}",
+            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}"
+            f"{' [first]' if is_first else ''}",
             flush=True,
         )
+        greeting = build_greeting_event(author, is_first)
+        if greeting is not None:
+            try:
+                await emit(greeting)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[live-ws {session_id}] chat_greeting emit failed: {exc}",
+                    flush=True,
+                )
+        # Sanitized name in the DJ/panel framing too — a crafted
+        # username must not be able to fake the [YT @...] envelope.
+        safe_author = sanitize_display_name(author) or "viewer"
+        first_tag = " - first message this stream" if greeting is not None else ""
         try:
-            await emit({"type": "dj_chat", "text": f"[YT @{author}] {text}"})
+            await emit({"type": "dj_chat", "text": f"[YT @{safe_author}] {text}"})
         except Exception as exc:  # noqa: BLE001
             print(f"[live-ws {session_id}] yt dj_chat emit failed: {exc}", flush=True)
         payload = {
             "type": "user_msg",
-            "text": f"[YT @{author}] {text}",
+            "text": f"[YT @{safe_author}{first_tag}] {text}",
             "timestamp_ms": ts_ms or None,
         }
         try:

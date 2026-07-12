@@ -49,6 +49,7 @@ import {
   BufferDeck,
   SCHEDULE_LOOKAHEAD_SEC,
 } from "./audio_buffer_decks";
+import type { Greeting } from "./greetings";
 
 /**
  * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
@@ -229,6 +230,10 @@ export interface UseLiveSessionApi {
   playlistRunningLow: boolean;
   /** Toggle endless mode. Sends a WS command; the server echoes the new state. */
   setEndlessMode: (enabled: boolean) => void;
+  // v3.7.0 — chat greeting overlay feed.
+  /** Recent chat_greeting events (capped at 20). GreetingOverlay consumes
+   *  the tail; older entries age out naturally. */
+  greetings: Greeting[];
   // v2.7 — YouTube Live Chat ingest status, surfaced as a pill in the /live header.
   /** Compact view-model the UI binds to. ``state === "off"`` means no events arrived yet
    *  (either the operator hasn't linked YT or the backend isn't configured); the UI uses
@@ -448,6 +453,17 @@ interface ServerDjChat {
   text: string;
 }
 
+// v3.7.0 — greeting overlay trigger. Emitted by the backend once per
+// chatter per stream (first message; author already sanitized
+// server-side). ``kind: "returning"`` is reserved for channel-level
+// regulars — the contract ships with the enum so that lands without a
+// breaking change.
+interface ServerChatGreeting {
+  type: "chat_greeting";
+  author: string;
+  kind: "first" | "returning";
+}
+
 interface ServerError {
   type: "error";
   message: string;
@@ -473,6 +489,7 @@ type ServerEvent =
   | ServerEngineCommand
   | ServerLiveMessage
   | ServerDjChat
+  | ServerChatGreeting
   | ServerEndlessModeMessage
   | ServerYouTubeStatusMessage
   | ServerCriticWarning
@@ -593,6 +610,12 @@ export function useLiveSession(
   // True from PLAYLIST_RUNNING_LOW until the next track_started — drives
   // the "picking continuation track…" banner on /live.
   const [playlistRunningLow, setPlaylistRunningLow] = useState(false);
+  // v3.7.0 — chat greeting feed for the on-stream overlay. Server emits
+  // one chat_greeting per chatter per stream; we keep a short tail and
+  // let GreetingOverlay own display timing/coalescing. The seq ref
+  // gives each entry a stable identity (burst events share one ts).
+  const [greetings, setGreetings] = useState<Greeting[]>([]);
+  const greetingSeqRef = useRef(0);
   // v2.7.3 — WS reconnect bookkeeping. ``wsRetryAttempt`` is the
   // current retry count (0 when connected or doing the very first
   // open). ``wsExhausted`` flips once we've burned through
@@ -1296,6 +1319,26 @@ export function useLiveSession(
           reason: evt.reason,
         });
         break;
+      case "chat_greeting": {
+        // v3.7.0 — greeting overlay feed. Author is sanitized
+        // server-side; we just append (short tail — GreetingOverlay
+        // consumes and paces the display). The id is captured NOW —
+        // the state updater runs later, and a same-batch burst would
+        // otherwise read the ref after every increment (duplicate ids).
+        const greetingId = ++greetingSeqRef.current;
+        const greetingAuthor = evt.author;
+        const greetingKind = evt.kind;
+        setGreetings((prev) => [
+          ...prev.slice(-19),
+          {
+            id: greetingId,
+            author: greetingAuthor,
+            kind: greetingKind,
+            ts: Date.now(),
+          },
+        ]);
+        break;
+      }
       case "session_ended":
         setState("ended");
         setExplicitNextTrack(null);
@@ -1929,6 +1972,7 @@ export function useLiveSession(
       endlessMode,
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
+      greetings,
       youtube,
       wsRetryAttempt,
       wsRetryMax: MAX_WS_RETRIES,
@@ -1960,6 +2004,7 @@ export function useLiveSession(
       endlessMode,
       playlistRunningLow,
       setEndlessModeWS,
+      greetings,
       youtube,
       wsRetryAttempt,
       wsExhausted,

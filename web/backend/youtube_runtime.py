@@ -58,8 +58,35 @@ log = logging.getLogger(__name__)
 _GRACE_SEC: float = 30.0
 
 
-OnMessage = Callable[[str, str, int], Awaitable[None]]
+# v3.7.0 — the fourth argument is ``is_first``: True when this is the
+# author's first message THIS STREAM (computed once, runtime-scoped, so
+# it survives WS reconnects and OBS Browser Source refreshes instead of
+# re-greeting the whole room on every refresh).
+OnMessage = Callable[[str, str, int, bool], Awaitable[None]]
 OnStatus = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+def _first_message_key(author: str) -> str:
+    """Normalize an author name for seen-set membership.
+
+    Case-insensitive + whitespace-trimmed so "Marta" and "marta " count
+    as the same chatter; kept pure/module-level for direct unit tests.
+    """
+    return (author or "").strip().casefold()
+
+
+def register_first_message(seen: set[str], author: str) -> bool:
+    """Record ``author`` in ``seen``; True iff this was their first message.
+
+    Pure set logic extracted from the poller fan-out so the greeting
+    trigger is unit-testable without spinning up a poller. Unusable
+    names (empty/whitespace) are never "first" — no greeting for ghosts.
+    """
+    key = _first_message_key(author)
+    if not key or key in seen:
+        return False
+    seen.add(key)
+    return True
 
 
 @dataclass(eq=False)
@@ -86,6 +113,10 @@ class _Runtime:
     broadcast: dict | None = None
     state: dict = field(default_factory=lambda: {"state": "disconnected", "reason": "not_connected"})
     cleanup_handle: asyncio.TimerHandle | None = None
+    # v3.7.0 — authors who already sent a message this stream (keys via
+    # ``_first_message_key``). Lives on the runtime so the greeting
+    # trigger survives WS reconnects; a fresh stream gets a fresh set.
+    seen_authors: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -259,11 +290,15 @@ class _Registry:
         broadcast = rt.broadcast or {}
 
         async def _fan_message(author: str, text: str, ts_ms: int) -> None:
+            # v3.7.0 — first-message detection happens HERE, once per
+            # message, before the fan-out: computing it per-subscriber
+            # would greet the same chatter once per attached WS.
+            is_first = register_first_message(rt.seen_authors, author)
             # Copy the subscriber set so a concurrent detach doesn't
             # mutate it while we iterate.
             for sub in list(rt.subscribers):
                 try:
-                    await sub.on_message(author, text, ts_ms)
+                    await sub.on_message(author, text, ts_ms, is_first)
                 except Exception as exc:  # noqa: BLE001 — one bad subscriber shouldn't bring down the poller
                     log.exception("youtube_runtime: subscriber on_message raised: %s", exc)
 
