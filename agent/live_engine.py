@@ -41,7 +41,13 @@ from agent.phase_lock import (
     LiveTransitionPlan,
     build_live_transition_plan,
 )
-from agent.transition_styles import serialise_choice
+from agent.transition_styles import (
+    TransitionProfile,
+    TransitionStyle,
+    TransitionStyleChoice,
+    profile_for_genre,
+    serialise_choice,
+)
 
 # sounddevice requires PortAudio — guarded so the module can be imported in
 # headless / CI environments without audio hardware.
@@ -1884,6 +1890,11 @@ class LiveEngineBrowser:
         # the right downbeat (skipping any pickup) and (b) replace its
         # linear GainNode ramp with equal-power cos/sin curves.
         outgoing_phase_lock = self._phase_lock_payload()
+        # v3.7.0 — resolve the drift profile for THIS (from → to) pair while
+        # the cursor still points at ``from_track``. Non-drift keeps the int
+        # ``self.crossfade_sec`` (byte-identical payload); drift ships the
+        # profile override (24.0 for aural) as the effective blend length.
+        drift, drift_cf_sec = self._drift_transition_profile(from_track, to_track)
 
         with self._lock:
             self._idx += 1
@@ -1907,7 +1918,7 @@ class LiveEngineBrowser:
             "crossfade",
             from_track=from_track,
             to_track=to_track,
-            crossfade_sec=self.crossfade_sec,
+            crossfade_sec=drift_cf_sec if drift else self.crossfade_sec,
             phase_lock=outgoing_phase_lock,
         )
         self._emit(CROSSFADE_TRIGGERED, from_track=from_track, to_track=to_track)
@@ -1936,11 +1947,24 @@ class LiveEngineBrowser:
         if not track:
             return 0.0
         plan = self._transition_plan
+        is_current = (
+            track.get("id") is not None and track is self._current_track_for_plan()
+        )
+        # v3.7.0 — drift transitions ignore the phase-lock anchor entirely:
+        # a beatless genre has no trustworthy downbeat to cut on. Fall back
+        # to the legacy duration formula, but with the profile's (longer)
+        # crossfade_sec (24s for aural) so the long native-rate blend starts
+        # early enough. This yields an EARLIER cf_point than the 12s default.
+        if is_current:
+            _, next_track = self._plan_endpoints()
+            drift, cf_sec_eff = self._drift_transition_profile(track, next_track)
+            if drift:
+                duration = float(track.get("duration_sec") or 0.0)
+                return max(0.0, duration - cf_sec_eff - 5) + self._extend_sec
         if (
             plan is not None
             and plan.phrase_tier != "fallback"
-            and track.get("id") is not None
-            and track is self._current_track_for_plan()
+            and is_current
         ):
             return plan.plan.outgoing_anchor_catalog_sec + self._extend_sec
         cues = track.get("hot_cues") or []
@@ -1974,6 +1998,56 @@ class LiveEngineBrowser:
         if 0 <= idx < len(self.playlist):
             return self.playlist[idx]
         return None
+
+    def _plan_endpoints(self) -> tuple[dict | None, dict | None]:
+        """Return ``(current_track, next_track)`` for the upcoming transition.
+
+        Mirrors ``_current_track_for_plan``'s lock-free torn-read policy:
+        callers use the pair only to resolve the per-transition genre
+        profile (an identity/value decision), never as authoritative
+        state, and this method is sometimes invoked from inside a
+        ``with self._lock`` block (``_cf_point_seconds`` off
+        ``report_playback_pos``) where a reentrant grab would deadlock.
+        """
+        idx = self._idx
+        current = self.playlist[idx] if 0 <= idx < len(self.playlist) else None
+        next_track = (
+            self.playlist[idx + 1] if 0 <= idx and idx + 1 < len(self.playlist) else None
+        )
+        return current, next_track
+
+    def _drift_transition_profile(
+        self, current_track: dict | None, next_track: dict | None
+    ) -> tuple[bool, float]:
+        """Resolve the (is_drift, effective_crossfade_sec) for a transition.
+
+        v3.7.0 — genre transition profiles. A transition runs in DRIFT
+        mode when EITHER endpoint's ``genre_folder`` (falling back to
+        ``genre``) resolves to a ``dj_mix=False`` profile — e.g. the
+        beatless ``aural`` set. Drift = one long native-rate equal-power
+        crossfade: no tempo match, no grid warp, no bass swap, no anchor
+        repositioning (the whole phase-lock machinery is gated OFF here,
+        before it ever drives the wire payload).
+
+        The effective crossfade_sec is the first profile override present
+        among the drift-triggering endpoints (aural → 24.0s), falling back
+        to the engine default when a drift genre carries no override.
+        Non-drift transitions return ``(False, self.crossfade_sec)`` so the
+        legacy path stays bit-for-bit unchanged.
+        """
+        triggers: list[TransitionProfile] = []
+        for track in (current_track, next_track):
+            if not track:
+                continue
+            profile = profile_for_genre(track.get("genre_folder") or track.get("genre"))
+            if not profile.dj_mix:
+                triggers.append(profile)
+        if not triggers:
+            return (False, float(self.crossfade_sec))
+        override = next(
+            (p.crossfade_sec for p in triggers if p.crossfade_sec is not None), None
+        )
+        return (True, float(override) if override is not None else float(self.crossfade_sec))
 
     def _rebuild_transition_plan(self) -> None:
         """Recompute ``self._transition_plan`` for (current → next).
@@ -2102,6 +2176,22 @@ class LiveEngineBrowser:
         runs. ``1.0`` means "no rate change" (BPMs already within
         threshold, or one of them was missing from the catalog).
         """
+        # v3.7.0 — drift gate. When EITHER endpoint of the upcoming
+        # transition is a dj_mix=False genre (e.g. the beatless aural set),
+        # the transition runs in DRIFT mode and the entire phase-lock
+        # surface is suppressed: no anchors (they must NOT drive the cut),
+        # no tempo-match rates, no grid-warp schedule, no bass_swap. We emit
+        # ONLY the ``transition_style: "drift"`` marker; the frontend runs a
+        # plain native-rate equal-power crossfade over the ``crossfade_sec``
+        # carried by the ``crossfade`` engine_command (24s). This gate runs
+        # BEFORE the fallback check so drift is still signalled even when the
+        # (hallucinated) beatgrid would otherwise yield a fallback/plan tier.
+        current_track, next_track = self._plan_endpoints()
+        drift, _ = self._drift_transition_profile(current_track, next_track)
+        if drift:
+            return serialise_choice(
+                TransitionStyleChoice(style=TransitionStyle.DRIFT)
+            )
         plan = self._transition_plan
         if plan is None or plan.phrase_tier == "fallback":
             return {}
