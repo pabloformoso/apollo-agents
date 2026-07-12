@@ -583,6 +583,81 @@ def _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_vari
 # Helpers
 # ---------------------------------------------------------------------------
 
+def genre_guard_system(available_genres: list[str] | None = None) -> str:
+    """Build the Genre Guard system prompt with the LIVE genre list.
+
+    v3.7.3 — the static prompt only named example shorthands (lofi,
+    deep house, techno, cyberpunk), so a small local model
+    pattern-matched unfamiliar requests onto those examples: asking for
+    the new 'aural' collection got silently normalized to
+    'lofi - ambient' (observed 2026-07-12). Injecting the actual
+    catalog genres — plus a hard no-substitution rule — grounds the
+    guard in reality regardless of model size.
+
+    ``available_genres`` is injectable for tests; by default it reads
+    tracks.json via the same loader the tools use. Falls back to the
+    bare prompt when the catalog is unavailable.
+    """
+    genres = available_genres
+    if genres is None:
+        try:
+            from agent.tools import _load_catalog_genres  # noqa: PLC0415
+            genres = _load_catalog_genres()
+        except Exception:  # noqa: BLE001 — no catalog → keep the generic prompt
+            genres = []
+    if not genres:
+        return _GENRE_GUARD_SYSTEM
+    listing = ", ".join(sorted(genres))
+    return (
+        _GENRE_GUARD_SYSTEM
+        + "\n\nAVAILABLE GENRES (the catalog, right now): "
+        + listing
+        + "\n- The confirmed genre MUST be copied verbatim from this list."
+        "\n- NEVER substitute a different genre for the one the user asked"
+        " for. If their wording matches one of the available genres"
+        " (case-insensitive, partial is fine), confirm THAT one. If"
+        " nothing matches, show them the list and ask — do not guess."
+    )
+
+
+def enforce_mentioned_genre(
+    user_message: str,
+    parsed: dict | None,
+    available_genres: list[str],
+) -> dict | None:
+    """Deterministic backstop for the guard's genre choice (v3.7.3).
+
+    If the user's own words literally contain exactly ONE available
+    genre and the guard confirmed a DIFFERENT one that the user never
+    mentioned, trust the user over the model and override. Pure
+    function — both the CLI and web flows call it after parsing the
+    CONFIRMED block.
+
+    Deliberately conservative: no mention → no change; two or more
+    genres mentioned → ambiguous, no change; confirmed genre itself
+    mentioned → the model plausibly disambiguated, no change.
+    """
+    if parsed is None or not parsed.get("genre"):
+        return parsed
+    text = (user_message or "").casefold()
+    if not text:
+        return parsed
+    mentioned = [g for g in available_genres if g.casefold() in text]
+    if len(mentioned) != 1:
+        return parsed
+    confirmed = str(parsed["genre"]).casefold()
+    if confirmed == mentioned[0].casefold() or confirmed in text:
+        return parsed
+    corrected = dict(parsed)
+    corrected["genre"] = mentioned[0]
+    print(
+        f"[genre-guard] override: model confirmed {parsed['genre']!r} but the "
+        f"user explicitly asked for {mentioned[0]!r} — trusting the user",
+        flush=True,
+    )
+    return corrected
+
+
 def parse_textual_tool_call(
     text: str | None, tool_names
 ) -> tuple[str, dict] | None:
@@ -929,12 +1004,29 @@ def _orchestrate() -> None:
 
     while confirmed is None:
         guard_response = run_agent(
-            _GENRE_GUARD_SYSTEM, [list_genres], guard_messages, context_variables
+            genre_guard_system(), [list_genres], guard_messages, context_variables
         )
         if guard_response:
             print(f"\n[Genre Guard] {guard_response}\n")
 
         confirmed = _parse_confirmed_block(guard_response)
+        if confirmed is not None:
+            # v3.7.3 — deterministic backstop: the user's literal genre
+            # mention beats the model's normalization (see
+            # enforce_mentioned_genre). Consider EVERY user turn so a
+            # genre given mid-conversation still counts.
+            try:
+                from agent.tools import _load_catalog_genres  # noqa: PLC0415
+                user_text = " ".join(
+                    str(m.get("content") or "")
+                    for m in guard_messages
+                    if m.get("role") == "user"
+                )
+                confirmed = enforce_mentioned_genre(
+                    user_text, confirmed, _load_catalog_genres()
+                )
+            except Exception:  # noqa: BLE001 — no catalog → keep as parsed
+                pass
         if confirmed is None:
             try:
                 user_reply = input("You: ").strip()
