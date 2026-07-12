@@ -477,7 +477,7 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     final_text = ""
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
         kwargs: dict = {"model": _MODEL, "messages": full_messages}
         if schemas:
             kwargs["tools"] = schemas
@@ -485,6 +485,39 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
         final_text = msg.content or ""
+
+        if not tool_calls:
+            # v3.6.4 — textual-tool-call shim. Small local models often
+            # write the call as prose instead of using the tools API;
+            # recover it, execute, and rewrite the transcript as if the
+            # call had been structured (a bare role:"tool" message with
+            # no matching assistant tool_calls violates the protocol).
+            shim = parse_textual_tool_call(final_text, tool_index)
+            if shim is not None:
+                name, inputs = shim
+                print(
+                    f"  [tool-shim] {name}({json.dumps(inputs, ensure_ascii=False)}) "
+                    "— parsed from a text response"
+                )
+                synthetic = {
+                    "id": f"shim-{turn}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(inputs)},
+                }
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [synthetic],
+                }
+                result = _run_tool(name, inputs, context_variables, tool_index)
+                print(f"  → {result}\n")
+                tool_msg = {"role": "tool", "tool_call_id": synthetic["id"], "content": result}
+                full_messages.append(assistant_msg)
+                full_messages.append(tool_msg)
+                messages.append(assistant_msg)
+                messages.append(tool_msg)
+                continue
+
         full_messages.append(msg)
         messages.append({"role": "assistant", "content": msg.content, "tool_calls": tool_calls or None})
 
@@ -549,6 +582,70 @@ def _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_vari
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def parse_textual_tool_call(
+    text: str | None, tool_names
+) -> tuple[str, dict] | None:
+    """Parse a tool call the model wrote as PROSE instead of emitting it
+    through the function-calling interface (v3.6.4).
+
+    Small local models (observed live 2026-07-12 with gemma-4-e4b via
+    LM Studio) frequently answer a tool-shaped turn with the literal
+    text ``pick_next_track(bpm_min=75, key="11B", ...)`` and no
+    structured ``tool_calls``. The intent and arguments are right — only
+    the transport is wrong — so the agent loops use this parser as a
+    recovery shim before giving up on the turn.
+
+    Strict on purpose: after unwrapping optional backticks / a fenced
+    code block / one trailing period, the ENTIRE response must be a
+    single ``name(kw=value, ...)`` expression where ``name`` is a
+    registered tool and every argument is a keyword with a Python
+    literal value. Prose that merely mentions tool syntax mid-sentence,
+    positional arguments, or non-literal values all return None — false
+    negatives are cheap (the deterministic fallback covers them), false
+    positives are not.
+    """
+    import ast  # noqa: PLC0415 — helper-local, keeps module import light
+
+    if not text:
+        return None
+    s = text.strip()
+    # Unwrap a fenced code block (```tool / ```python first line).
+    if s.startswith("```"):
+        s = s[3:]
+        first_nl = s.find("\n")
+        if first_nl != -1 and " " not in s[:first_nl].strip():
+            s = s[first_nl + 1 :]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+    # Unwrap single-backtick inline code.
+    s = s.strip("`").strip()
+    # Tolerate one trailing sentence period after the closing paren.
+    if s.endswith(".") and s[:-1].rstrip().endswith(")"):
+        s = s[:-1].rstrip()
+
+    try:
+        tree = ast.parse(s, mode="eval")
+    except SyntaxError:
+        return None
+    call = tree.body
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        return None
+    if call.func.id not in set(tool_names):
+        return None
+    if call.args:
+        return None  # positional args → ambiguous mapping, refuse
+    kwargs: dict = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            return None  # **kwargs splat — nothing literal to recover
+        try:
+            kwargs[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, SyntaxError):
+            return None
+    return call.func.id, kwargs
+
 
 def _parse_critic_response(
     text: str, playlist: list[dict] | None = None
