@@ -420,13 +420,25 @@ def _play_audio(path: str, block: bool = True) -> str:
 # Tool functions
 # ---------------------------------------------------------------------------
 
-def list_genres(context_variables: dict) -> str:
-    """List all available genre folders from the track catalog."""
+def _load_catalog_genres() -> list[str]:
+    """Return the sorted genre_folder set from tracks.json ([] if absent).
+
+    v3.7.3 — shared by the ``list_genres`` tool and the dynamic Genre
+    Guard prompt (``agent.run.genre_guard_system``) so both always speak
+    from the same catalog.
+    """
     if not _CATALOG_PATH.exists():
-        return "Error: tracks.json not found. Run 'python main.py --build-catalog' first."
+        return []
     with open(_CATALOG_PATH, encoding="utf-8") as f:
         data = json.load(f)
-    genres = sorted({t["genre_folder"] for t in data["tracks"]})
+    return sorted({t["genre_folder"] for t in data["tracks"] if t.get("genre_folder")})
+
+
+def list_genres(context_variables: dict) -> str:
+    """List all available genre folders from the track catalog."""
+    genres = _load_catalog_genres()
+    if not genres:
+        return "Error: tracks.json not found. Run 'python main.py --build-catalog' first."
     return "Available genres:\n" + "\n".join(f"  - {g}" for g in genres)
 
 
@@ -483,6 +495,22 @@ def propose_playlist(
     """
     if not _CATALOG_PATH.exists():
         return "Error: tracks.json not found. Run --build-catalog first."
+
+    # v3.7.4 — the CONFIRMED genre in ctx is authoritative over the
+    # LLM's tool argument. Small local models sometimes call this tool
+    # with their prior ("lofi - ambient") instead of the genre the
+    # guard just confirmed ("aural"), and this tool used to obey AND
+    # overwrite ctx.genre with the wrong value — making the whole
+    # session coherent with the model's whim (observed live
+    # 2026-07-12: guard confirmed aural, planner built lofi anyway).
+    confirmed_genre = (context_variables.get("genre") or "").strip()
+    if confirmed_genre and confirmed_genre.lower() != genre.strip().lower():
+        print(
+            f"[propose_playlist] genre override: LLM asked for {genre!r} but "
+            f"ctx has confirmed {confirmed_genre!r} — trusting the confirmed genre",
+            flush=True,
+        )
+        genre = confirmed_genre
 
     with open(_CATALOG_PATH, encoding="utf-8") as f:
         data = json.load(f)

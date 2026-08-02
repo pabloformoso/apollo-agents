@@ -981,6 +981,40 @@ async def live_session_ws(
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
+    # v3.6.2 — drop playlist entries whose id no longer exists in the
+    # catalog. Sessions created before a ``--build-catalog`` rebuild
+    # keep the OLD track ids in their stored playlist; the browser's
+    # buffer fetch then 404s on the first stale track and the whole
+    # live session sits in silence with no recovery path (found live
+    # 2026-07-11: a May session opened for a stream referenced deleted
+    # ``LoFi-*`` files). Filtering here keeps the engine, the frontend
+    # deck, and the ``/api/tracks/{id}/stream`` endpoint consistent —
+    # they all resolve against the same ``pipeline.load_catalog``.
+    try:
+        catalog_tracks, _ = await asyncio.to_thread(pipeline.load_catalog, None)
+        catalog_ids = {t.get("id") for t in catalog_tracks if t.get("id")}
+    except pipeline.CatalogUnavailable:
+        catalog_ids = None  # no catalog to validate against — let it ride
+    if catalog_ids is not None:
+        fresh = [t for t in playlist if t.get("id") in catalog_ids]
+        dropped = len(playlist) - len(fresh)
+        if dropped:
+            print(
+                f"[live-ws {session_id}] dropped {dropped} stale playlist "
+                f"track(s) missing from the current catalog "
+                f"({len(fresh)} remain)",
+                flush=True,
+            )
+            playlist = fresh
+    if not playlist:
+        print(
+            f"[live-ws {session_id}] every playlist track is stale — "
+            "closing; regenerate the session against the current catalog",
+            flush=True,
+        )
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     # v2.7.2 — clean displacement of a prior primary on the same slot.
     # Without this, a refresh (or a second tab landing on /live without
     # ?viewer=1) silently overwrites the dict entry and the existing
@@ -1094,6 +1128,39 @@ async def live_session_ws(
 
     phase_task = asyncio.create_task(run_phase())
 
+    # ── v3.6.3: server-side stall watchdog ─────────────────────────────
+    # The browser engine is ping-driven; if the operator tab freezes
+    # (Chrome Energy Saver) or a deck never starts, no ping ever crosses
+    # a threshold again and the session wedges in silence (observed live
+    # 2026-07-11). Poll the engine's stall check so the backend can
+    # synthesise the missing track_ended and keep the set moving — any
+    # attached OBS viewer follows the resulting load command and the
+    # stream stays audible. Module attribute lookups (not from-imports)
+    # so tests can monkeypatch the cadence/margin.
+    import agent.live_engine as live_engine_mod  # noqa: PLC0415
+
+    async def run_stall_watchdog() -> None:
+        while True:
+            await asyncio.sleep(live_engine_mod.LIVE_STALL_CHECK_SEC)
+            try:
+                # to_thread: a forced advance can run the endless
+                # fallback, which reads tracks.json from disk.
+                forced = await asyncio.to_thread(engine.check_stall)
+            except Exception as exc:  # noqa: BLE001 — watchdog must outlive hiccups
+                print(
+                    f"[live-ws {session_id}] check_stall failed: {exc}",
+                    flush=True,
+                )
+                continue
+            if forced:
+                print(
+                    f"[live-ws {session_id}] stall watchdog forced advance "
+                    f"past {forced!r}",
+                    flush=True,
+                )
+
+    stall_task = asyncio.create_task(run_stall_watchdog())
+
     # ── v2.7.2: YouTube Live Chat ingest (session-scoped) ──────────────
     # The poller now lives in ``youtube_runtime`` keyed by
     # (user_id, session_id) — one poller per session regardless of how
@@ -1104,22 +1171,45 @@ async def live_session_ws(
     # respawning the poller / re-fetching chat backlog.
     from . import youtube_runtime  # noqa: PLC0415 — optional dep lazy
 
-    async def _on_yt_message(author: str, text: str, ts_ms: int) -> None:
-        """Per-WS callback: emit dj_chat visibility + enqueue for agent."""
+    from .chat_names import build_greeting_event, sanitize_display_name
+
+    async def _on_yt_message(author: str, text: str, ts_ms: int, is_first: bool) -> None:
+        """Per-WS callback: emit dj_chat visibility + enqueue for agent.
+
+        v3.7.0 — ``is_first`` (author's first message this stream,
+        computed once in youtube_runtime) drives the greeting overlay:
+        a ``chat_greeting`` event fans out to the operator page and
+        every OBS viewer, and the DJ's copy of the message is tagged so
+        the LLM greets by name via emit_chat.
+        """
         # Diagnostic — surfaces in .tmp/backend.log so we can confirm
         # the poller is firing when audience messages don't appear in
         # the UI. Cheap enough to keep in prod for now.
         print(
-            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}",
+            f"[live-ws {session_id}] YT msg from @{author!r}: {text[:80]!r}"
+            f"{' [first]' if is_first else ''}",
             flush=True,
         )
+        greeting = build_greeting_event(author, is_first)
+        if greeting is not None:
+            try:
+                await emit(greeting)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[live-ws {session_id}] chat_greeting emit failed: {exc}",
+                    flush=True,
+                )
+        # Sanitized name in the DJ/panel framing too — a crafted
+        # username must not be able to fake the [YT @...] envelope.
+        safe_author = sanitize_display_name(author) or "viewer"
+        first_tag = " - first message this stream" if greeting is not None else ""
         try:
-            await emit({"type": "dj_chat", "text": f"[YT @{author}] {text}"})
+            await emit({"type": "dj_chat", "text": f"[YT @{safe_author}] {text}"})
         except Exception as exc:  # noqa: BLE001
             print(f"[live-ws {session_id}] yt dj_chat emit failed: {exc}", flush=True)
         payload = {
             "type": "user_msg",
-            "text": f"[YT @{author}] {text}",
+            "text": f"[YT @{safe_author}{first_tag}] {text}",
             "timestamp_ms": ts_ms or None,
         }
         try:
@@ -1294,6 +1384,12 @@ async def live_session_ws(
             phase_task.cancel()
             try:
                 await phase_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if not stall_task.done():
+            stall_task.cancel()
+            try:
+                await stall_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
         # v2.7.2: detach from the session-scoped YT runtime. If we were

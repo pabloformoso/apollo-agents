@@ -321,6 +321,29 @@ Step 4 onward needs the audible end set up on this Windows box:
 
 ---
 
+## 12.5 v3.2 — DE PATRONES A MUSICA (shipped 2026-07-07)
+
+> All four slices landed the same day, critic-reviewed before implementation
+> (Opus 4.8 pass closed the gaps: CC-mean energy proxy was unmeasurable,
+> reference LUFS comparison was unfair, the lead had no channel).
+>
+> - **S-1 quality bench (#71)**: `quality.py` + `bench.py` + committed
+>   references from 5 published catalog tracks per genre. Two tiers
+>   (reference_informed gates --strict, advisory reports). First catch on
+>   day one: renderer hats at ~10 kHz centroid vs catalog [319, 5308] —
+>   fixed with a deterministic FFT lowpass. `energy_proxy` is THE canonical
+>   energy measure.
+> - **S-3 density (#72)**: `apply_density` (weakest-beat-first, monotonic,
+>   identity at the written count), perc/shaker/clap roles, auto-fills
+>   (last bar only, kick downbeat sacred), richer named patterns.
+> - **S-4 arc (#73)**: ArcSpec/ArcState (looping sections, reject-and-hold
+>   revision), default arcs per genre pack, `apply_arc_to_spec` maps
+>   density→dial and energy→velocities. Spearman(target, energy) = 1.0 on
+>   the scripted session.
+> - **S-5 lead (#74)**: LeadRole (C4-B6, scale-guarded, LEAD_CHANNEL=2),
+>   `motif.py` (motif_of + classify_variation), motif memory in state, mind
+>   varies instead of reinventing.
+
 ## 12. v3.0 — MUSICAL SENSE (ambient & lofi first)
 
 > Planned 2026-07-07 after the spike was accepted. Goal: stop sounding like a

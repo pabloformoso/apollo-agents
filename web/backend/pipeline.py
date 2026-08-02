@@ -33,6 +33,9 @@ from agent.run import (  # noqa: E402
     _build_anthropic_schemas,
     _build_openai_schemas,
     _run_tool,
+    enforce_mentioned_genre,
+    genre_guard_system,
+    parse_textual_tool_call,
 )
 
 # ---------------------------------------------------------------------------
@@ -581,7 +584,7 @@ async def _run_openai_streaming(
 
     sys_messages = [{"role": "system", "content": system}] + messages
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
         full_text = ""
         tool_calls_acc: dict[int, dict] = {}
 
@@ -635,6 +638,43 @@ async def _run_openai_streaming(
                 results.append({"role": "tool", "tool_call_id": tc["id"], "content": str(result)})
             sys_messages.extend(results)
         else:
+            # v3.6.4 — textual-tool-call shim (mirror of the sync loop in
+            # agent/run.py). gemma-4-e4b via LM Studio answers tool turns
+            # with the literal text ``pick_next_track(...)`` and no
+            # structured tool_calls; recover, execute, and keep looping so
+            # the model can wrap up with real text. Note: the textualized
+            # call already streamed to the UI as text_delta — cosmetic,
+            # the frontend chat panel shows it as a code-ish line.
+            shim = parse_textual_tool_call(full_text, tool_index)
+            if shim is not None:
+                name, inputs = shim
+                print(
+                    f"[llm-shim] textual tool call recovered: {name}({inputs})",
+                    flush=True,
+                )
+                synthetic_id = f"shim-{turn}"
+                sys_messages.append({
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": synthetic_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": _json.dumps(inputs)},
+                    }],
+                })
+                await emit({"type": "tool_call", "name": name, "input": inputs})
+                _install_progress_hook(ctx, name, emit)
+                try:
+                    result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                finally:
+                    ctx.pop("_progress", None)
+                await emit({"type": "tool_result", "name": name, "result": str(result)})
+                sys_messages.append({
+                    "role": "tool",
+                    "tool_call_id": synthetic_id,
+                    "content": str(result),
+                })
+                continue
             sys_messages.append({"role": "assistant", "content": full_text})
             final_text = full_text
             break
@@ -671,9 +711,26 @@ async def phase_genre_guard(
 ) -> dict | None:
     """Run Genre Guard. Returns {genre, duration_min, mood} or None."""
     history.append({"role": "user", "content": message})
-    response = await run_agent_streaming(_GENRE_GUARD_SYSTEM, _GENRE_TOOLS, history, ctx, emit)
+    # v3.7.3 — dynamic prompt (real catalog genres injected) + a
+    # deterministic backstop: if the user literally named an available
+    # genre and the model confirmed a different, unmentioned one, the
+    # user wins. Small local models pattern-matched 'aural' requests
+    # onto the prompt's lofi example (observed 2026-07-12).
+    try:
+        from agent.tools import _load_catalog_genres  # noqa: PLC0415
+        genres = _load_catalog_genres()
+    except Exception:  # noqa: BLE001 — no catalog → generic prompt, no backstop
+        genres = []
+    system = genre_guard_system(genres or None)
+    response = await run_agent_streaming(system, _GENRE_TOOLS, history, ctx, emit)
     history.append({"role": "assistant", "content": response})
-    return _parse_confirmed_block(response)
+    parsed = _parse_confirmed_block(response)
+    # Every user turn counts — the genre may have been named before the
+    # final confirmation message.
+    user_text = " ".join(
+        str(m.get("content") or "") for m in history if m.get("role") == "user"
+    )
+    return enforce_mentioned_genre(user_text, parsed, genres)
 
 
 async def _hydrate_user_context(ctx: dict) -> None:

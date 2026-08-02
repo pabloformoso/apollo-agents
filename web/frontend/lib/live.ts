@@ -49,6 +49,7 @@ import {
   BufferDeck,
   SCHEDULE_LOOKAHEAD_SEC,
 } from "./audio_buffer_decks";
+import type { Greeting } from "./greetings";
 
 /**
  * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
@@ -229,6 +230,10 @@ export interface UseLiveSessionApi {
   playlistRunningLow: boolean;
   /** Toggle endless mode. Sends a WS command; the server echoes the new state. */
   setEndlessMode: (enabled: boolean) => void;
+  // v3.7.0 — chat greeting overlay feed.
+  /** Recent chat_greeting events (capped at 20). GreetingOverlay consumes
+   *  the tail; older entries age out naturally. */
+  greetings: Greeting[];
   // v2.7 — YouTube Live Chat ingest status, surfaced as a pill in the /live header.
   /** Compact view-model the UI binds to. ``state === "off"`` means no events arrived yet
    *  (either the operator hasn't linked YT or the backend isn't configured); the UI uses
@@ -326,8 +331,18 @@ export interface PhaseLockPayload {
    * the cutoff back down on a phrase-boundary downbeat for a
    * tension/release "drop" feel. Always present when ``xfade_sec`` is
    * set so the deck can branch on it without optional chaining.
+   *
+   * v3.8 — ``drift`` is the beatless-genre profile (aural / ambient:
+   * drones, healing frequencies, no valid beat structure). The backend
+   * resolves a per-genre transition profile and emits ``drift`` when
+   * EITHER endpoint track maps to a ``dj_mix=False`` profile. Drift is
+   * one long equal-power crossfade at native rate and NOTHING else —
+   * the frontend MUST ignore every phase-lock anchor / rate field when
+   * this is set (see ``crossfadeToNext``). Unknown / absent values are
+   * treated exactly as before (legacy path), so an older backend that
+   * never sends ``drift`` is unaffected.
    */
-  transition_style?: "smooth_blend" | "bass_swap";
+  transition_style?: "smooth_blend" | "bass_swap" | "drift";
   /**
    * v3.3 — automation envelope for the ``bass_swap`` style. Present iff
    * ``transition_style === "bass_swap"``. The deck reads:
@@ -448,6 +463,17 @@ interface ServerDjChat {
   text: string;
 }
 
+// v3.7.0 — greeting overlay trigger. Emitted by the backend once per
+// chatter per stream (first message; author already sanitized
+// server-side). ``kind: "returning"`` is reserved for channel-level
+// regulars — the contract ships with the enum so that lands without a
+// breaking change.
+interface ServerChatGreeting {
+  type: "chat_greeting";
+  author: string;
+  kind: "first" | "returning";
+}
+
 interface ServerError {
   type: "error";
   message: string;
@@ -473,6 +499,7 @@ type ServerEvent =
   | ServerEngineCommand
   | ServerLiveMessage
   | ServerDjChat
+  | ServerChatGreeting
   | ServerEndlessModeMessage
   | ServerYouTubeStatusMessage
   | ServerCriticWarning
@@ -593,6 +620,12 @@ export function useLiveSession(
   // True from PLAYLIST_RUNNING_LOW until the next track_started — drives
   // the "picking continuation track…" banner on /live.
   const [playlistRunningLow, setPlaylistRunningLow] = useState(false);
+  // v3.7.0 — chat greeting feed for the on-stream overlay. Server emits
+  // one chat_greeting per chatter per stream; we keep a short tail and
+  // let GreetingOverlay own display timing/coalescing. The seq ref
+  // gives each entry a stable identity (burst events share one ts).
+  const [greetings, setGreetings] = useState<Greeting[]>([]);
+  const greetingSeqRef = useRef(0);
   // v2.7.3 — WS reconnect bookkeeping. ``wsRetryAttempt`` is the
   // current retry count (0 when connected or doing the very first
   // open). ``wsExhausted`` flips once we've burned through
@@ -854,6 +887,13 @@ export function useLiveSession(
       try {
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
+        // NOTE (v3.6.2): a failed load leaves the deck INERT by design
+        // for now — the whole E2E substrate drives the UI against
+        // 404ing mock streams and relies on that. Stale-playlist 404s
+        // are prevented upstream (the live WS validates the playlist
+        // against the catalog before the engine starts). Turning this
+        // into a skip (synthetic track_ended) needs playable E2E audio
+        // first — tracked as follow-up.
         console.warn("[live] decodeAudioData failed on load:", err);
         return;
       }
@@ -932,14 +972,37 @@ export function useLiveSession(
       const cache = ensureBufferCache();
       if (!ctx || !fromDeck || !toDeck || !cache) return;
 
+      // v3.8 — drift transition profile (beatless genres: aural / ambient).
+      // When EITHER endpoint maps to a dj_mix=False profile the backend
+      // sends ``transition_style: "drift"`` and the profile's longer
+      // crossfade_sec (24s) on the engine_command. Drift is one long
+      // equal-power crossfade at NATIVE rate and nothing else — every DJ
+      // move that reads as an artefact on frequency-domain content
+      // (tempo-match wow/flutter + pitch shift, grid-warp built on
+      // hallucinated beatgrids, bass-swap filter sweep heard as a dropout
+      // on a pad) is bypassed. The three drift invariants are enforced
+      // point-by-point below:
+      //   1. anchors ignored     → incomingAnchorSec pinned to 0
+      //   2. playbackRate 1.0    → incomingRate 1.0, no beat_rate_schedule
+      //   3. no filter touch     → the whole HPF block is skipped
+      // and the gain ramp uses equal-power curves over the RECEIVED
+      // crossfade_sec (not phase_lock.xfade_sec). Absent / unknown
+      // transition_style leaves isDrift false, so the legacy phase-lock /
+      // bass_swap / linear paths run bit-for-bit as before.
+      const isDrift = phaseLock?.transition_style === "drift";
+
       // v3.1 carried forward — tempo-match the incoming deck to the
       // outgoing's BPM via AudioBufferSourceNode.playbackRate
       // (sample-accurate equivalent of the prior HTMLMediaElement
       // playbackRate + preservesPitch). Backend supplies
       // incoming_rate = outgoing_bpm / incoming_bpm clamped to
-      // [1/1.5, 1.5]; 1.0 / missing means leave at native rate.
+      // [1/1.5, 1.5]; 1.0 / missing means leave at native rate. Drift
+      // (invariant 2) forces native rate regardless of any incoming_rate
+      // a mixed-profile payload might still carry.
       const incomingRate =
-        typeof phaseLock?.incoming_rate === "number" && phaseLock.incoming_rate > 0
+        !isDrift &&
+        typeof phaseLock?.incoming_rate === "number" &&
+        phaseLock.incoming_rate > 0
           ? phaseLock.incoming_rate
           : 1.0;
 
@@ -948,9 +1011,11 @@ export function useLiveSession(
       // static incomingRate: we start the source at the FIRST segment's
       // rate (so the very first bar is already locked) and apply the rest
       // as playbackRate automation below. Absent for loose grids, where we
-      // keep the static incomingRate.
+      // keep the static incomingRate. Drift (invariant 2) ignores any
+      // schedule outright — a beatless pad has no bars to lock to.
       const rateSchedule = phaseLock?.beat_rate_schedule;
-      const hasRateSchedule = Array.isArray(rateSchedule) && rateSchedule.length > 0;
+      const hasRateSchedule =
+        !isDrift && Array.isArray(rateSchedule) && rateSchedule.length > 0;
       const initialRate = hasRateSchedule ? rateSchedule[0].rate : incomingRate;
 
       // Pre-stretched anchor: the catalog-time second within the
@@ -958,8 +1023,10 @@ export function useLiveSession(
       // Becomes the `offset` argument to AudioBufferSourceNode.start —
       // sample-accurate by spec, unaffected by MP3 frame boundaries
       // because the buffer is plain PCM at the context's sample rate.
+      // Drift (invariant 1) ignores the anchor entirely: no downbeat to
+      // land on, so the incoming track simply starts from its head.
       const incomingAnchorSec =
-        typeof phaseLock?.incoming_anchor_sec === "number"
+        !isDrift && typeof phaseLock?.incoming_anchor_sec === "number"
           ? phaseLock.incoming_anchor_sec
           : 0;
 
@@ -1022,7 +1089,14 @@ export function useLiveSession(
       // SMOOTH_BLEND skips the automation; the deck.resetAutomation()
       // below ensures the filter is at 20 Hz pass-through.
       const filterTo = toDeck.filter;
-      if (
+      if (isDrift) {
+        // v3.8 drift (invariant 3) — ZERO BiquadFilter automation. A
+        // filter sweep reads as an audio dropout on a beatless pad, so we
+        // touch neither frequency.setValueAtTime nor cancelScheduledValues
+        // here. Aural transitions are always drift, so no prior bass_swap
+        // can have left a pending scheduled value on this deck to clear;
+        // the filter stays at its constructor default (20 Hz pass-through).
+      } else if (
         filterTo &&
         phaseLock?.transition_style === "bass_swap" &&
         phaseLock.bass_swap
@@ -1071,11 +1145,16 @@ export function useLiveSession(
         gainTo.gain.cancelScheduledValues(when);
         gainFrom.gain.setValueAtTime(gainFrom.gain.value, when);
         gainTo.gain.setValueAtTime(gainTo.gain.value, when);
-        const xfadeSec = phaseLock?.xfade_sec ?? crossfadeSec;
-        if (phaseLock && phaseLock.xfade_sec && phaseLock.xfade_sec > 0) {
+        // Drift ramps over the RECEIVED crossfade_sec (the profile
+        // override, 24s for aural) — it carries no phase_lock.xfade_sec of
+        // its own. Non-drift keeps the phase-lock xfade window when set.
+        const xfadeSec = isDrift ? crossfadeSec : phaseLock?.xfade_sec ?? crossfadeSec;
+        if (isDrift || (phaseLock && phaseLock.xfade_sec && phaseLock.xfade_sec > 0)) {
           // v3.0 — equal-power cos/sin curves (cos² + sin² = 1) so
           // perceived loudness stays constant across the overlap.
           // Algebra matches agent.phase_lock.phase_locked_crossfade_np.
+          // Drift uses the SAME equal-power curves (invariant: one long
+          // equal-power crossfade) — just over the profile's crossfade_sec.
           const fadeOut = buildEqualPowerCurve("out");
           const fadeIn = buildEqualPowerCurve("in");
           gainFrom.gain.setValueCurveAtTime(fadeOut, when, xfadeSec);
@@ -1289,6 +1368,26 @@ export function useLiveSession(
           reason: evt.reason,
         });
         break;
+      case "chat_greeting": {
+        // v3.7.0 — greeting overlay feed. Author is sanitized
+        // server-side; we just append (short tail — GreetingOverlay
+        // consumes and paces the display). The id is captured NOW —
+        // the state updater runs later, and a same-batch burst would
+        // otherwise read the ref after every increment (duplicate ids).
+        const greetingId = ++greetingSeqRef.current;
+        const greetingAuthor = evt.author;
+        const greetingKind = evt.kind;
+        setGreetings((prev) => [
+          ...prev.slice(-19),
+          {
+            id: greetingId,
+            author: greetingAuthor,
+            kind: greetingKind,
+            ts: Date.now(),
+          },
+        ]);
+        break;
+      }
       case "session_ended":
         setState("ended");
         setExplicitNextTrack(null);
@@ -1553,7 +1652,14 @@ export function useLiveSession(
     // by the rules of React they MUST NOT appear in the dep array.
     // ``reconnectKey`` IS a dep — bumping it via ``reconnectNow`` is the
     // signal to re-run this effect after the user clicks Reconnect.
-  }, [sessionId, reconnectKey]);
+    // ``viewerMode`` IS a dep (v3.6.2) — the /live page resolves
+    // ``?viewer=1`` in a post-mount effect, so the first connect can
+    // race it and land on the PRIMARY endpoint. A wrongly-primary
+    // OBS Browser Source displaces the operator and its disconnect
+    // tears the whole session down (``finally`` → ``engine.stop()``).
+    // Re-running the effect on the flip closes the wrong socket and
+    // reconnects to ``/live/viewer``.
+  }, [sessionId, reconnectKey, viewerMode]);
 
   // v2.7.3 — manual "try again" trigger surfaced to the UI. Clears the
   // exhausted flag so the banner doesn't render twice during the
@@ -1915,6 +2021,7 @@ export function useLiveSession(
       endlessMode,
       playlistRunningLow,
       setEndlessMode: setEndlessModeWS,
+      greetings,
       youtube,
       wsRetryAttempt,
       wsRetryMax: MAX_WS_RETRIES,
@@ -1946,6 +2053,7 @@ export function useLiveSession(
       endlessMode,
       playlistRunningLow,
       setEndlessModeWS,
+      greetings,
       youtube,
       wsRetryAttempt,
       wsExhausted,

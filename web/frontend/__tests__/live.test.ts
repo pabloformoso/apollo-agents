@@ -1258,6 +1258,89 @@ describe("useLiveSession", () => {
     expect(userMsgs[0].text).toBe("hi");
   });
 
+  // ── v3.6.2 — late viewer-flag flip must abandon the primary socket ─────
+  it("reconnects to the /viewer path when the viewer flag flips after mount", async () => {
+    // The /live page resolves ?viewer=1 in a post-mount effect, so the
+    // hook can mount with viewer=false and flip a tick later. Pre-fix
+    // the WS effect ignored the flip (viewerMode wasn't a dep) and an
+    // OBS Browser Source stayed connected as PRIMARY — its eventual
+    // disconnect tore the whole session down (finally → engine.stop()).
+    const { rerender } = renderHook(
+      ({ viewer }: { viewer: boolean }) =>
+        useLiveSession("sid-late-viewer", { viewer }),
+      { initialProps: { viewer: false } },
+    );
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain("/live/stream");
+
+    rerender({ viewer: true });
+    await flushOpen();
+    expect(FakeWebSocket.lastInstance!.url).toContain(
+      "/api/sessions/sid-late-viewer/live/viewer",
+    );
+    expect(FakeWebSocket.lastInstance!.url).not.toContain("/live/stream");
+  });
+
+  // ── v3.7.0 — chat_greeting feed ─────────────────────────────────────────
+  it("appends chat_greeting events to the greetings feed with stable ids", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-greet"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "chat_greeting",
+        author: "marta",
+        kind: "first",
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "chat_greeting",
+        author: "kenji",
+        kind: "first",
+      });
+    });
+    const gs = result.current.greetings;
+    expect(gs).toHaveLength(2);
+    expect(gs[0].author).toBe("marta");
+    expect(gs[1].author).toBe("kenji");
+    expect(gs[0].kind).toBe("first");
+    // Burst-safe identity: ids are distinct and increasing even when
+    // both events land in the same millisecond.
+    expect(gs[1].id).toBeGreaterThan(gs[0].id);
+  });
+
+  // ── v3.6.2 — a failed buffer load stays inert (E2E substrate contract) ──
+  it("does not send anything when the buffer fetch 404s", async () => {
+    // Deliberate: an unplayable track leaves the deck inert (warn only).
+    // Stale playlists are filtered server-side before the engine starts;
+    // the E2E suite drives the UI against 404ing mock streams and
+    // depends on the deck staying quiet. If this behavior changes,
+    // playable E2E audio must land first.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (url: unknown) =>
+        String(url).includes("/api/tracks/ghost-1/stream")
+          ? { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0) }
+          : { ok: true, status: 200, arrayBuffer: async () => new ArrayBuffer(8) },
+    );
+    renderHook(() => useLiveSession("sid-404"));
+    await flushOpen();
+    const ghost = { id: "ghost-1", display_name: "Deleted" };
+    await act(async () => {
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "engine_command",
+        command: "load",
+        track: ghost,
+      });
+      FakeWebSocket.lastInstance!.pushServerEvent({
+        type: "track_started",
+        track: ghost,
+      });
+      await new Promise((r) => setTimeout(r, 5));
+    });
+    const sent = FakeWebSocket.lastInstance!.sent.map((s) => JSON.parse(s));
+    expect(
+      sent.filter((m: { type: string }) => m.type === "track_ended"),
+    ).toEqual([]);
+  });
+
   // ── v2.7.3 — WS auto-reconnect with exponential backoff ────────────────
   // Backoff schedule mirrors the prod constant in lib/live.ts:
   // 1s / 2s / 4s / 8s / 15s, 5 attempts max.
@@ -2177,6 +2260,196 @@ describe("useLiveSession", () => {
       const trackCSource = FakeBufferSource.instances[sourcesBeforeLoad];
       expect(trackCSource).toBeDefined();
       expect(trackCSource.playbackRate.value).toBe(1.0);
+    });
+  });
+
+  // ── v3.8 — drift transition profile (beatless genres: aural/ambient) ────
+  //
+  // The backend resolves a per-genre transition profile and, when EITHER
+  // endpoint maps to dj_mix=False, emits transition_style: "drift" with the
+  // profile's longer crossfade_sec (24s) on the engine_command. Drift is one
+  // long equal-power crossfade at NATIVE rate and nothing else — the DJ
+  // moves that read as artefacts on frequency-domain content (tempo-match
+  // wow/flutter + pitch shift, grid-warp on hallucinated beatgrids, bass-swap
+  // filter sweep heard as a dropout on a pad) are all bypassed.
+  //
+  // Every payload below deliberately CARRIES anchors, incoming_rate, AND a
+  // beat_rate_schedule the legacy path would honour — so a passing test
+  // proves the drift branch ignored all of them: rate stays 1.0, offset
+  // stays 0, zero filter automation, gains ramped over the WIRE crossfade_sec
+  // (not phase_lock.xfade_sec).
+  // =======================================================================
+  describe("v3.8 drift transition", () => {
+    // aural collection: beatless pads (drones / healing frequencies, no
+    // valid beat structure). madmom still "hallucinates" a grid, which is
+    // exactly why the payload can carry anchors/rate that drift must ignore.
+    const track = (id: string, name: string) => ({
+      id,
+      display_name: name,
+      bpm: 80,
+      camelot_key: null,
+      duration_sec: 172,
+    });
+
+    // Maximally-adversarial drift payload: every field the legacy path would
+    // act on is present. xfade_sec (12) deliberately differs from the
+    // engine_command crossfade_sec (24) so the gain-duration test can prove
+    // which one wins.
+    const driftPayload: PhaseLockPayload = {
+      transition_style: "drift",
+      incoming_anchor_sec: 1.875,
+      outgoing_anchor_sec: 90.0,
+      xfade_sec: 12.0,
+      incoming_rate: 0.91,
+      beat_rate_schedule: [
+        { at_sec: 0, rate: 1.12, ramp: false },
+        { at_sec: 12.0, rate: 1.0, ramp: true },
+      ],
+    };
+
+    async function bootstrapAndStart(sessionId: string) {
+      const { result } = renderHook(() => useLiveSession(sessionId));
+      await flushOpen();
+      const playlist = [track("A", "Drone A"), track("B", "Drone B")];
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: sessionId,
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      return { result, playlist };
+    }
+
+    async function fireDrift(
+      playlist: ReturnType<typeof track>[],
+      payload: PhaseLockPayload = driftPayload,
+      crossfadeSec = 24,
+    ): Promise<FakeBufferSource> {
+      const sourcesBefore = FakeBufferSource.instances.length;
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          crossfade_sec: crossfadeSec,
+          phase_lock: payload,
+        });
+        await new Promise((r) => setTimeout(r, 10));
+      });
+      return FakeBufferSource.instances[sourcesBefore];
+    }
+
+    it("keeps the incoming source at playbackRate 1.0 (ignores incoming_rate + beat_rate_schedule)", async () => {
+      const { playlist } = await bootstrapAndStart("sid-drift-1");
+      const incoming = await fireDrift(playlist);
+      expect(incoming).toBeDefined();
+      // Native rate despite incoming_rate: 0.91 in the payload.
+      expect(incoming.playbackRate.value).toBe(1.0);
+      // No per-bar grid-warp automation despite the beat_rate_schedule.
+      expect(incoming.playbackRate.setValueAtTime).not.toHaveBeenCalled();
+      expect(
+        incoming.playbackRate.linearRampToValueAtTime,
+      ).not.toHaveBeenCalled();
+    });
+
+    it("ignores incoming_anchor_sec — starts the incoming source at offset 0", async () => {
+      const { playlist } = await bootstrapAndStart("sid-drift-2");
+      const incoming = await fireDrift(playlist);
+      expect(incoming.start).toHaveBeenCalledTimes(1);
+      const [, offsetArg] = incoming.start.mock.calls[0] as unknown as [
+        number,
+        number,
+      ];
+      // incoming_anchor_sec was 1.875 in the payload; drift pins it to 0
+      // (no downbeat to land on — the pad simply starts from its head).
+      expect(offsetArg).toBe(0);
+    });
+
+    it("performs zero BiquadFilter automation on the incoming deck", async () => {
+      const { playlist } = await bootstrapAndStart("sid-drift-3");
+      // Deck B (incoming) is created fresh during the crossfade, so snapshot
+      // the filter count now: this scopes the assertion to the incoming
+      // deck's filter and excludes deck A's pre-crossfade resetAutomation
+      // (20 Hz) from the initial load.
+      const filtersBefore = FakeBiquadFilterNode.instances.length;
+      await fireDrift(playlist);
+      const incomingFilters =
+        FakeBiquadFilterNode.instances.slice(filtersBefore);
+      expect(incomingFilters.length).toBeGreaterThanOrEqual(1);
+      for (const f of incomingFilters) {
+        expect(f.frequency.setValueAtTime).not.toHaveBeenCalled();
+        expect(f.frequency.linearRampToValueAtTime).not.toHaveBeenCalled();
+        expect(f.frequency.cancelScheduledValues).not.toHaveBeenCalled();
+      }
+    });
+
+    it("ramps gains with equal-power curves over the received crossfade_sec (24s), not xfade_sec", async () => {
+      const { playlist } = await bootstrapAndStart("sid-drift-4");
+      // engine_command crossfade_sec = 24; payload xfade_sec = 12.
+      await fireDrift(playlist);
+      const curveCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.setValueCurveAtTime.mock.calls,
+      );
+      // Two equal-power ramps: one fading out, one fading in.
+      expect(curveCalls.length).toBeGreaterThanOrEqual(2);
+      // Duration is the WIRE crossfade_sec (24), NOT phase_lock.xfade_sec (12).
+      for (const call of curveCalls) {
+        expect(call[2] as number).toBeCloseTo(24, 5);
+      }
+      // Equal-power, not linear: fade-in starts at 0, fade-out at 1.
+      const firstSamples = curveCalls
+        .map((call) => (call[0] as Float32Array)[0])
+        .sort();
+      expect(firstSamples[0]).toBeLessThan(0.01);
+      expect(firstSamples[firstSamples.length - 1]).toBeGreaterThan(0.99);
+      // The legacy linear ramp must NOT fire on a drift transition.
+      const linearCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.linearRampToValueAtTime.mock.calls,
+      );
+      expect(linearCalls).toHaveLength(0);
+    });
+
+    it("an unknown transition_style still takes the legacy linear path (backward compatible)", async () => {
+      // Defensive: only the exact string "drift" triggers drift mode. A
+      // future / unknown style with no xfade_sec must behave exactly as a
+      // missing payload did pre-v3.8 — legacy linear ramp, no crash.
+      const { playlist } = await bootstrapAndStart("sid-drift-5");
+      await fireDrift(
+        playlist,
+        {
+          transition_style: "some_future_style",
+        } as unknown as PhaseLockPayload,
+        12,
+      );
+      const linearCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.linearRampToValueAtTime.mock.calls,
+      );
+      expect(linearCalls.length).toBeGreaterThanOrEqual(2);
+      const curveCalls = FakeGainNode.instances.flatMap((g) =>
+        g.gain.setValueCurveAtTime.mock.calls,
+      );
+      expect(curveCalls).toHaveLength(0);
     });
   });
 });

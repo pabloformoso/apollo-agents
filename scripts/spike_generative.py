@@ -59,6 +59,10 @@ def main() -> int:
     parser.add_argument("--drum-port", default=None,
                         help="substring of a SECOND port for drums (ch 10) — see "
                              "docs/surge-multitimbral-setup.md")
+    parser.add_argument("--drum-boost", type=float, default=1.0,
+                        help="velocity scale for the drum port (gain staging vs the pad)")
+    parser.add_argument("--pad-duck", type=float, default=1.0,
+                        help="velocity scale for the MAIN port (duck a hot pad/EP)")
     parser.add_argument("--genre", default="deep", choices=sorted(GENRE_PACKS),
                         help="genre pack: starter spec + idiom brief for the mind")
     parser.add_argument("--bpm", type=float, default=None, help="override starter BPM")
@@ -83,7 +87,8 @@ def main() -> int:
 
     port = open_output(args.port)
     if args.drum_port:
-        port = SplitPort(port, open_output(args.drum_port))
+        port = SplitPort(port, open_output(args.drum_port), drum_vel_scale=args.drum_boost,
+                         main_vel_scale=args.pad_duck)
     print(f"[spike] MIDI out: {port.name}")
     print(expected_setup(args.genre))
     mind = None if args.no_llm else Mind(genre=args.genre)

@@ -251,6 +251,33 @@ def _build_mock_catalog(pipeline_module) -> list[dict]:
     # Silence") is referenced by name in the v2.2.0 player spec; the rest are
     # extras introduced for v2.2.1 (playlists) and v2.2.2 (ratings).
     _MOCK_TRACKS_CACHE = [
+        # v3.6.2 — ``fake_plan`` seeds session playlists with t1/t2, and
+        # the live WS handler now validates playlists against
+        # ``load_catalog`` before starting the engine. These two entries
+        # keep that filter satisfied in mock/E2E runs. Deliberately NO
+        # ``file`` key: ``/api/tracks/{id}/stream`` keeps 404ing for
+        # them, so E2E decks stay inert exactly as before the filter —
+        # the whole live E2E suite drives the UI without real audio.
+        {
+            "id": "t1",
+            "display_name": "Track 1",
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "9A",
+            "bpm": 128.0,
+            "duration_sec": 360.0,
+            "variant_of": None,
+        },
+        {
+            "id": "t2",
+            "display_name": "Track 2",
+            "genre_folder": "lofi",
+            "genre": "lofi",
+            "camelot_key": "10A",
+            "bpm": 130.0,
+            "duration_sec": 360.0,
+            "variant_of": None,
+        },
         {
             "id": "mock-lofi-silence",
             "display_name": "Mock Silence",

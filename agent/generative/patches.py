@@ -45,6 +45,7 @@ ROLE_ROUTING = {
     "bass": ("channel 1", "main instance, Scene A"),
     "pad": ("channel 2", "main instance, Scene B"),
     "drums": ("channel 10", "drum instance (second loopMIDI port)"),
+    "lead": ("channel 3", "main instance (Scene B key-split, or a third port — see setup doc)"),
 }
 
 

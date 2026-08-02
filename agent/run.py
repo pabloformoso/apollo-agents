@@ -477,7 +477,7 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     final_text = ""
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
         kwargs: dict = {"model": _MODEL, "messages": full_messages}
         if schemas:
             kwargs["tools"] = schemas
@@ -485,6 +485,39 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
         final_text = msg.content or ""
+
+        if not tool_calls:
+            # v3.6.4 — textual-tool-call shim. Small local models often
+            # write the call as prose instead of using the tools API;
+            # recover it, execute, and rewrite the transcript as if the
+            # call had been structured (a bare role:"tool" message with
+            # no matching assistant tool_calls violates the protocol).
+            shim = parse_textual_tool_call(final_text, tool_index)
+            if shim is not None:
+                name, inputs = shim
+                print(
+                    f"  [tool-shim] {name}({json.dumps(inputs, ensure_ascii=False)}) "
+                    "— parsed from a text response"
+                )
+                synthetic = {
+                    "id": f"shim-{turn}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(inputs)},
+                }
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [synthetic],
+                }
+                result = _run_tool(name, inputs, context_variables, tool_index)
+                print(f"  → {result}\n")
+                tool_msg = {"role": "tool", "tool_call_id": synthetic["id"], "content": result}
+                full_messages.append(assistant_msg)
+                full_messages.append(tool_msg)
+                messages.append(assistant_msg)
+                messages.append(tool_msg)
+                continue
+
         full_messages.append(msg)
         messages.append({"role": "assistant", "content": msg.content, "tool_calls": tool_calls or None})
 
@@ -549,6 +582,145 @@ def _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_vari
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def genre_guard_system(available_genres: list[str] | None = None) -> str:
+    """Build the Genre Guard system prompt with the LIVE genre list.
+
+    v3.7.3 — the static prompt only named example shorthands (lofi,
+    deep house, techno, cyberpunk), so a small local model
+    pattern-matched unfamiliar requests onto those examples: asking for
+    the new 'aural' collection got silently normalized to
+    'lofi - ambient' (observed 2026-07-12). Injecting the actual
+    catalog genres — plus a hard no-substitution rule — grounds the
+    guard in reality regardless of model size.
+
+    ``available_genres`` is injectable for tests; by default it reads
+    tracks.json via the same loader the tools use. Falls back to the
+    bare prompt when the catalog is unavailable.
+    """
+    genres = available_genres
+    if genres is None:
+        try:
+            from agent.tools import _load_catalog_genres  # noqa: PLC0415
+            genres = _load_catalog_genres()
+        except Exception:  # noqa: BLE001 — no catalog → keep the generic prompt
+            genres = []
+    if not genres:
+        return _GENRE_GUARD_SYSTEM
+    listing = ", ".join(sorted(genres))
+    return (
+        _GENRE_GUARD_SYSTEM
+        + "\n\nAVAILABLE GENRES (the catalog, right now): "
+        + listing
+        + "\n- The confirmed genre MUST be copied verbatim from this list."
+        "\n- NEVER substitute a different genre for the one the user asked"
+        " for. If their wording matches one of the available genres"
+        " (case-insensitive, partial is fine), confirm THAT one. If"
+        " nothing matches, show them the list and ask — do not guess."
+    )
+
+
+def enforce_mentioned_genre(
+    user_message: str,
+    parsed: dict | None,
+    available_genres: list[str],
+) -> dict | None:
+    """Deterministic backstop for the guard's genre choice (v3.7.3).
+
+    If the user's own words literally contain exactly ONE available
+    genre and the guard confirmed a DIFFERENT one that the user never
+    mentioned, trust the user over the model and override. Pure
+    function — both the CLI and web flows call it after parsing the
+    CONFIRMED block.
+
+    Deliberately conservative: no mention → no change; two or more
+    genres mentioned → ambiguous, no change; confirmed genre itself
+    mentioned → the model plausibly disambiguated, no change.
+    """
+    if parsed is None or not parsed.get("genre"):
+        return parsed
+    text = (user_message or "").casefold()
+    if not text:
+        return parsed
+    mentioned = [g for g in available_genres if g.casefold() in text]
+    if len(mentioned) != 1:
+        return parsed
+    confirmed = str(parsed["genre"]).casefold()
+    if confirmed == mentioned[0].casefold() or confirmed in text:
+        return parsed
+    corrected = dict(parsed)
+    corrected["genre"] = mentioned[0]
+    print(
+        f"[genre-guard] override: model confirmed {parsed['genre']!r} but the "
+        f"user explicitly asked for {mentioned[0]!r} — trusting the user",
+        flush=True,
+    )
+    return corrected
+
+
+def parse_textual_tool_call(
+    text: str | None, tool_names
+) -> tuple[str, dict] | None:
+    """Parse a tool call the model wrote as PROSE instead of emitting it
+    through the function-calling interface (v3.6.4).
+
+    Small local models (observed live 2026-07-12 with gemma-4-e4b via
+    LM Studio) frequently answer a tool-shaped turn with the literal
+    text ``pick_next_track(bpm_min=75, key="11B", ...)`` and no
+    structured ``tool_calls``. The intent and arguments are right — only
+    the transport is wrong — so the agent loops use this parser as a
+    recovery shim before giving up on the turn.
+
+    Strict on purpose: after unwrapping optional backticks / a fenced
+    code block / one trailing period, the ENTIRE response must be a
+    single ``name(kw=value, ...)`` expression where ``name`` is a
+    registered tool and every argument is a keyword with a Python
+    literal value. Prose that merely mentions tool syntax mid-sentence,
+    positional arguments, or non-literal values all return None — false
+    negatives are cheap (the deterministic fallback covers them), false
+    positives are not.
+    """
+    import ast  # noqa: PLC0415 — helper-local, keeps module import light
+
+    if not text:
+        return None
+    s = text.strip()
+    # Unwrap a fenced code block (```tool / ```python first line).
+    if s.startswith("```"):
+        s = s[3:]
+        first_nl = s.find("\n")
+        if first_nl != -1 and " " not in s[:first_nl].strip():
+            s = s[first_nl + 1 :]
+        if s.rstrip().endswith("```"):
+            s = s.rstrip()[:-3]
+        s = s.strip()
+    # Unwrap single-backtick inline code.
+    s = s.strip("`").strip()
+    # Tolerate one trailing sentence period after the closing paren.
+    if s.endswith(".") and s[:-1].rstrip().endswith(")"):
+        s = s[:-1].rstrip()
+
+    try:
+        tree = ast.parse(s, mode="eval")
+    except SyntaxError:
+        return None
+    call = tree.body
+    if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+        return None
+    if call.func.id not in set(tool_names):
+        return None
+    if call.args:
+        return None  # positional args → ambiguous mapping, refuse
+    kwargs: dict = {}
+    for kw in call.keywords:
+        if kw.arg is None:
+            return None  # **kwargs splat — nothing literal to recover
+        try:
+            kwargs[kw.arg] = ast.literal_eval(kw.value)
+        except (ValueError, SyntaxError):
+            return None
+    return call.func.id, kwargs
+
 
 def _parse_critic_response(
     text: str, playlist: list[dict] | None = None
@@ -832,12 +1004,29 @@ def _orchestrate() -> None:
 
     while confirmed is None:
         guard_response = run_agent(
-            _GENRE_GUARD_SYSTEM, [list_genres], guard_messages, context_variables
+            genre_guard_system(), [list_genres], guard_messages, context_variables
         )
         if guard_response:
             print(f"\n[Genre Guard] {guard_response}\n")
 
         confirmed = _parse_confirmed_block(guard_response)
+        if confirmed is not None:
+            # v3.7.3 — deterministic backstop: the user's literal genre
+            # mention beats the model's normalization (see
+            # enforce_mentioned_genre). Consider EVERY user turn so a
+            # genre given mid-conversation still counts.
+            try:
+                from agent.tools import _load_catalog_genres  # noqa: PLC0415
+                user_text = " ".join(
+                    str(m.get("content") or "")
+                    for m in guard_messages
+                    if m.get("role") == "user"
+                )
+                confirmed = enforce_mentioned_genre(
+                    user_text, confirmed, _load_catalog_genres()
+                )
+            except Exception:  # noqa: BLE001 — no catalog → keep as parsed
+                pass
         if confirmed is None:
             try:
                 user_reply = input("You: ").strip()

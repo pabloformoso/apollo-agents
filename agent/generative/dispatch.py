@@ -54,10 +54,17 @@ class SplitPort:
     with drum_port=None everything passes through to main (v0 behavior).
     """
 
-    def __init__(self, main, drum_port=None, drum_channel: int = 9):
+    def __init__(self, main, drum_port=None, drum_channel: int = 9,
+                 drum_vel_scale: float = 1.0, main_vel_scale: float = 1.0):
+        # drum_vel_scale: gain staging for the drum instance. The CLI offers
+        # no per-instance volume, and a dark mono percussion patch drowns
+        # under a 5-voice pad — boosting note-on velocity is the one knob
+        # we control end-to-end.
         self._main = main
         self._drums = drum_port
         self._drum_channel = drum_channel
+        self._drum_vel_scale = drum_vel_scale
+        self._main_vel_scale = main_vel_scale
 
     @property
     def name(self) -> str:
@@ -67,8 +74,12 @@ class SplitPort:
 
     def send(self, msg) -> None:
         if self._drums is not None and getattr(msg, "channel", None) == self._drum_channel:
+            if self._drum_vel_scale != 1.0 and msg.type == "note_on" and msg.velocity > 0:
+                msg = msg.copy(velocity=max(1, min(127, int(round(msg.velocity * self._drum_vel_scale)))))
             self._drums.send(msg)
         else:
+            if self._main_vel_scale != 1.0 and msg.type == "note_on" and msg.velocity > 0:
+                msg = msg.copy(velocity=max(1, min(127, int(round(msg.velocity * self._main_vel_scale)))))
             self._main.send(msg)
 
     def close(self) -> None:

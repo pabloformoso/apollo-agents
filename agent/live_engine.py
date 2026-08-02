@@ -41,7 +41,13 @@ from agent.phase_lock import (
     LiveTransitionPlan,
     build_live_transition_plan,
 )
-from agent.transition_styles import serialise_choice
+from agent.transition_styles import (
+    TransitionProfile,
+    TransitionStyle,
+    TransitionStyleChoice,
+    profile_for_genre,
+    serialise_choice,
+)
 
 # sounddevice requires PortAudio — guarded so the module can be imported in
 # headless / CI environments without audio hardware.
@@ -131,6 +137,29 @@ def _env_int(name: str, default: int) -> int:
 
 
 ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
+
+# v3.6.3 — server-side stall watchdog for the browser engine. The
+# engine is ping-driven; a frozen operator tab (Chrome Energy Saver /
+# Page Lifecycle freeze) stops pinging mid-track and nothing ever
+# advances — observed live 2026-07-11: a 3.5 h endless set died in
+# silence mid-'Slow Oxide' with a perfectly healthy backend. The live
+# WS polls ``LiveEngineBrowser.check_stall()`` every
+# LIVE_STALL_CHECK_SEC; the engine force-advances once wall clock is
+# past the current track's expected end + LIVE_STALL_MARGIN_SEC AND the
+# reported position hasn't moved for that same margin. With an OBS
+# viewer attached (which follows engine commands and is never frozen
+# while rendered), the stream keeps playing even with the operator tab
+# frozen.
+LIVE_STALL_CHECK_SEC = _env_int("APOLLO_LIVE_STALL_CHECK_SEC", 15)
+LIVE_STALL_MARGIN_SEC = _env_int("APOLLO_LIVE_STALL_MARGIN_SEC", 45)
+
+# v3.6.1 — no-repeat window for the recycle path. Once endless mode has
+# exhausted the genre and starts recycling played tracks, skip anything
+# heard within the last N tracks (20 ≈ an hour of music at typical track
+# lengths). Degrades gracefully when the window is wider than the
+# in-genre catalog — keeping the stream alive beats strict no-repeat.
+# Override via APOLLO_ENDLESS_NO_REPEAT_WINDOW.
+ENDLESS_NO_REPEAT_WINDOW = _env_int("APOLLO_ENDLESS_NO_REPEAT_WINDOW", 20)
 
 # ---------------------------------------------------------------------------
 # Audio constants
@@ -489,6 +518,9 @@ class LiveEngineLocal:
         with self._lock:
             catalog = list(self._catalog_cache)
             exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
         # Pull genre from the current track (catalog entries are tagged
         # with ``genre_folder``); falling back to the loose ``genre``
         # field keeps the path resilient against legacy entries.
@@ -496,7 +528,10 @@ class LiveEngineLocal:
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
         if pick is None:
             self._emit(
                 ENDLESS_WARNING,
@@ -739,11 +774,15 @@ class LiveEngineLocal:
                 # v2.6.0 — endless mode poke. Fires once per "approaching
                 # the last track" window so the LLM gets a deterministic
                 # deadline (vs. polling len(playlist)) to call extend_set.
+                # v3.6 — also fires while the LAST track itself plays
+                # (remaining == 0): a tail track appended by a previous
+                # extension must re-poke the LLM, otherwise only the
+                # deterministic fallback ever extends past it.
                 with self._lock:
                     remaining = len(self.playlist) - idx - 1
                     fire_low = (
                         self._endless_mode
-                        and remaining == 1
+                        and remaining <= 1
                         and not self._low_water_fired
                     )
                     if fire_low:
@@ -1111,6 +1150,18 @@ class LiveEngineBrowser:
         self._low_water_fired: bool = False
         self._low_water_at: float | None = None
         self._endless_appended: int = 0
+        # v3.6 — one-shot latch for the in-flight fallback extension
+        # (``_try_endless_extend_inflight``). Scoped per current track;
+        # re-armed on every track advance.
+        self._extend_attempted: bool = False
+
+        # v3.6.3 — stall-watchdog bookkeeping. ``_track_started_mono``
+        # anchors the wall-clock expectation for the current track;
+        # ``_last_pos_change_mono`` records the last time the reported
+        # position actually MOVED (not merely arrived — a stuck deck
+        # pings a frozen position forever).
+        self._track_started_mono: float | None = None
+        self._last_pos_change_mono: float | None = None
 
         # v3.0 — phase-lock plan for the UPCOMING transition. Rebuilt
         # every time the current track changes (in ``play``,
@@ -1153,6 +1204,18 @@ class LiveEngineBrowser:
             self._approached = False
             self._cf_triggered = False
             self._extend_sec = 0.0
+            # v3.6 — a new playlist is a new set: reset the endless
+            # bookkeeping. Without this, a re-``play()`` after a WS
+            # reconnect inherits a minutes-old ``_low_water_at`` (the
+            # 2026-07-10 stream logged grace-elapsed values of 200-400 s)
+            # and a stale append counter. ``_endless_mode`` itself is
+            # intentionally kept — the WS handler / phase_live own it.
+            self._low_water_fired = False
+            self._low_water_at = None
+            self._endless_appended = 0
+            self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
 
         first = self.playlist[0]
         # v3.0 — build the phase-lock plan for the first → second
@@ -1201,7 +1264,17 @@ class LiveEngineBrowser:
             # right after skip_track has flipped self._idx).
             if track_id and current_track.get("id") and track_id != current_track.get("id"):
                 return
+            prev_pos = self._reported_pos_sec
             self._reported_pos_sec = float(current_time)
+            # v3.6.3 — stall-watchdog signal: only count the position as
+            # "alive" when it actually MOVES. A deck that failed to
+            # decode keeps pinging a frozen ~0; a frozen tab pings
+            # nothing at all — both leave this timestamp stale.
+            if (
+                self._last_pos_change_mono is None
+                or abs(self._reported_pos_sec - prev_pos) > 0.5
+            ):
+                self._last_pos_change_mono = time.monotonic()
             cf_sec = self._cf_point_seconds(current_track)
             secs_to_cf = cf_sec - self._reported_pos_sec
             approached = self._approached
@@ -1232,14 +1305,21 @@ class LiveEngineBrowser:
                 # keeps its legacy linear-fade scheduling.
                 phase_lock=self._phase_lock_payload(),
             )
-            # v2.6.0 — endless-mode "running low" poke. Fires once per
-            # "approaching the last track" window so the LLM gets a
-            # deterministic deadline (5 s grace) to call ``extend_set``.
+
+        # v3.6 — endless-mode "running low" poke. Decoupled from the
+        # APPROACHING_CF edge above, which requires a ``next_track``:
+        # nested inside it (the v2.6.0 placement) the poke could never
+        # fire while the LAST track played, so a tail track appended by
+        # a previous extension never re-poked the LLM and every endless
+        # set died one track after the original playlist ran out
+        # (observed live 2026-07-10). Fires once per low-water window;
+        # ``append_track`` re-arms it.
+        if secs_to_cf <= self.approach_warn_sec:
             with self._lock:
-                remaining = len(self.playlist) - idx - 1
+                remaining = len(self.playlist) - self._idx - 1
                 fire_low = (
                     self._endless_mode
-                    and remaining == 1
+                    and remaining <= 1
                     and not self._low_water_fired
                 )
                 if fire_low:
@@ -1258,7 +1338,7 @@ class LiveEngineBrowser:
             elif duration > 0 and self._reported_pos_sec >= duration:
                 # Last track played to its end — emit final events.
                 self._emit(TRACK_ENDED, track=current_track)
-                if self._maybe_end_or_extend(current_track):
+                if self._maybe_end_or_extend(current_track, track_over=True):
                     with self._lock:
                         self._state = "idle"
                 else:
@@ -1269,6 +1349,16 @@ class LiveEngineBrowser:
                         new_idx = self._idx + 1 if has_successor else self._idx
                     if has_successor:
                         self._emit_next_track(self.playlist[new_idx])
+            else:
+                # v3.6 — past the crossfade point on the LAST track with
+                # nothing queued. Extend NOW, while the deck still plays:
+                # once the browser's <audio> dies the ping stream freezes
+                # (``_cf_triggered`` gates every later path), so no code
+                # would ever get another chance to run the fallback. An
+                # append here means the next ping takes the
+                # ``_begin_crossfade`` branch above — a seamless blend
+                # instead of end-of-track silence.
+                self._try_endless_extend_inflight(current_track)
             return
 
         # Endgame safeguard: if we're inside the last 2 s of the track and
@@ -1321,7 +1411,7 @@ class LiveEngineBrowser:
         if has_next and next_track is not None:
             self._emit_next_track(next_track)
         else:
-            if self._maybe_end_or_extend(current_track):
+            if self._maybe_end_or_extend(current_track, track_over=True):
                 with self._lock:
                     self._state = "idle"
                 return
@@ -1352,6 +1442,9 @@ class LiveEngineBrowser:
             self._extend_sec = 0.0
             self._reported_pos_sec = 0.0
             self._state = "playing"
+            self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
 
         # v3.0 — rebuild the phase-lock plan for the new
         # (current → next-next) pair so the next ``approaching_crossfade``
@@ -1414,6 +1507,9 @@ class LiveEngineBrowser:
             self._extend_sec = 0.0
             self._reported_pos_sec = 0.0
             self._state = "playing"
+            self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
             new_track = self.playlist[next_idx]
         # v3.0 — rebuild for the (skipped-to → next-after-that) pair.
         self._rebuild_transition_plan()
@@ -1493,7 +1589,9 @@ class LiveEngineBrowser:
             f"at position {position}."
         )
 
-    def _maybe_end_or_extend(self, current_track: dict | None) -> bool:
+    def _maybe_end_or_extend(
+        self, current_track: dict | None, *, track_over: bool = False
+    ) -> bool:
         """Browser-engine variant of the endless-mode SESSION_ENDED gate.
 
         Same semantics as ``LiveEngineLocal._maybe_end_or_extend`` but
@@ -1501,6 +1599,16 @@ class LiveEngineBrowser:
         runs on the WS loop thread where I/O is fine. Returns True when
         the caller should stop (let SESSION_ENDED fire), False when it
         should keep looping (a successor is now present).
+
+        ``track_over=True`` (v3.6) means the current track has ALREADY
+        finished playing. Unlike the local engine, this engine has no
+        watchdog thread — its "ticks" are browser pings, and those
+        freeze once the deck's natural ``ended`` fires. Deferring on the
+        grace window here would therefore wait for a re-poll that can
+        never arrive: the engine hangs in silence until the user
+        refreshes and the WS teardown kills the session (the 2026-07-10
+        live failure). With ``track_over`` the grace is skipped and the
+        deterministic fallback runs immediately.
         """
         with self._lock:
             endless = self._endless_mode
@@ -1534,39 +1642,48 @@ class LiveEngineBrowser:
                 flush=True,
             )
             return False
-        if low_water_at is None:
-            with self._lock:
-                self._low_water_at = time.monotonic()
-            print(
-                f"[engine _maybe_end_or_extend] DECISION: start grace timer "
-                f"(PLAYLIST_RUNNING_LOW never fired — first end-of-set ping)",
-                flush=True,
-            )
-            return False
-        elapsed = time.monotonic() - low_water_at
-        if elapsed < ENDLESS_GRACE_SEC:
-            print(
-                f"[engine _maybe_end_or_extend] DECISION: wait grace "
-                f"({elapsed:.1f}s of {ENDLESS_GRACE_SEC}s)",
-                flush=True,
-            )
-            return False
+        if not track_over:
+            if low_water_at is None:
+                with self._lock:
+                    self._low_water_at = time.monotonic()
+                print(
+                    f"[engine _maybe_end_or_extend] DECISION: start grace timer "
+                    f"(PLAYLIST_RUNNING_LOW never fired — first end-of-set ping)",
+                    flush=True,
+                )
+                return False
+            elapsed = time.monotonic() - low_water_at
+            if elapsed < ENDLESS_GRACE_SEC:
+                print(
+                    f"[engine _maybe_end_or_extend] DECISION: wait grace "
+                    f"({elapsed:.1f}s of {ENDLESS_GRACE_SEC}s)",
+                    flush=True,
+                )
+                return False
 
-        # Grace elapsed without an append → deterministic fallback.
+        # Track already over (track_over) or grace elapsed without an
+        # append → deterministic fallback.
         catalog = _load_catalog()
         with self._lock:
             exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
         genre = (
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
         )
         print(
-            f"[engine _maybe_end_or_extend] grace elapsed ({elapsed:.1f}s) — "
+            f"[engine _maybe_end_or_extend] "
+            f"{'track over' if track_over else 'grace elapsed'} — "
             f"running fallback: genre={genre!r} catalog_size={len(catalog)} "
             f"exclude_size={len(exclude)}",
             flush=True,
         )
-        pick = _autoplay_pick(current_track, catalog, genre, exclude, allow_repeats=True)
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
         if pick is None:
             print(
                 f"[engine _maybe_end_or_extend] DECISION: _autoplay_pick returned None — "
@@ -1590,6 +1707,117 @@ class LiveEngineBrowser:
         )
         self.append_track(pick)
         return False
+
+    def _try_endless_extend_inflight(self, current_track: dict | None) -> bool:
+        """Run the deterministic fallback BEFORE the deck dies (v3.6).
+
+        Called from ``report_playback_pos`` when the LAST track crosses
+        its crossfade point with nothing queued. Appending here — while
+        audio is still playing — lets the next ping take the normal
+        ``_begin_crossfade`` branch, blending into the successor
+        seamlessly. Waiting for TRACK_ENDED instead was the v2.6.0
+        deadlock: after natural ``ended`` the ping stream freezes, so a
+        grace window that defers "until the next poll" never got one.
+
+        Grace semantics: the LLM keeps priority. The low-water poke set
+        ``_low_water_at`` back at the approach edge (~30 s earlier), so
+        by the crossfade point ``ENDLESS_GRACE_SEC`` has normally long
+        elapsed. If the poke never fired (very short tail track), the
+        clock starts now and the still-alive ping stream re-polls.
+        One-shot per track via ``_extend_attempted`` so a fruitless
+        catalog scan doesn't repeat at ping rate (~4 Hz). Returns True
+        when a track was appended.
+        """
+        with self._lock:
+            if not self._endless_mode or self._extend_attempted:
+                return False
+            if len(self.playlist) - self._idx - 1 > 0:
+                return False
+            low_water_at = self._low_water_at
+        if low_water_at is None:
+            with self._lock:
+                self._low_water_at = time.monotonic()
+            return False
+        if (time.monotonic() - low_water_at) < ENDLESS_GRACE_SEC:
+            return False
+        with self._lock:
+            self._extend_attempted = True
+            exclude = {t.get("id") for t in self.playlist if t.get("id")}
+            recent = _recent_window_ids(
+                self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
+            )
+        catalog = _load_catalog()
+        genre = (
+            (current_track or {}).get("genre_folder")
+            or (current_track or {}).get("genre")
+        )
+        pick = _autoplay_pick(
+            current_track, catalog, genre, exclude,
+            allow_repeats=True, recent_ids=recent,
+        )
+        print(
+            f"[engine _try_endless_extend_inflight] genre={genre!r} "
+            f"catalog_size={len(catalog)} exclude_size={len(exclude)} "
+            f"pick={(pick or {}).get('id')!r}",
+            flush=True,
+        )
+        if pick is None:
+            # No candidates — let the end-of-track path emit the
+            # ENDLESS_WARNING + SESSION_ENDED pair when the deck drains.
+            return False
+        self.append_track(pick)
+        return True
+
+    def check_stall(self) -> str | None:
+        """Force-advance when the browser stopped driving playback (v3.6.3).
+
+        The browser engine has no clock of its own — every transition is
+        triggered by ``playback_pos`` pings or the browser's ``ended``
+        event. A frozen operator tab (Chrome Energy Saver) or a deck
+        that never started (decode failure) therefore wedges the whole
+        session in silence with a healthy backend. The live WS calls
+        this every ``LIVE_STALL_CHECK_SEC``.
+
+        Fires only when BOTH hold:
+        - wall clock is past the current track's expected end
+          (``_track_started_mono`` + duration) + ``LIVE_STALL_MARGIN_SEC``
+        - the reported position hasn't MOVED for that same margin
+          (an ``extend_track``-stretched set keeps moving, so it never
+          trips this).
+
+        On fire it synthesises the ``track_ended`` the browser never
+        sent — the normal advance/endless-extend machinery does the
+        rest, and any attached viewer (OBS) picks up the resulting
+        ``load`` command and keeps the stream audible. Returns the
+        stalled track id when it forced an advance, else None.
+        """
+        with self._lock:
+            if self._state != "playing" or self._idx >= len(self.playlist):
+                return None
+            track = self.playlist[self._idx]
+            started = self._track_started_mono
+            last_change = self._last_pos_change_mono
+            duration = float(track.get("duration_sec") or 0.0)
+        if started is None:
+            return None
+        now = time.monotonic()
+        # Unknown/zero duration (bad catalog row) → generous fixed
+        # ceiling so one malformed entry can't disable the watchdog.
+        expected_end = started + (duration if duration > 0 else 600.0)
+        if now < expected_end + LIVE_STALL_MARGIN_SEC:
+            return None
+        if last_change is not None and (now - last_change) < LIVE_STALL_MARGIN_SEC:
+            return None
+        tid = str(track.get("id") or "")
+        print(
+            f"[engine check_stall] no playback progress on {tid!r} "
+            f"({(track.get('display_name') or '?')[:40]!r}) for "
+            f"{now - (last_change or started):.0f}s and "
+            f"{now - expected_end:.0f}s past expected end — forcing advance",
+            flush=True,
+        )
+        self.report_track_ended(tid)
+        return tid
 
     def set_crossfade_point(self, position_sec: float) -> str:
         """Manually set where the crossfade begins in the current track."""
@@ -1662,6 +1890,11 @@ class LiveEngineBrowser:
         # the right downbeat (skipping any pickup) and (b) replace its
         # linear GainNode ramp with equal-power cos/sin curves.
         outgoing_phase_lock = self._phase_lock_payload()
+        # v3.7.0 — resolve the drift profile for THIS (from → to) pair while
+        # the cursor still points at ``from_track``. Non-drift keeps the int
+        # ``self.crossfade_sec`` (byte-identical payload); drift ships the
+        # profile override (24.0 for aural) as the effective blend length.
+        drift, drift_cf_sec = self._drift_transition_profile(from_track, to_track)
 
         with self._lock:
             self._idx += 1
@@ -1674,6 +1907,9 @@ class LiveEngineBrowser:
             self._extend_sec = 0.0
             self._reported_pos_sec = 0.0
             self._state = "playing"
+            self._extend_attempted = False
+            self._track_started_mono = time.monotonic()
+            self._last_pos_change_mono = None
         # Rebuild for the (to_track → after_to_track) pair so the next
         # transition's anchors are ready by the time the new current
         # track's ``approaching_crossfade`` fires.
@@ -1682,7 +1918,7 @@ class LiveEngineBrowser:
             "crossfade",
             from_track=from_track,
             to_track=to_track,
-            crossfade_sec=self.crossfade_sec,
+            crossfade_sec=drift_cf_sec if drift else self.crossfade_sec,
             phase_lock=outgoing_phase_lock,
         )
         self._emit(CROSSFADE_TRIGGERED, from_track=from_track, to_track=to_track)
@@ -1711,11 +1947,24 @@ class LiveEngineBrowser:
         if not track:
             return 0.0
         plan = self._transition_plan
+        is_current = (
+            track.get("id") is not None and track is self._current_track_for_plan()
+        )
+        # v3.7.0 — drift transitions ignore the phase-lock anchor entirely:
+        # a beatless genre has no trustworthy downbeat to cut on. Fall back
+        # to the legacy duration formula, but with the profile's (longer)
+        # crossfade_sec (24s for aural) so the long native-rate blend starts
+        # early enough. This yields an EARLIER cf_point than the 12s default.
+        if is_current:
+            _, next_track = self._plan_endpoints()
+            drift, cf_sec_eff = self._drift_transition_profile(track, next_track)
+            if drift:
+                duration = float(track.get("duration_sec") or 0.0)
+                return max(0.0, duration - cf_sec_eff - 5) + self._extend_sec
         if (
             plan is not None
             and plan.phrase_tier != "fallback"
-            and track.get("id") is not None
-            and track is self._current_track_for_plan()
+            and is_current
         ):
             return plan.plan.outgoing_anchor_catalog_sec + self._extend_sec
         cues = track.get("hot_cues") or []
@@ -1749,6 +1998,56 @@ class LiveEngineBrowser:
         if 0 <= idx < len(self.playlist):
             return self.playlist[idx]
         return None
+
+    def _plan_endpoints(self) -> tuple[dict | None, dict | None]:
+        """Return ``(current_track, next_track)`` for the upcoming transition.
+
+        Mirrors ``_current_track_for_plan``'s lock-free torn-read policy:
+        callers use the pair only to resolve the per-transition genre
+        profile (an identity/value decision), never as authoritative
+        state, and this method is sometimes invoked from inside a
+        ``with self._lock`` block (``_cf_point_seconds`` off
+        ``report_playback_pos``) where a reentrant grab would deadlock.
+        """
+        idx = self._idx
+        current = self.playlist[idx] if 0 <= idx < len(self.playlist) else None
+        next_track = (
+            self.playlist[idx + 1] if 0 <= idx and idx + 1 < len(self.playlist) else None
+        )
+        return current, next_track
+
+    def _drift_transition_profile(
+        self, current_track: dict | None, next_track: dict | None
+    ) -> tuple[bool, float]:
+        """Resolve the (is_drift, effective_crossfade_sec) for a transition.
+
+        v3.7.0 — genre transition profiles. A transition runs in DRIFT
+        mode when EITHER endpoint's ``genre_folder`` (falling back to
+        ``genre``) resolves to a ``dj_mix=False`` profile — e.g. the
+        beatless ``aural`` set. Drift = one long native-rate equal-power
+        crossfade: no tempo match, no grid warp, no bass swap, no anchor
+        repositioning (the whole phase-lock machinery is gated OFF here,
+        before it ever drives the wire payload).
+
+        The effective crossfade_sec is the first profile override present
+        among the drift-triggering endpoints (aural → 24.0s), falling back
+        to the engine default when a drift genre carries no override.
+        Non-drift transitions return ``(False, self.crossfade_sec)`` so the
+        legacy path stays bit-for-bit unchanged.
+        """
+        triggers: list[TransitionProfile] = []
+        for track in (current_track, next_track):
+            if not track:
+                continue
+            profile = profile_for_genre(track.get("genre_folder") or track.get("genre"))
+            if not profile.dj_mix:
+                triggers.append(profile)
+        if not triggers:
+            return (False, float(self.crossfade_sec))
+        override = next(
+            (p.crossfade_sec for p in triggers if p.crossfade_sec is not None), None
+        )
+        return (True, float(override) if override is not None else float(self.crossfade_sec))
 
     def _rebuild_transition_plan(self) -> None:
         """Recompute ``self._transition_plan`` for (current → next).
@@ -1877,6 +2176,22 @@ class LiveEngineBrowser:
         runs. ``1.0`` means "no rate change" (BPMs already within
         threshold, or one of them was missing from the catalog).
         """
+        # v3.7.0 — drift gate. When EITHER endpoint of the upcoming
+        # transition is a dj_mix=False genre (e.g. the beatless aural set),
+        # the transition runs in DRIFT mode and the entire phase-lock
+        # surface is suppressed: no anchors (they must NOT drive the cut),
+        # no tempo-match rates, no grid-warp schedule, no bass_swap. We emit
+        # ONLY the ``transition_style: "drift"`` marker; the frontend runs a
+        # plain native-rate equal-power crossfade over the ``crossfade_sec``
+        # carried by the ``crossfade`` engine_command (24s). This gate runs
+        # BEFORE the fallback check so drift is still signalled even when the
+        # (hallucinated) beatgrid would otherwise yield a fallback/plan tier.
+        current_track, next_track = self._plan_endpoints()
+        drift, _ = self._drift_transition_profile(current_track, next_track)
+        if drift:
+            return serialise_choice(
+                TransitionStyleChoice(style=TransitionStyle.DRIFT)
+            )
         plan = self._transition_plan
         if plan is None or plan.phrase_tier == "fallback":
             return {}
@@ -1982,6 +2297,17 @@ def _camelot_distance(a: str | None, b: str | None) -> float:
     return float(cyclic)
 
 
+def _recent_window_ids(playlist: list[dict], idx: int, window: int) -> list[str]:
+    """Ids of the last ``window`` tracks played, up to and including ``idx``.
+
+    Shared by the three endless-extension call sites so they all hand
+    ``_autoplay_pick`` the same notion of "recently heard". Caller holds
+    whatever lock guards ``playlist``.
+    """
+    lo = max(0, idx + 1 - window)
+    return [t["id"] for t in playlist[lo: idx + 1] if t.get("id")]
+
+
 def _autoplay_pick(
     current_track: dict | None,
     catalog: list[dict],
@@ -1989,6 +2315,7 @@ def _autoplay_pick(
     exclude_ids: set[str],
     *,
     allow_repeats: bool = False,
+    recent_ids: list[str] | None = None,
 ) -> dict | None:
     """Choose the best in-genre continuation track.
 
@@ -2000,9 +2327,14 @@ def _autoplay_pick(
     nothing matches.
 
     When ``allow_repeats=True`` and the exclude-filtered candidate set
-    is empty, recycle from the full in-genre catalog excluding only the
-    track currently playing — this is what makes a true 24/7 endless
-    stream possible once a small catalog has been fully cycled.
+    is empty, recycle from the full in-genre catalog — this is what
+    makes a true 24/7 endless stream possible once a small catalog has
+    been fully cycled. Recycling avoids ``recent_ids`` (v3.6.1 — the
+    last ``ENDLESS_NO_REPEAT_WINDOW`` tracks played, ~1 h of music) so
+    a long stream rotates the catalog instead of ping-ponging between
+    the two most compatible tracks. If the window is wider than the
+    in-genre catalog, it degrades to only avoiding the currently
+    playing track: keeping the stream alive beats strict no-repeat.
 
     Pure / module-level so the engine watchdog can call it without
     touching ``self``, and so tests can exercise it without spinning up
@@ -2024,13 +2356,23 @@ def _autoplay_pick(
         if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
     ]
     if not candidates and allow_repeats:
-        # Endless mode: catalog exhausted for this genre. Recycle any
-        # in-genre track that isn't the one currently playing so the
-        # stream stays alive — back-to-back repeats are still avoided.
+        # Endless mode: catalog exhausted for this genre. Recycle,
+        # skipping anything heard in the recent window (plus the track
+        # currently playing, in case the caller passed no window).
+        recent = set(recent_ids or ())
+        recent.add(cur_id)
         candidates = [
             t for t in catalog
-            if t.get("id") and t["id"] != cur_id and in_genre(t)
+            if t.get("id") and t["id"] not in recent and in_genre(t)
         ]
+        if not candidates:
+            # Window wider than the in-genre catalog — degrade to the
+            # v2.6.0 rule (avoid back-to-back only) so the stream
+            # survives tiny catalogs.
+            candidates = [
+                t for t in catalog
+                if t.get("id") and t["id"] != cur_id and in_genre(t)
+            ]
     if not candidates:
         return None
     candidates.sort(
