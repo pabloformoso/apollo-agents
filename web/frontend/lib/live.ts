@@ -48,6 +48,7 @@ import {
   BufferCache,
   BufferDeck,
   SCHEDULE_LOOKAHEAD_SEC,
+  isSkippableLoadFailure,
 } from "./audio_buffer_decks";
 import {
   computeCrossfadeWhen,
@@ -571,6 +572,17 @@ export interface UseLiveSessionOptions {
   viewer?: boolean;
 }
 
+/**
+ * v3.9 — cap on consecutive skip-on-load-failure advances. Each
+ * skippable load failure (decode error / decode timeout) sends a
+ * synthetic ``track_ended`` so the backend moves past the unplayable
+ * track; if several tracks in a row fail, the problem is the audio
+ * pipeline (wedged decoder, OOM), not the tracks — stop burning
+ * through the playlist and leave recovery to the server-side stall
+ * watchdog. Reset whenever a source schedules successfully.
+ */
+const MAX_CONSECUTIVE_LOAD_SKIPS = 3;
+
 export function useLiveSession(
   sessionId: string | null,
   options: UseLiveSessionOptions = {},
@@ -604,6 +616,12 @@ export function useLiveSession(
   // correction (ms) for the CURRENT transition; rides on the next
   // beatmatch_measurement emit, then resets. W3 wires the buttons that fill it.
   const pitchBendMsRef = useRef<number>(0);
+  // v3.9 — stream URL of the most recently preloaded next track, so
+  // cache pruning can keep {current, next} and evict everything else.
+  const lastPreloadedUrlRef = useRef<string | null>(null);
+  // v3.9 — consecutive skip-on-load-failure counter (see
+  // MAX_CONSECUTIVE_LOAD_SKIPS). Reset on every successful schedule.
+  const loadFailureStreakRef = useRef(0);
 
   // ── State (derived from engine events) ──────────────────────────────────
   const [state, setState] = useState<LiveEngineState>("idle");
@@ -875,6 +893,55 @@ export function useLiveSession(
     }
   }, []);
 
+  /**
+   * v3.9 — bound the decode cache to the tracks still in play. Called
+   * after every successful schedule with the NEW current track; keeps
+   * that plus the most recently preloaded next track and evicts the
+   * rest. Without this an endless session accumulates one ~50–100 MB
+   * PCM buffer per played track until the renderer can't allocate and
+   * every further decode fails (the 2026-08-01 30 h collapse).
+   */
+  const pruneBufferCache = useCallback((currentUrl: string) => {
+    const cache = bufferCacheRef.current;
+    if (!cache) return;
+    const keep = [currentUrl];
+    if (lastPreloadedUrlRef.current) keep.push(lastPreloadedUrlRef.current);
+    cache.prune(keep);
+  }, []);
+
+  /**
+   * v3.9 — skip-on-load-failure. When a track's buffer can't be
+   * decoded (decode error or decode timeout — see
+   * ``isSkippableLoadFailure``), waiting cannot fix it: pre-v3.9 the
+   * deck simply went inert and the whole session hung until the
+   * server-side stall watchdog noticed, minutes later, once per track.
+   * Instead, send the backend the same synthetic ``track_ended`` a
+   * natural end would, so it advances past the unplayable track right
+   * away. Fetch-stage failures are NOT skipped (transient network, and
+   * the E2E substrate's 404ing mock streams rely on staying inert),
+   * and after MAX_CONSECUTIVE_LOAD_SKIPS consecutive skips we stop —
+   * a streak that long means the audio pipeline itself is wedged.
+   */
+  const reportLoadFailure = useCallback((trackId: string, err: unknown) => {
+    if (!isSkippableLoadFailure(err)) return;
+    if (viewerModeRef.current) return;
+    loadFailureStreakRef.current += 1;
+    if (loadFailureStreakRef.current > MAX_CONSECUTIVE_LOAD_SKIPS) {
+      console.warn(
+        `[live] ${loadFailureStreakRef.current} consecutive load failures — ` +
+          "audio pipeline looks wedged; not skipping further (stall watchdog takes over)",
+      );
+      return;
+    }
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    try {
+      ws.send(JSON.stringify({ type: "track_ended", track_id: trackId }));
+    } catch {
+      /* ignore — backend stall watchdog remains the backstop */
+    }
+  }, []);
+
   const loadIntoActiveDeck = useCallback(
     async (track: LiveTrackSummary) => {
       const which = activeDeckRef.current;
@@ -903,14 +970,15 @@ export function useLiveSession(
       try {
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
-        // NOTE (v3.6.2): a failed load leaves the deck INERT by design
-        // for now — the whole E2E substrate drives the UI against
-        // 404ing mock streams and relies on that. Stale-playlist 404s
-        // are prevented upstream (the live WS validates the playlist
-        // against the catalog before the engine starts). Turning this
-        // into a skip (synthetic track_ended) needs playable E2E audio
-        // first — tracked as follow-up.
-        console.warn("[live] decodeAudioData failed on load:", err);
+        // v3.9 — decode failures/timeouts skip the track via a
+        // synthetic track_ended (see reportLoadFailure); fetch-stage
+        // failures still leave the deck INERT — the E2E substrate
+        // drives the UI against 404ing mock streams and relies on
+        // that, and stale-playlist 404s are prevented upstream (the
+        // live WS validates the playlist against the catalog before
+        // the engine starts).
+        console.warn("[live] buffer load failed on load:", err);
+        reportLoadFailure(track.id, err);
         return;
       }
 
@@ -924,6 +992,8 @@ export function useLiveSession(
           onDeckEnded(which),
         );
         setAutoplayBlocked(false);
+        // v3.9 — a healthy schedule ends any skip-on-failure streak.
+        loadFailureStreakRef.current = 0;
       } catch (err) {
         // Most likely failure mode: AudioContext suspended (autoplay
         // policy). Surface the click-to-start overlay so the user
@@ -938,6 +1008,8 @@ export function useLiveSession(
       }
 
       currentTrackIdRef.current = track.id;
+      // v3.9 — this track is now the working set; drop stale PCM.
+      pruneBufferCache(streamUrl(track.id));
       // Refresh the VisualLayer shim immediately so the UI sees the
       // new duration on the next render rather than waiting for the
       // 250 ms playback_pos tick.
@@ -947,7 +1019,14 @@ export function useLiveSession(
         paused: !deck.isPlaying(),
       };
     },
-    [ensureAudioContext, ensureBufferDeck, ensureBufferCache, onDeckEnded],
+    [
+      ensureAudioContext,
+      ensureBufferDeck,
+      ensureBufferCache,
+      onDeckEnded,
+      reportLoadFailure,
+      pruneBufferCache,
+    ],
   );
 
   const hardCutToTrack = useCallback(
@@ -1057,7 +1136,12 @@ export function useLiveSession(
       try {
         buffer = await cache.load(streamUrl(track.id));
       } catch (err) {
-        console.warn("[live] decodeAudioData failed on crossfade:", err);
+        // v3.9 — same skip semantics as loadIntoActiveDeck: an
+        // undecodable incoming track can't be crossfaded into, ever;
+        // tell the backend so it advances past it instead of letting
+        // the outgoing deck run dry into a wedge.
+        console.warn("[live] buffer load failed on crossfade:", err);
+        reportLoadFailure(track.id, err);
         return;
       }
 
@@ -1155,6 +1239,8 @@ export function useLiveSession(
           toDeck.applyRateSchedule(rateSchedule, when);
         }
         setAutoplayBlocked(false);
+        // v3.9 — a healthy schedule ends any skip-on-failure streak.
+        loadFailureStreakRef.current = 0;
       } catch (err) {
         const name = (err as { name?: string })?.name ?? "";
         if (name === "InvalidStateError" || name === "NotAllowedError" || name === "") {
@@ -1256,6 +1342,10 @@ export function useLiveSession(
 
       activeDeckRef.current = toWhich;
       currentTrackIdRef.current = track.id;
+      // v3.9 — the incoming track is now the working set; drop stale
+      // PCM. The outgoing deck's source keeps its own buffer reference
+      // until it plays out, so evicting mid-crossfade is inaudible.
+      pruneBufferCache(streamUrl(track.id));
       // Refresh the VisualLayer shim — duration/paused are now from
       // the new deck. currentTime updates on the playback_pos tick.
       audioRef.current = {
@@ -1264,7 +1354,14 @@ export function useLiveSession(
         paused: !toDeck.isPlaying(),
       };
     },
-    [ensureAudioContext, ensureBufferDeck, ensureBufferCache, onDeckEnded],
+    [
+      ensureAudioContext,
+      ensureBufferDeck,
+      ensureBufferCache,
+      onDeckEnded,
+      reportLoadFailure,
+      pruneBufferCache,
+    ],
   );
 
   /**
@@ -1280,6 +1377,9 @@ export function useLiveSession(
     async (track: LiveTrackSummary) => {
       const cache = ensureBufferCache();
       if (!cache) return;
+      // v3.9 — record the URL FIRST so a prune racing this preload
+      // (e.g. a track advance landing mid-decode) keeps it.
+      lastPreloadedUrlRef.current = streamUrl(track.id);
       try {
         await cache.load(streamUrl(track.id));
       } catch {

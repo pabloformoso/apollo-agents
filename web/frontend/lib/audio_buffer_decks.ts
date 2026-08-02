@@ -55,6 +55,64 @@
 export const SCHEDULE_LOOKAHEAD_SEC = 0.05;
 
 /**
+ * v3.9 — upper bound on one load() (fetch + decode). decodeAudioData
+ * carries no timeout of its own and CAN hang forever: in the
+ * 2026-08-01 30 h endless session, renderer memory pressure wedged
+ * the decoder and 22 queued loads sat pending for hours (all
+ * rejecting with EncodingError only at page teardown) while the
+ * stream played nothing. 20 s is an order of magnitude above the
+ * worst observed healthy decode (~2 s) so a trip is a real wedge,
+ * not a slow machine.
+ */
+export const BUFFER_LOAD_TIMEOUT_MS = 20_000;
+
+/**
+ * Load-failure taxonomy. live.ts routes on the stage:
+ *
+ *  - ``BufferFetchError`` — network / HTTP stage. Deliberately NOT
+ *    skip-worthy: the E2E substrate drives the UI against 404ing mock
+ *    streams and relies on a failed fetch leaving the deck inert, and
+ *    a transient network blip shouldn't burn a track.
+ *  - ``BufferDecodeError`` — decodeAudioData rejected. The bytes
+ *    arrived but can't become PCM; retrying the same track can't
+ *    succeed, so the session should skip past it.
+ *  - ``BufferLoadTimeoutError`` — the load exceeded its deadline
+ *    (in practice: a wedged decoder). Skip-worthy for the same reason.
+ */
+export class BufferFetchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BufferFetchError";
+  }
+}
+
+export class BufferDecodeError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BufferDecodeError";
+  }
+}
+
+export class BufferLoadTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BufferLoadTimeoutError";
+  }
+}
+
+/**
+ * True when a load failure means the track itself is unplayable
+ * (decode failure / wedged decoder) and the session should advance
+ * past it rather than sit inert. Fetch-stage failures return false —
+ * see the taxonomy note above.
+ */
+export function isSkippableLoadFailure(err: unknown): boolean {
+  return (
+    err instanceof BufferDecodeError || err instanceof BufferLoadTimeoutError
+  );
+}
+
+/**
  * Decoded-buffer cache keyed by stream URL.
  *
  * decodeAudioData is async and can take 0.5–2 s for a typical
@@ -64,6 +122,13 @@ export const SCHEDULE_LOOKAHEAD_SEC = 0.05;
  * with no wait. The cache also de-duplicates concurrent loads for
  * the same URL — a frequent need when both the preload and the
  * actual crossfade call into load() in quick succession.
+ *
+ * v3.9 — the cache is a working set, NOT an archive: callers must
+ * prune() it down to the tracks still in play after every track
+ * advance. Decoded PCM is ~50–100 MB per track; the 2026-08-01
+ * incident showed an endless session that never evicts grows by
+ * hundreds of tracks until the renderer can no longer allocate and
+ * every subsequent decode fails.
  */
 export class BufferCache {
   private readonly cache = new Map<string, AudioBuffer>();
@@ -75,23 +140,79 @@ export class BufferCache {
    * Fetch ``url`` as bytes, decode to a PCM AudioBuffer at the
    * context's native rate, and cache. Concurrent calls for the same
    * URL share a single in-flight promise.
+   *
+   * v3.9 — each call races the shared in-flight load against its own
+   * ``timeoutMs`` deadline (default BUFFER_LOAD_TIMEOUT_MS; pass 0 to
+   * wait forever). A timeout rejects THIS caller with
+   * ``BufferLoadTimeoutError`` but leaves the underlying load running:
+   * if it eventually resolves the buffer is cached for the next hit,
+   * and a retry re-joins the same in-flight promise under a fresh
+   * deadline instead of stacking a second fetch.
    */
-  async load(url: string): Promise<AudioBuffer> {
+  async load(
+    url: string,
+    timeoutMs: number = BUFFER_LOAD_TIMEOUT_MS,
+  ): Promise<AudioBuffer> {
     const cached = this.cache.get(url);
     if (cached) return cached;
-    const inflight = this.inflight.get(url);
-    if (inflight) return inflight;
-    const promise = (async () => {
+    let inner = this.inflight.get(url);
+    if (!inner) {
+      inner = this.loadUncached(url);
+      this.inflight.set(url, inner);
+      // A timed-out caller stops awaiting ``inner``; without a spare
+      // handler its eventual rejection would surface as an unhandled
+      // promise rejection. This derived promise absorbs that case and
+      // does not swallow the rejection for real awaiters.
+      inner.catch(() => {});
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return inner;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        inner,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new BufferLoadTimeoutError(
+                  `Buffer load timed out after ${timeoutMs} ms: ${url}`,
+                ),
+              ),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  /** The actual fetch + decode, with stage-tagged failures. */
+  private async loadUncached(url: string): Promise<AudioBuffer> {
+    try {
+      let resp: Response;
       try {
-        const resp = await fetch(url);
-        if (!resp.ok) {
-          throw new Error(`Buffer fetch failed: HTTP ${resp.status}`);
-        }
-        const arrayBuffer = await resp.arrayBuffer();
-        // decodeAudioData has two signatures — the Promise form is
-        // the modern one; some older Safaris still need callbacks.
-        // We bridge defensively so the same call site works on both.
-        const buffer = await new Promise<AudioBuffer>((resolve, reject) => {
+        resp = await fetch(url);
+      } catch (err) {
+        throw new BufferFetchError(`Buffer fetch failed: ${String(err)}`);
+      }
+      if (!resp.ok) {
+        throw new BufferFetchError(`Buffer fetch failed: HTTP ${resp.status}`);
+      }
+      let arrayBuffer: ArrayBuffer;
+      try {
+        arrayBuffer = await resp.arrayBuffer();
+      } catch (err) {
+        throw new BufferFetchError(
+          `Buffer fetch failed reading body: ${String(err)}`,
+        );
+      }
+      // decodeAudioData has two signatures — the Promise form is
+      // the modern one; some older Safaris still need callbacks.
+      // We bridge defensively so the same call site works on both.
+      let buffer: AudioBuffer;
+      try {
+        buffer = await new Promise<AudioBuffer>((resolve, reject) => {
           const maybe = this.audioCtx.decodeAudioData(
             arrayBuffer,
             resolve,
@@ -105,22 +226,45 @@ export class BufferCache {
             (maybe as Promise<AudioBuffer>).then(resolve, reject);
           }
         });
-        this.cache.set(url, buffer);
-        return buffer;
-      } finally {
-        // Always clear in-flight, success or failure — a retry should
-        // not be blocked by a stale rejected promise sitting in the
-        // map.
-        this.inflight.delete(url);
+      } catch (err) {
+        throw new BufferDecodeError(`decodeAudioData failed: ${String(err)}`);
       }
-    })();
-    this.inflight.set(url, promise);
-    return promise;
+      this.cache.set(url, buffer);
+      return buffer;
+    } finally {
+      // Always clear in-flight, success or failure — a retry should
+      // not be blocked by a stale rejected promise sitting in the
+      // map.
+      this.inflight.delete(url);
+    }
   }
 
   /** Drop a single entry to free its decoded PCM (~10–100 MB). */
   evict(url: string): void {
     this.cache.delete(url);
+  }
+
+  /**
+   * v3.9 — evict every cached buffer whose URL is NOT in ``keepUrls``,
+   * returning how many were dropped. Called by live.ts after each
+   * track advance with {current, preloaded-next} so the cache stays a
+   * bounded two-ish-track working set instead of accumulating one
+   * ~50–100 MB PCM buffer per played track (the leak behind the
+   * 2026-08-01 30 h session collapse). In-flight loads are untouched —
+   * only settled cache entries are dropped. Evicting a buffer that a
+   * deck is still playing is safe: the source node keeps its own
+   * reference until it ends.
+   */
+  prune(keepUrls: Iterable<string>): number {
+    const keep = new Set(keepUrls);
+    let evicted = 0;
+    for (const url of Array.from(this.cache.keys())) {
+      if (!keep.has(url)) {
+        this.cache.delete(url);
+        evicted += 1;
+      }
+    }
+    return evicted;
   }
 
   /** Drop everything. Called on session end / hook unmount. */

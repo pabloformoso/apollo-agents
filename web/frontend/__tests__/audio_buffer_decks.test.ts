@@ -23,7 +23,11 @@ import {
 import {
   BufferCache,
   BufferDeck,
+  BufferDecodeError,
+  BufferFetchError,
+  BufferLoadTimeoutError,
   SCHEDULE_LOOKAHEAD_SEC,
+  isSkippableLoadFailure,
 } from "../lib/audio_buffer_decks";
 
 // ── Fakes ────────────────────────────────────────────────────────────────
@@ -422,5 +426,181 @@ describe("BufferCache", () => {
     // Subsequent retry must succeed (the failed in-flight entry was
     // cleared, so we go through the fresh fetch path).
     await expect(cache.load("/api/tracks/broken/stream")).resolves.toBeDefined();
+  });
+});
+
+// ── v3.9 — load-failure taxonomy ──────────────────────────────────────────
+
+describe("BufferCache load-failure taxonomy (v3.9)", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(8),
+      })),
+    );
+  });
+
+  it("HTTP errors reject with BufferFetchError (NOT skip-worthy)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    (globalThis.fetch as Mock).mockResolvedValueOnce({ ok: false, status: 404 });
+    const err = await cache.load("/api/tracks/e404/stream").catch((e) => e);
+    expect(err).toBeInstanceOf(BufferFetchError);
+    expect(String(err)).toMatch(/HTTP 404/);
+    expect(isSkippableLoadFailure(err)).toBe(false);
+  });
+
+  it("network-level fetch rejections reject with BufferFetchError", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    (globalThis.fetch as Mock).mockRejectedValueOnce(new TypeError("net down"));
+    const err = await cache.load("/api/tracks/net/stream").catch((e) => e);
+    expect(err).toBeInstanceOf(BufferFetchError);
+    expect(isSkippableLoadFailure(err)).toBe(false);
+  });
+
+  it("decode rejections reject with BufferDecodeError (skip-worthy)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    audioCtx.decodeAudioData.mockImplementationOnce(
+      (_buf: ArrayBuffer, _ok?: (b: AudioBuffer) => void, errCb?: (e: Error) => void) => {
+        const failure = new Error("EncodingError: Unable to decode audio data");
+        if (errCb) errCb(failure);
+        return Promise.reject(failure);
+      },
+    );
+    const err = await cache.load("/api/tracks/undecodable/stream").catch((e) => e);
+    expect(err).toBeInstanceOf(BufferDecodeError);
+    expect(isSkippableLoadFailure(err)).toBe(true);
+    // A retry is not poisoned by the failed entry.
+    await expect(cache.load("/api/tracks/undecodable/stream")).resolves.toBeDefined();
+  });
+
+  it("isSkippableLoadFailure is false for arbitrary errors", () => {
+    expect(isSkippableLoadFailure(new Error("boom"))).toBe(false);
+    expect(isSkippableLoadFailure(undefined)).toBe(false);
+    expect(isSkippableLoadFailure("string")).toBe(false);
+  });
+});
+
+// ── v3.9 — decode timeout ─────────────────────────────────────────────────
+
+describe("BufferCache.load timeout (v3.9)", () => {
+  /** decodeAudioData that never settles until told to — the 2026-08-01
+   *  wedge in miniature. */
+  let releaseDecode: ((b: AudioBuffer) => void) | null;
+
+  beforeEach(() => {
+    releaseDecode = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(8),
+      })),
+    );
+    audioCtx.decodeAudioData.mockImplementation(
+      (_buf: ArrayBuffer, ok?: (b: AudioBuffer) => void) => {
+        return new Promise<AudioBuffer>((resolve) => {
+          releaseDecode = (b: AudioBuffer) => {
+            if (ok) ok(b);
+            resolve(b);
+          };
+        });
+      },
+    );
+  });
+
+  it("a hung decode rejects with BufferLoadTimeoutError after timeoutMs", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    const err = await cache.load("/api/tracks/hung/stream", 20).catch((e) => e);
+    expect(err).toBeInstanceOf(BufferLoadTimeoutError);
+    expect(isSkippableLoadFailure(err)).toBe(true);
+  });
+
+  it("timeoutMs = 0 disables the deadline (caller waits for the decode)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    const pending = cache.load("/api/tracks/slow/stream", 0);
+    // Give fetch+arrayBuffer microtasks time to reach the decode stage.
+    await new Promise((r) => setTimeout(r, 10));
+    releaseDecode!(new FakeAudioBuffer(240) as unknown as AudioBuffer);
+    await expect(pending).resolves.toBeDefined();
+  });
+
+  it("a retry after timeout joins the SAME in-flight load (no duplicate fetch)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await expect(cache.load("/api/tracks/wedge/stream", 20)).rejects.toBeInstanceOf(
+      BufferLoadTimeoutError,
+    );
+    const retry = cache.load("/api/tracks/wedge/stream", 1000);
+    await new Promise((r) => setTimeout(r, 10));
+    releaseDecode!(new FakeAudioBuffer(240) as unknown as AudioBuffer);
+    await expect(retry).resolves.toBeDefined();
+    expect((globalThis.fetch as Mock).mock.calls.length).toBe(1);
+  });
+
+  it("a load that resolves late (after a caller timed out) still lands in the cache", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await expect(cache.load("/api/tracks/late/stream", 20)).rejects.toBeInstanceOf(
+      BufferLoadTimeoutError,
+    );
+    releaseDecode!(new FakeAudioBuffer(240) as unknown as AudioBuffer);
+    // Let the underlying load's continuation run.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(cache.has("/api/tracks/late/stream")).toBe(true);
+    // And a fresh load is a pure cache hit — no second fetch.
+    await expect(cache.load("/api/tracks/late/stream", 20)).resolves.toBeDefined();
+    expect((globalThis.fetch as Mock).mock.calls.length).toBe(1);
+  });
+});
+
+// ── v3.9 — prune (working-set bound) ──────────────────────────────────────
+
+describe("BufferCache.prune (v3.9)", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        arrayBuffer: async () => new ArrayBuffer(8),
+      })),
+    );
+  });
+
+  it("evicts everything not in keepUrls and reports the count", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await cache.load("/api/tracks/t1/stream");
+    await cache.load("/api/tracks/t2/stream");
+    await cache.load("/api/tracks/t3/stream");
+    const evicted = cache.prune(["/api/tracks/t2/stream"]);
+    expect(evicted).toBe(2);
+    expect(cache.has("/api/tracks/t1/stream")).toBe(false);
+    expect(cache.has("/api/tracks/t2/stream")).toBe(true);
+    expect(cache.has("/api/tracks/t3/stream")).toBe(false);
+  });
+
+  it("keeps multiple URLs (current + preloaded next)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await cache.load("/api/tracks/cur/stream");
+    await cache.load("/api/tracks/next/stream");
+    await cache.load("/api/tracks/old/stream");
+    cache.prune(["/api/tracks/cur/stream", "/api/tracks/next/stream"]);
+    expect(cache.has("/api/tracks/cur/stream")).toBe(true);
+    expect(cache.has("/api/tracks/next/stream")).toBe(true);
+    expect(cache.has("/api/tracks/old/stream")).toBe(false);
+  });
+
+  it("is a no-op (returns 0) when everything is in the keep set", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await cache.load("/api/tracks/only/stream");
+    expect(cache.prune(["/api/tracks/only/stream"])).toBe(0);
+    expect(cache.has("/api/tracks/only/stream")).toBe(true);
+  });
+
+  it("an evicted URL re-fetches on the next load (no stale poisoning)", async () => {
+    const cache = new BufferCache(audioCtx as unknown as AudioContext);
+    await cache.load("/api/tracks/gone/stream");
+    cache.prune([]);
+    await cache.load("/api/tracks/gone/stream");
+    expect((globalThis.fetch as Mock).mock.calls.length).toBe(2);
   });
 });

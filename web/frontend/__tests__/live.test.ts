@@ -170,6 +170,12 @@ class FakeBiquadFilterNode {
 const _NEXT_AUDIO_TIME = { value: 0 };
 
 class FakeAudioContext {
+  /** v3.9 test knob — "reject" makes decodeAudioData fail like
+   * undecodable bytes (EncodingError); "hang" makes it never settle
+   * (the wedged-decoder mode of the 2026-08-01 incident). Sticky for
+   * the test; reset to "resolve" in the outer beforeEach. */
+  static decodeBehavior: "resolve" | "reject" | "hang" = "resolve";
+
   // Getter so tests can bump _NEXT_AUDIO_TIME between scheduling and
   // the playback_pos tick to simulate the audio thread advancing.
   get currentTime(): number {
@@ -184,8 +190,16 @@ class FakeAudioContext {
     async (
       _buf: ArrayBuffer,
       ok?: (b: AudioBuffer) => void,
-      _err?: (e: Error) => void,
+      err?: (e: Error) => void,
     ) => {
+      if (FakeAudioContext.decodeBehavior === "hang") {
+        return new Promise<AudioBuffer>(() => {});
+      }
+      if (FakeAudioContext.decodeBehavior === "reject") {
+        const failure = new Error("EncodingError: Unable to decode audio data");
+        if (err) err(failure);
+        throw failure;
+      }
       const ab = new FakeAudioBuffer(240) as unknown as AudioBuffer;
       if (ok) ok(ab);
       return ab;
@@ -196,6 +210,7 @@ class FakeAudioContext {
 }
 
 beforeEach(() => {
+  FakeAudioContext.decodeBehavior = "resolve";
   vi.stubGlobal("WebSocket", FakeWebSocket);
   vi.stubGlobal("AudioContext", FakeAudioContext);
   // v3.4 — BufferCache.load() goes through window.fetch to download
@@ -1307,13 +1322,14 @@ describe("useLiveSession", () => {
     expect(gs[1].id).toBeGreaterThan(gs[0].id);
   });
 
-  // ── v3.6.2 — a failed buffer load stays inert (E2E substrate contract) ──
+  // ── v3.6.2 — a failed buffer FETCH stays inert (E2E substrate contract) ──
   it("does not send anything when the buffer fetch 404s", async () => {
-    // Deliberate: an unplayable track leaves the deck inert (warn only).
-    // Stale playlists are filtered server-side before the engine starts;
-    // the E2E suite drives the UI against 404ing mock streams and
-    // depends on the deck staying quiet. If this behavior changes,
-    // playable E2E audio must land first.
+    // Deliberate: a fetch-stage failure leaves the deck inert (warn
+    // only). Stale playlists are filtered server-side before the engine
+    // starts; the E2E suite drives the UI against 404ing mock streams
+    // and depends on the deck staying quiet. v3.9 narrowed this to the
+    // FETCH stage only — decode failures/timeouts now skip (see the
+    // skip-on-failure tests below).
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
       async (url: unknown) =>
         String(url).includes("/api/tracks/ghost-1/stream")
@@ -1339,6 +1355,124 @@ describe("useLiveSession", () => {
     expect(
       sent.filter((m: { type: string }) => m.type === "track_ended"),
     ).toEqual([]);
+  });
+
+  // ── v3.9 — skip-on-decode-failure + bounded decode cache ───────────────
+  describe("v3.9 skip-on-load-failure and cache pruning", () => {
+    const trackEndedSent = () =>
+      FakeWebSocket.lastInstance!.sent
+        .map((s) => JSON.parse(s))
+        .filter((m: { type: string }) => m.type === "track_ended");
+
+    it("sends a synthetic track_ended when the buffer decode fails", async () => {
+      // The 2026-08-01 failure mode: bytes arrive but can't become PCM.
+      // Waiting can't fix that — the hook must tell the backend so the
+      // set advances immediately instead of wedging until the server
+      // stall watchdog fires minutes later.
+      FakeAudioContext.decodeBehavior = "reject";
+      renderHook(() => useLiveSession("sid-decode-fail"));
+      await flushOpen();
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: { id: "bad-1", display_name: "Corrupt" },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const ended = trackEndedSent();
+      expect(ended).toHaveLength(1);
+      expect(ended[0].track_id).toBe("bad-1");
+    });
+
+    it("caps consecutive decode-failure skips at 3 (wedged-pipeline guard)", async () => {
+      // If every track fails, the problem is the audio pipeline, not
+      // the tracks — burning through the playlist client-side would
+      // recreate the 30 h incident's silent track-churn. After the cap
+      // the hook goes quiet and leaves recovery to the stall watchdog.
+      FakeAudioContext.decodeBehavior = "reject";
+      renderHook(() => useLiveSession("sid-decode-streak"));
+      await flushOpen();
+      for (const id of ["s1", "s2", "s3", "s4", "s5"]) {
+        await act(async () => {
+          FakeWebSocket.lastInstance!.pushServerEvent({
+            type: "engine_command",
+            command: "load",
+            track: { id, display_name: id },
+          });
+          await new Promise((r) => setTimeout(r, 5));
+        });
+      }
+      expect(trackEndedSent()).toHaveLength(3);
+    });
+
+    it("a successful load resets the skip streak", async () => {
+      FakeAudioContext.decodeBehavior = "reject";
+      renderHook(() => useLiveSession("sid-streak-reset"));
+      await flushOpen();
+      const pushLoad = async (id: string) => {
+        await act(async () => {
+          FakeWebSocket.lastInstance!.pushServerEvent({
+            type: "engine_command",
+            command: "load",
+            track: { id, display_name: id },
+          });
+          await new Promise((r) => setTimeout(r, 5));
+        });
+      };
+      await pushLoad("f1");
+      await pushLoad("f2");
+      // A healthy track schedules fine and zeroes the streak…
+      FakeAudioContext.decodeBehavior = "resolve";
+      await pushLoad("ok-1");
+      // …so the next failure still gets its full skip budget.
+      FakeAudioContext.decodeBehavior = "reject";
+      await pushLoad("f3");
+      expect(trackEndedSent()).toHaveLength(3); // f1, f2, f3 all skipped
+    });
+
+    it("viewer mode never sends track_ended on decode failure", async () => {
+      FakeAudioContext.decodeBehavior = "reject";
+      renderHook(() => useLiveSession("sid-viewer-decode", { viewer: true }));
+      await flushOpen();
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: { id: "bad-v", display_name: "Corrupt" },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      expect(FakeWebSocket.lastInstance!.sent).toEqual([]);
+    });
+
+    it("prunes the decode cache to the working set on track advance", async () => {
+      // Load t1, advance to t2, then come back to t1: the prune on the
+      // t2 advance must have evicted t1's PCM, so t1 is re-fetched
+      // (2 fetches total for t1). Pre-v3.9 the second t1 load was a
+      // cache hit — which is exactly the unbounded growth that OOMed
+      // the 30 h endless session.
+      renderHook(() => useLiveSession("sid-prune"));
+      await flushOpen();
+      const pushLoad = async (id: string) => {
+        await act(async () => {
+          FakeWebSocket.lastInstance!.pushServerEvent({
+            type: "engine_command",
+            command: "load",
+            track: { id, display_name: id },
+          });
+          await new Promise((r) => setTimeout(r, 5));
+        });
+      };
+      await pushLoad("t1");
+      await pushLoad("t2");
+      await pushLoad("t1");
+      const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+      const t1Fetches = fetchMock.mock.calls
+        .map((c) => String(c[0]))
+        .filter((u) => u.includes("/api/tracks/t1/stream"));
+      expect(t1Fetches).toHaveLength(2);
+    });
   });
 
   // ── v2.7.3 — WS auto-reconnect with exponential backoff ────────────────
