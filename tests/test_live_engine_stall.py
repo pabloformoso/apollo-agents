@@ -26,7 +26,10 @@ from agent.live_engine import (
 def _track(
     track_id: str,
     *,
-    duration_sec: float = 60.0,
+    # v3.9.1 — default above MIN_TRACK_DURATION_SEC so catalog mocks
+    # pass the session-eligibility screen; playlist tracks that drive
+    # the stall math keep their explicit duration_sec=60.
+    duration_sec: float = 240.0,
     bpm: float = 120.0,
     camelot_key: str = "8A",
     genre_folder: str = "lofi - ambient",
