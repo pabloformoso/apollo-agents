@@ -1700,7 +1700,15 @@ def build_catalog():
 # === Smart session generation ===
 
 def load_catalog(genre):
-    """Load tracks.json and return entries matching genre_folder (case-insensitive)."""
+    """Load tracks.json and return session-eligible entries matching genre_folder.
+
+    v3.9.1 — applies the session-eligibility screen (min track duration,
+    see ``agent/eligibility.py``): sub-2-minute pieces read as cut-off
+    tracks in a mix, so they never enter the offline selection either.
+    Genre matching is case-insensitive, as before.
+    """
+    from agent.eligibility import filter_session_eligible  # noqa: PLC0415
+
     if not os.path.exists(CATALOG_PATH):
         print(f"Error: catalog not found at {CATALOG_PATH}. Run --build-catalog first.")
         sys.exit(1)
@@ -1713,7 +1721,17 @@ def load_catalog(genre):
         print(f"Error: no tracks found for genre '{genre}'.")
         print(f"Available genres: {', '.join(available)}")
         sys.exit(1)
-    return tracks
+    eligible = filter_session_eligible(tracks)
+    n_screened = len(tracks) - len(eligible)
+    if n_screened:
+        print(
+            f"  Screened {n_screened} track(s) under the minimum session "
+            f"duration ({len(eligible)} of {len(tracks)} remain)."
+        )
+    if not eligible:
+        print(f"Error: all {len(tracks)} '{genre}' tracks are under the minimum session duration.")
+        sys.exit(1)
+    return eligible
 
 
 def bpm_cluster(tracks):

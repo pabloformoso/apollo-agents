@@ -22,6 +22,11 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
+from agent.eligibility import (
+    filter_session_eligible,
+    ineligibility_reason,
+)
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -521,6 +526,23 @@ def propose_playlist(
         available = sorted({t["genre_folder"] for t in data["tracks"]})
         return f"No tracks for '{genre}'. Available: {', '.join(available)}"
 
+    # v3.9.1 — session-eligibility screen: sub-2-minute pieces read as
+    # cut-off tracks on stream (aural batch, observed 2026-08-03).
+    eligible = filter_session_eligible(all_tracks)
+    n_screened = len(all_tracks) - len(eligible)
+    if n_screened:
+        print(
+            f"[propose_playlist] screened {n_screened} sub-minimum-duration "
+            f"track(s) out of {len(all_tracks)} for '{genre}'",
+            flush=True,
+        )
+    if not eligible:
+        return (
+            f"No session-eligible tracks for '{genre}' — all {len(all_tracks)} "
+            "catalog entries are shorter than the minimum session duration."
+        )
+    all_tracks = eligible
+
     cluster = _bpm_cluster(all_tracks)
     ordered = _harmonic_sort(cluster)
 
@@ -705,6 +727,16 @@ def swap_track(
     new_track = index.get(track_id)
     if not new_track:
         return f"Track '{track_id}' not found. Use get_catalog to see valid IDs."
+
+    # v3.9.1 — session-eligibility screen (agent-driven swaps only; a
+    # human swapping via the web UI is an explicit override and is not
+    # routed through this tool).
+    reason = ineligibility_reason(new_track)
+    if reason:
+        return (
+            f"Track '{new_track.get('display_name', track_id)}' was NOT "
+            f"swapped in: {reason}. Pick a longer track from get_catalog."
+        )
 
     old = playlist[position - 1]
     playlist[position - 1] = new_track
@@ -2189,6 +2221,10 @@ def pick_next_track(
     if bpm_lo > bpm_hi:
         bpm_lo, bpm_hi = bpm_hi, bpm_lo
 
+    # v3.9.1 — never surface sub-minimum-duration tracks as candidates:
+    # whatever the LLM picks from this table can end up on stream.
+    catalog = filter_session_eligible(catalog)
+
     matches: list[dict] = []
     for t in catalog:
         bpm = t.get("bpm")
@@ -2287,6 +2323,15 @@ def extend_set(track_id: str, context_variables: dict) -> str:
             "copied verbatim from a pick_next_track result. "
             "Call pick_next_track again with your criteria and use the "
             "exact id from the 'id' column of its output."
+        )
+    # v3.9.1 — session-eligibility screen. pick_next_track no longer
+    # surfaces these, but the id could come from an engine event or an
+    # older turn's table; reject with the reason so the LLM re-picks.
+    reason = ineligibility_reason(track)
+    if reason:
+        return (
+            f"Track '{track.get('display_name', track_id)}' was NOT appended: "
+            f"{reason}. Call pick_next_track for a longer candidate."
         )
     return engine.append_track(track)
 
