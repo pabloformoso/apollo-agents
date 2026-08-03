@@ -4,6 +4,10 @@ Automated DJ mix generator + multi-agent AI pipeline. Takes WAV audio files,
 BPM-matches them, applies crossfades, and renders 1080p YouTube videos with
 waveform visualizations, AI-generated artwork, and retro animated titles.
 
+Folder-specific decisions and gotchas live in nested CLAUDE.md files:
+`agent/CLAUDE.md`, `web/CLAUDE.md`, `tests/CLAUDE.md`, `scripts/CLAUDE.md`.
+Update the one next to the code you touch instead of growing this file.
+
 ## Running
 
 ```bash
@@ -100,6 +104,51 @@ fonts/
 - **Per-session output** — `output/<session-name>/`, `artwork/<session-name>/`
 - **Artwork deduplication** — tracks with the same `display_name` share one image
 - **Agent memory** — `agent/memory.json` is gitignored; each user builds their own
+- **Session eligibility (v3.9.1)** — tracks shorter than 120 s
+  (`APOLLO_MIN_TRACK_DURATION_SEC`) are never SELECTED into a session;
+  they stay in the catalog for stream-by-id/ratings. Screen lives in the
+  selection paths only — see `agent/CLAUDE.md`.
+
+## Deploy & operations (read before touching prod)
+
+Prod = `docker compose` in the **main checkout**
+(`C:\Users\pablo\Documents\GitHub\apollo-agents`), which sits on a
+`deploy/*` branch (currently `deploy/endless-w4-20260711`) carrying
+main + not-yet-merged live work. The repo is bind-mounted into the
+containers and the backend runs `uvicorn --reload`.
+
+The only sanctioned path to prod:
+
+1. Feature branch (worktree) → PR → **squash-merge to `main`** with CI
+   green (read the FULL failure list; `youtube_chat` fails local-only).
+2. In the main checkout: `git fetch && git merge origin/main` into the
+   deploy branch, resolve, re-run tests there.
+3. Restart containers if needed (`docker compose restart backend frontend`).
+
+Hard rules:
+
+- **Never deploy from `main` directly** — the deploy branch is the
+  prod truth; skipping it strands its extra commits.
+- **Never merge into the main checkout or restart containers while a
+  live session is running** — `--reload` watches `agent/` and `web/`,
+  so a merge mid-stream kills the broadcast. Check first:
+  `docker logs --since 30m apollo-backend | grep live-ws`.
+- Ports **4010/4020 are the prod stack** — dev servers go on 4011/4021.
+- Worktrees have no `tracks/`, `.env`, or venv — copy `.env` from the
+  main checkout; run anything runtime-ish from the main checkout.
+- `--build-catalog` needs madmom → run it in detached Docker
+  (~1.25 min/track, serial; writes tracks.json only at the end).
+
+## Known issues / backlog
+
+- Stall-watchdog alarm: after N consecutive forced advances the session
+  should alert/stop instead of silently churning tracks (2026-08-01).
+- Endless extend/append dedupe: the same track can be queued twice in a
+  row and crossfade into itself ('Golden Groove'×2, 2026-08-01).
+- Poisoned BPMs in catalog (lofi@150, synthware 176–212) act as
+  genre-drift bridges.
+- `tests/web/test_youtube_chat.py` fails locally, passes in CI.
+- 2 pre-existing eslint errors in `web/frontend/lib/live.ts`.
 
 ## Key constants (top of `main.py`)
 
