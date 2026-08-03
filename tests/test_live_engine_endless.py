@@ -31,7 +31,11 @@ from agent.live_engine import (
 def _track(
     track_id: str,
     *,
-    duration_sec: float = 60.0,
+    # v3.9.1 — default above MIN_TRACK_DURATION_SEC so tests that are
+    # not about the eligibility screen don't trip it. Tests that poke
+    # positions near a 60 s end keep an explicit duration_sec=60 for
+    # their PLAYLIST tracks (playlists are not screened — only picks).
+    duration_sec: float = 240.0,
     bpm: float = 120.0,
     camelot_key: str = "8A",
     genre_folder: str = "lofi - ambient",
@@ -650,9 +654,12 @@ def test_inflight_extend_recycles_played_tracks_when_catalog_exhausted(monkeypat
     # Catalog == playlist: nothing fresh left in the genre.
     monkeypatch.setattr(
         "agent.live_engine._load_catalog",
+        # v3.9.1 — catalog copies must be session-eligible (≥ the min
+        # duration) or the eligibility screen empties the recycle pool;
+        # the PLAYLIST keeps duration 60 for the poke math below.
         lambda: [
-            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=76),
-            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+            _track("a", duration_sec=240, genre_folder="lofi - ambient", bpm=76),
+            _track("b", duration_sec=240, genre_folder="lofi - ambient", bpm=80),
         ],
     )
     engine.report_playback_pos(track_id="b", current_time=35.0)  # poke
@@ -748,10 +755,12 @@ def test_engine_recycle_respects_no_repeat_window(monkeypatch):
     engine._idx = 2
     monkeypatch.setattr(
         "agent.live_engine._load_catalog",
+        # v3.9.1 — see the recycle test above: catalog copies eligible,
+        # playlist stays at 60 s for the poke math.
         lambda: [
-            _track("a", duration_sec=60, genre_folder="lofi - ambient", bpm=70),
-            _track("b", duration_sec=60, genre_folder="lofi - ambient", bpm=79),
-            _track("c", duration_sec=60, genre_folder="lofi - ambient", bpm=80),
+            _track("a", duration_sec=240, genre_folder="lofi - ambient", bpm=70),
+            _track("b", duration_sec=240, genre_folder="lofi - ambient", bpm=79),
+            _track("c", duration_sec=240, genre_folder="lofi - ambient", bpm=80),
         ],
     )
     engine.report_playback_pos(track_id="c", current_time=35.0)  # poke

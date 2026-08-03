@@ -36,6 +36,7 @@ from typing import Callable, Protocol, runtime_checkable
 import numpy as np
 import soundfile as sf
 
+from agent.eligibility import filter_session_eligible
 from agent.phase_lock import (
     XFADE_EDGE_GUARD_SAMPLES,
     LiveTransitionPlan,
@@ -2340,6 +2341,14 @@ def _autoplay_pick(
     touching ``self``, and so tests can exercise it without spinning up
     an engine instance.
     """
+    if not catalog:
+        return None
+    # v3.9.1 — session-eligibility screen (min duration). Applied before
+    # every branch below, including the allow_repeats recycle paths: a
+    # sub-2-minute piece reads as a cut-off track on stream (observed
+    # live 2026-08-03 with the aural batch) and must never be an
+    # endless continuation either.
+    catalog = filter_session_eligible(catalog)
     if not catalog:
         return None
     target_genre = (genre or "").strip().lower()
