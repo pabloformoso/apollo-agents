@@ -2183,14 +2183,19 @@ def pick_next_track(
     context_variables: dict,
     key: str | None = None,
     mood: str | None = None,
+    include_other_genres: bool = False,
 ) -> str:
-    """Search the FULL catalog for tracks matching BPM range / key / mood.
+    """Search the catalog for tracks matching BPM range / key / mood.
 
     Returns up to 5 candidates as a markdown table. The agent then picks
-    one and feeds it to ``queue_swap`` or extends the queue with it. This
-    is what makes the planner's playlist a guidance instead of a contract
-    — the LiveDJ can pull anything from the catalog when the moment calls
-    for it.
+    one and feeds it to ``queue_swap`` or extends the queue with it.
+
+    v3.9.2 — candidates are restricted to the SESSION'S GENRE. One
+    out-of-genre pick flips the endless engine's genre permanently
+    (it inherits genre from the current track): observed live
+    2026-07-28 (aural→synthware) and 2026-08-04 (aural→lofi, the model
+    picked a 75 BPM lofi track into a 52 BPM aural set "to get the
+    energy up"). Energy changes happen WITHIN the session genre.
 
     Args:
         bpm_min: Minimum BPM (inclusive).
@@ -2199,6 +2204,10 @@ def pick_next_track(
             matches are still returned but ranked below.
         mood: Optional free-text mood — fuzzy matched against the
             track's display_name / genre / tags / suno prompt.
+        include_other_genres: Leave False. Set True ONLY when the
+            operator or the audience has EXPLICITLY asked, in their own
+            words, for music from another genre. Never set it on your
+            own initiative — not for energy, variety, or vibe reasons.
     """
     # Lazy import of the backend pipeline — agent/tools.py is imported by
     # the web backend itself, so eager import would cycle. Pattern set up
@@ -2225,6 +2234,17 @@ def pick_next_track(
     # whatever the LLM picks from this table can end up on stream.
     catalog = filter_session_eligible(catalog)
 
+    # v3.9.2 — session-genre fence (see docstring). No ctx genre (CLI /
+    # tests / non-session use) → unrestricted, as before.
+    session_genre = (context_variables.get("genre") or "").strip().lower()
+    genre_fenced = bool(session_genre) and not include_other_genres
+    if genre_fenced:
+        catalog = [
+            t for t in catalog
+            if (t.get("genre_folder") or t.get("genre") or "").strip().lower()
+            == session_genre
+        ]
+
     matches: list[dict] = []
     for t in catalog:
         bpm = t.get("bpm")
@@ -2248,6 +2268,12 @@ def pick_next_track(
             + (f", key={key}" if key else "")
             + (f", mood={mood}" if mood else "")
         )
+        if genre_fenced:
+            return (
+                f"No '{session_genre}' tracks in catalog matching {crit}. "
+                "The search is restricted to the session's genre — widen "
+                "the BPM range or drop the key/mood filter and try again."
+            )
         return f"No tracks in catalog matching {crit}."
 
     mid_bpm = (bpm_lo + bpm_hi) / 2
@@ -2272,7 +2298,11 @@ def pick_next_track(
     return "\n".join(lines)
 
 
-def extend_set(track_id: str, context_variables: dict) -> str:
+def extend_set(
+    track_id: str,
+    context_variables: dict,
+    allow_other_genre: bool = False,
+) -> str:
     """Append a catalog track to the live playlist (v2.6.0 endless mode).
 
     Use this AFTER ``pick_next_track`` has surfaced a candidate, when the
@@ -2280,6 +2310,9 @@ def extend_set(track_id: str, context_variables: dict) -> str:
     going. The engine then plays the appended track as the new tail.
     If you don't act within ~5 s of `playlist_running_low`, the engine
     auto-picks an in-genre continuation deterministically.
+
+    v3.9.2 — the track must belong to the session's genre, and must not
+    already be playing or queued (the engine rejects duplicates).
 
     Args:
         track_id: The OPAQUE catalog id (a long dashed string ending in
@@ -2290,6 +2323,10 @@ def extend_set(track_id: str, context_variables: dict) -> str:
             display_name / slugified guess — those are not ids and will
             fail. If you're unsure of the exact id, call
             ``pick_next_track`` again and read the ``id`` column.
+        allow_other_genre: Leave False. Set True ONLY when the operator
+            or the audience has EXPLICITLY asked, in their own words,
+            for music from another genre. Never set it on your own
+            initiative — not for energy, variety, or vibe reasons.
 
     Returns:
         Confirmation string with the track's new playlist position, or
@@ -2333,6 +2370,22 @@ def extend_set(track_id: str, context_variables: dict) -> str:
             f"Track '{track.get('display_name', track_id)}' was NOT appended: "
             f"{reason}. Call pick_next_track for a longer candidate."
         )
+    # v3.9.2 — session-genre fence, mirrors pick_next_track: one
+    # out-of-genre append flips the endless engine's genre permanently
+    # (observed live 2026-08-04, aural→lofi via 'Glockenspiel Dream').
+    session_genre = (context_variables.get("genre") or "").strip().lower()
+    if session_genre and not allow_other_genre:
+        track_genre = (
+            track.get("genre_folder") or track.get("genre") or ""
+        ).strip().lower()
+        if track_genre != session_genre:
+            return (
+                f"Track '{track.get('display_name', track_id)}' was NOT "
+                f"appended: it is '{track_genre or 'unknown genre'}' but this "
+                f"session is '{session_genre}'. Call pick_next_track for an "
+                "in-genre candidate. (Only if the audience explicitly asked "
+                "for another genre, retry with allow_other_genre=true.)"
+            )
     return engine.append_track(track)
 
 

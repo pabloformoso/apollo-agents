@@ -433,6 +433,23 @@ class LiveEngineLocal:
         if not track or not track.get("id"):
             return "append_track: track must include an 'id' field."
         with self._lock:
+            # v3.9.2 — dedupe guard: never append a track that is the
+            # one currently playing or already queued ahead. Without
+            # this, one careless pick (LLM or recycle) puts the same id
+            # in consecutive slots and the set crossfades a track into
+            # itself (observed live 2026-08-01 'Golden Groove'×2 and
+            # 2026-08-04 'Oceanic Flow'×2). Tracks BEHIND the cursor
+            # stay appendable — recycling played tracks is what keeps a
+            # 24/7 endless set alive.
+            upcoming = {
+                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+            }
+            if track["id"] in upcoming:
+                return (
+                    f"append_track: '{track.get('display_name', track['id'])}' "
+                    "is already playing or queued — refusing duplicate append. "
+                    "Pick a different track."
+                )
             if self._endless_appended >= ENDLESS_APPEND_CAP:
                 msg = (
                     f"Append cap reached ({ENDLESS_APPEND_CAP}); "
@@ -522,6 +539,11 @@ class LiveEngineLocal:
             recent = _recent_window_ids(
                 self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
             )
+            # v3.9.2 — current + upcoming queue: hard-excluded from every
+            # pick tier (see _autoplay_pick.never_ids).
+            upcoming = {
+                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+            }
         # Pull genre from the current track (catalog entries are tagged
         # with ``genre_folder``); falling back to the loose ``genre``
         # field keeps the path resilient against legacy entries.
@@ -531,7 +553,7 @@ class LiveEngineLocal:
         )
         pick = _autoplay_pick(
             current_track, catalog, genre, exclude,
-            allow_repeats=True, recent_ids=recent,
+            allow_repeats=True, recent_ids=recent, never_ids=upcoming,
         )
         if pick is None:
             self._emit(
@@ -1569,6 +1591,18 @@ class LiveEngineBrowser:
         if not track or not track.get("id"):
             return "append_track: track must include an 'id' field."
         with self._lock:
+            # v3.9.2 — dedupe guard, mirrors LiveEngineLocal: the id must
+            # not be the current track nor anything queued ahead. Played
+            # tracks (behind the cursor) stay appendable for recycling.
+            upcoming = {
+                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+            }
+            if track["id"] in upcoming:
+                return (
+                    f"append_track: '{track.get('display_name', track['id'])}' "
+                    "is already playing or queued — refusing duplicate append. "
+                    "Pick a different track."
+                )
             if self._endless_appended >= ENDLESS_APPEND_CAP:
                 msg = (
                     f"Append cap reached ({ENDLESS_APPEND_CAP}); "
@@ -1670,6 +1704,11 @@ class LiveEngineBrowser:
             recent = _recent_window_ids(
                 self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
             )
+            # v3.9.2 — current + upcoming queue: hard-excluded from every
+            # pick tier (see _autoplay_pick.never_ids).
+            upcoming = {
+                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+            }
         genre = (
             (current_track or {}).get("genre_folder")
             or (current_track or {}).get("genre")
@@ -1683,7 +1722,7 @@ class LiveEngineBrowser:
         )
         pick = _autoplay_pick(
             current_track, catalog, genre, exclude,
-            allow_repeats=True, recent_ids=recent,
+            allow_repeats=True, recent_ids=recent, never_ids=upcoming,
         )
         if pick is None:
             print(
@@ -1747,6 +1786,11 @@ class LiveEngineBrowser:
             recent = _recent_window_ids(
                 self.playlist, self._idx, ENDLESS_NO_REPEAT_WINDOW
             )
+            # v3.9.2 — current + upcoming queue: hard-excluded from every
+            # pick tier (see _autoplay_pick.never_ids).
+            upcoming = {
+                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+            }
         catalog = _load_catalog()
         genre = (
             (current_track or {}).get("genre_folder")
@@ -1754,7 +1798,7 @@ class LiveEngineBrowser:
         )
         pick = _autoplay_pick(
             current_track, catalog, genre, exclude,
-            allow_repeats=True, recent_ids=recent,
+            allow_repeats=True, recent_ids=recent, never_ids=upcoming,
         )
         print(
             f"[engine _try_endless_extend_inflight] genre={genre!r} "
@@ -2317,6 +2361,7 @@ def _autoplay_pick(
     *,
     allow_repeats: bool = False,
     recent_ids: list[str] | None = None,
+    never_ids: set[str] | None = None,
 ) -> dict | None:
     """Choose the best in-genre continuation track.
 
@@ -2349,6 +2394,14 @@ def _autoplay_pick(
     # live 2026-08-03 with the aural batch) and must never be an
     # endless continuation either.
     catalog = filter_session_eligible(catalog)
+    # v3.9.2 — ``never_ids`` is the HARD exclusion (current + upcoming
+    # queue): unlike ``exclude_ids``, it survives the allow_repeats
+    # recycle tiers. Recycling exists to replay tracks heard hours ago,
+    # never to pick something that is already about to play — that is
+    # how a set crossfades a track into itself (observed live
+    # 2026-08-04, 'Oceanic Flow'×2).
+    if never_ids:
+        catalog = [t for t in catalog if t.get("id") not in never_ids]
     if not catalog:
         return None
     target_genre = (genre or "").strip().lower()
