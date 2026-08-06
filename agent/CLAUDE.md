@@ -42,6 +42,15 @@
   and the endless pickers hard-exclude the upcoming queue in every
   tier (`_autoplay_pick(never_ids=...)`). Played tracks stay
   appendable — recycling is what keeps a 24/7 set alive.
+- **No-repeat is take-aware (v3.10, `agent/track_identity.py`)**: a
+  "piece" can live under several ids (Suno takes: `variant_of`/-vN
+  ids, hand-saved 'x bis' files). Exclusion, the append guard, the
+  planner, and the pick_next_track table all key on PIECE identity
+  (structural key + genre-scoped normalized-name key). Same-stem ids
+  with different UUID tails are separate GENERATIONS (distinct music,
+  e.g. quiet_pages×13) and are deliberately NOT collapsed. Known
+  limitation: bare '-2' collision renames only link when display
+  names align.
 - **Tool error strings coach the model**: on a bad id / ineligible
   track, tell the LLM exactly which tool to re-run (`pick_next_track`)
   — never a bare "not found".
@@ -54,10 +63,5 @@
 - **Pending**: stall-watchdog alarm — after N consecutive forced
   advances it should stop/alert instead of silently burning the
   catalog (2026-08-01: 21 tracks announced but never played).
-- **Pending**: take-aware no-repeat — the anti-repeat window works on
-  ids, but Suno takes ('x' / 'x bis' / 'x-v2', `variant_of`) are the
-  same piece under several ids, so the audience can hear a "repeat"
-  within minutes (2026-08-04). Needs a variant_of/display_name-aware
-  window.
 - Poisoned BPMs in catalog: a handful of lofi@150 and synthware
   176–212 entries act as genre-drift bridges.

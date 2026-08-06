@@ -26,6 +26,7 @@ from agent.eligibility import (
     filter_session_eligible,
     ineligibility_reason,
 )
+from agent.track_identity import dedupe_takes
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -542,6 +543,17 @@ def propose_playlist(
             "catalog entries are shorter than the minimum session duration."
         )
     all_tracks = eligible
+
+    # v3.10 — one take per piece: never schedule 'x' and 'x-v2'/'x bis'
+    # (same music, different ids) into the same session playlist.
+    deduped = dedupe_takes(all_tracks)
+    if len(deduped) < len(all_tracks):
+        print(
+            f"[propose_playlist] collapsed {len(all_tracks) - len(deduped)} "
+            f"duplicate take(s) — {len(deduped)} distinct pieces for '{genre}'",
+            flush=True,
+        )
+    all_tracks = deduped
 
     cluster = _bpm_cluster(all_tracks)
     ordered = _harmonic_sort(cluster)
@@ -2283,6 +2295,10 @@ def pick_next_track(
             abs(float(t.get("bpm") or 0) - mid_bpm),
         )
     )
+    # v3.10 — one take per piece in the table: showing 'x' and 'x-v2'
+    # as two candidates invites the LLM to queue the same music twice.
+    # Ranked order is preserved, so the best-ranked take survives.
+    matches = dedupe_takes(matches)
     top = matches[:5]
 
     lines = [

@@ -143,9 +143,6 @@ Hard rules:
 
 - Stall-watchdog alarm: after N consecutive forced advances the session
   should alert/stop instead of silently churning tracks (2026-08-01).
-- Take-aware no-repeat: anti-repeat works on ids, but Suno takes
-  ('x bis' / 'x-v2', `variant_of`) are the same piece under several
-  ids — audible repeats within minutes (2026-08-04).
 - Poisoned BPMs in catalog (lofi@150, synthware 176–212) act as
   genre-drift bridges.
 - `tests/web/test_youtube_chat.py` fails locally, passes in CI.

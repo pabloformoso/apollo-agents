@@ -37,6 +37,11 @@ import numpy as np
 import soundfile as sf
 
 from agent.eligibility import filter_session_eligible
+from agent.track_identity import (
+    piece_exclusion_set,
+    piece_keys,
+    shares_piece,
+)
 from agent.phase_lock import (
     GRIDWARP_MAX_CV,
     XFADE_EDGE_GUARD_SAMPLES,
@@ -467,14 +472,21 @@ class LiveEngineLocal:
             # 2026-08-04 'Oceanic Flow'×2). Tracks BEHIND the cursor
             # stay appendable — recycling played tracks is what keeps a
             # 24/7 endless set alive.
+            # v3.10 — take-aware: a different TAKE of a playing/queued
+            # piece (variant_of / 'x bis') is the same music to the
+            # audience and is refused just the same.
+            upcoming_tracks = self.playlist[self._idx:]
             upcoming = {
-                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+                t.get("id") for t in upcoming_tracks if t.get("id")
             }
-            if track["id"] in upcoming:
+            if track["id"] in upcoming or shares_piece(
+                track, piece_exclusion_set(upcoming_tracks)
+            ):
                 return (
                     f"append_track: '{track.get('display_name', track['id'])}' "
-                    "is already playing or queued — refusing duplicate append. "
-                    "Pick a different track."
+                    "(or another take of the same piece) is already playing "
+                    "or queued — refusing duplicate append. Pick a "
+                    "different track."
                 )
             if self._endless_appended >= ENDLESS_APPEND_CAP:
                 msg = (
@@ -595,7 +607,18 @@ class LiveEngineLocal:
 
         # Append + keep looping. The watchdog's NEXT tick will see the
         # new tail track and resume normally.
-        self.append_track(pick)
+        # v3.10 — a guard rejection (duplicate piece) means no extension
+        # happened; surface the no-candidates ending instead of looping
+        # on a phantom tail.
+        result = self.append_track(pick)
+        if result.startswith("append_track:"):
+            self._emit(
+                ENDLESS_WARNING,
+                reason="no_candidates",
+                message=f"Fallback pick rejected ({result}) — set ending.",
+            )
+            self._emit(SESSION_ENDED)
+            return True
         return False
 
     def set_crossfade_point(self, position_sec: float) -> str:
@@ -1630,14 +1653,19 @@ class LiveEngineBrowser:
             # v3.9.2 — dedupe guard, mirrors LiveEngineLocal: the id must
             # not be the current track nor anything queued ahead. Played
             # tracks (behind the cursor) stay appendable for recycling.
+            # v3.10 — take-aware (see LiveEngineLocal.append_track).
+            upcoming_tracks = self.playlist[self._idx:]
             upcoming = {
-                t.get("id") for t in self.playlist[self._idx:] if t.get("id")
+                t.get("id") for t in upcoming_tracks if t.get("id")
             }
-            if track["id"] in upcoming:
+            if track["id"] in upcoming or shares_piece(
+                track, piece_exclusion_set(upcoming_tracks)
+            ):
                 return (
                     f"append_track: '{track.get('display_name', track['id'])}' "
-                    "is already playing or queued — refusing duplicate append. "
-                    "Pick a different track."
+                    "(or another take of the same piece) is already playing "
+                    "or queued — refusing duplicate append. Pick a "
+                    "different track."
                 )
             if self._endless_appended >= ENDLESS_APPEND_CAP:
                 msg = (
@@ -1781,7 +1809,22 @@ class LiveEngineBrowser:
             f"{pick.get('id')!r} ({(pick.get('display_name') or '')[:40]!r})",
             flush=True,
         )
-        self.append_track(pick)
+        result = self.append_track(pick)
+        if result.startswith("append_track:"):
+            # v3.10 — guard rejection = no extension; emit the ending
+            # pair rather than pretending the set has a tail.
+            print(
+                f"[engine _maybe_end_or_extend] DECISION: fallback pick "
+                f"rejected by append guard ({result!r})",
+                flush=True,
+            )
+            self._emit(
+                ENDLESS_WARNING,
+                reason="no_candidates",
+                message=f"Fallback pick rejected ({result}) — set ending.",
+            )
+            self._emit(SESSION_ENDED)
+            return True
         return False
 
     def _try_endless_extend_inflight(self, current_track: dict | None) -> bool:
@@ -1846,7 +1889,16 @@ class LiveEngineBrowser:
             # No candidates — let the end-of-track path emit the
             # ENDLESS_WARNING + SESSION_ENDED pair when the deck drains.
             return False
-        self.append_track(pick)
+        # v3.10 — a guard rejection means nothing was appended: report
+        # "not extended" so the end-of-track path can run its fallback.
+        result = self.append_track(pick)
+        if result.startswith("append_track:"):
+            print(
+                f"[engine _try_endless_extend_inflight] pick rejected by "
+                f"append guard ({result!r})",
+                flush=True,
+            )
+            return False
         return True
 
     def check_stall(self) -> str | None:
@@ -2496,6 +2548,16 @@ def _autoplay_pick(
     """
     if not catalog:
         return None
+    # v3.10 — id→track lookup over the UNFILTERED catalog, so piece
+    # keys can be derived for every excluded id even if that entry is
+    # later dropped by the eligibility screen.
+    full_by_id = {t["id"]: t for t in catalog if t.get("id")}
+
+    def _pieces_for(ids) -> set[str]:
+        return piece_exclusion_set(
+            [full_by_id[i] for i in ids if i in full_by_id]
+        )
+
     # v3.9.1 — session-eligibility screen (min duration). Applied before
     # every branch below, including the allow_repeats recycle paths: a
     # sub-2-minute piece reads as a cut-off track on stream (observed
@@ -2508,8 +2570,15 @@ def _autoplay_pick(
     # never to pick something that is already about to play — that is
     # how a set crossfades a track into itself (observed live
     # 2026-08-04, 'Oceanic Flow'×2).
+    # v3.10 — take-aware: a TAKE of a queued piece is just as excluded
+    # as the queued id itself.
     if never_ids:
-        catalog = [t for t in catalog if t.get("id") not in never_ids]
+        never_pieces = _pieces_for(never_ids)
+        catalog = [
+            t for t in catalog
+            if t.get("id") not in never_ids
+            and not shares_piece(t, never_pieces)
+        ]
     if not catalog:
         return None
     target_genre = (genre or "").strip().lower()
@@ -2521,27 +2590,46 @@ def _autoplay_pick(
         gf = (t.get("genre_folder") or t.get("genre") or "").strip().lower()
         return bool(gf) and (not target_genre or gf == target_genre)
 
+    # v3.10 — the 2026-08-05 lesson: 91 tracks with zero id repeats
+    # still produced 5+ audible repeats, because takes of a played
+    # piece live under different ids (and even different display
+    # names). Exclusion is therefore piece-aware in every tier.
+    exclude_pieces = _pieces_for(exclude_ids)
     candidates = [
         t for t in catalog
-        if t.get("id") and t["id"] not in exclude_ids and in_genre(t)
+        if t.get("id")
+        and t["id"] not in exclude_ids
+        and not shares_piece(t, exclude_pieces)
+        and in_genre(t)
     ]
     if not candidates and allow_repeats:
         # Endless mode: catalog exhausted for this genre. Recycle,
         # skipping anything heard in the recent window (plus the track
-        # currently playing, in case the caller passed no window).
+        # currently playing, in case the caller passed no window) —
+        # takes of recently heard pieces included.
         recent = set(recent_ids or ())
         recent.add(cur_id)
+        recent_pieces = _pieces_for(recent)
+        if current_track:
+            recent_pieces |= piece_keys(current_track)
         candidates = [
             t for t in catalog
-            if t.get("id") and t["id"] not in recent and in_genre(t)
+            if t.get("id")
+            and t["id"] not in recent
+            and not shares_piece(t, recent_pieces)
+            and in_genre(t)
         ]
         if not candidates:
             # Window wider than the in-genre catalog — degrade to the
-            # v2.6.0 rule (avoid back-to-back only) so the stream
-            # survives tiny catalogs.
+            # v2.6.0 rule (avoid back-to-back only, take-aware) so the
+            # stream survives tiny catalogs.
+            cur_pieces = set(piece_keys(current_track or {}))
             candidates = [
                 t for t in catalog
-                if t.get("id") and t["id"] != cur_id and in_genre(t)
+                if t.get("id")
+                and t["id"] != cur_id
+                and not shares_piece(t, cur_pieces)
+                and in_genre(t)
             ]
     if not candidates:
         return None
