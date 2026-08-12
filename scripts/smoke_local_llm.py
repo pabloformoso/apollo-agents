@@ -3,8 +3,16 @@ against the three workloads the live DJ actually runs.
 
 Usage:
     uv run python scripts/smoke_local_llm.py
-    uv run python scripts/smoke_local_llm.py --base-url http://192.168.1.72:1234/v1
+    uv run python scripts/smoke_local_llm.py --base-url http://100.68.5.104:1234/v1
     uv run python scripts/smoke_local_llm.py --models qwen/qwen3.5-9b
+
+Since 2026-08-12 LM Studio lives on the Tailscale node ``tunel`` at
+100.68.5.104 (was the LAN host 192.168.1.72). Address it by IP: MagicDNS
+is disabled tailnet-wide, so the hostname does not resolve.
+
+Run every model twice. The first call to an unloaded model pays LM
+Studio's JIT load, which alone can blow the tool-call budget and report a
+false FAIL — bonsai-27b measured 27.8s cold and 5.7s warm.
 
 Workloads per model:
   1. greeting   — short Spanish on-stream greeting (pure text, the
@@ -65,6 +73,23 @@ GREETING_SYSTEM = (
     "usuario por su nombre. Sin hashtags, sin emojis repetidos."
 )
 
+GREETING_USER_MSG = "[YT @marta_lofi] hola!! primera vez por aqui"
+
+# Control tokens and channel markers that a correctly-templated chat
+# response never contains. When LM Studio serves a model whose chat
+# template it does not understand, the raw scaffolding reaches the text
+# instead of being consumed by the parser.
+TEMPLATE_LEAK_MARKERS = (
+    "<|",
+    "|>",
+    "to=self",
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<think>",
+    "</think>",
+    "[/INST]",
+)
+
 TOOL_SYSTEM = (
     "You are a live DJ controlling a music engine via tools. The playlist "
     "is running low. You MUST call extend_set with the id of the best "
@@ -79,21 +104,52 @@ TOOL_SYSTEM = (
 TOOL_BUDGET_SEC = 20.0
 
 
+def check_greeting(text: str) -> tuple[bool, str]:
+    """Judge a greeting response. Returns ``(ok, reason)``; reason is "" on pass.
+
+    Naming the user is necessary but nowhere near sufficient, because the
+    prompt itself carries the name — a model that merely echoes the incoming
+    line scores a name hit for free. Observed live (smoke 2026-08-12):
+    meta/muse-glimmer answered with ``to=self<|message|>`` followed by the
+    prompt verbatim and its own English deliberation, and the old
+    ``"marta" in text`` check called that a PASS. So reject, in order:
+
+      * empty text;
+      * template leakage — LM Studio could not parse the model's chat
+        template and control tokens reached the response;
+      * prompt echo — the model repeated the user's line back;
+      * a greeting that never names the user.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return False, "empty response"
+    low = stripped.lower()
+    for marker in TEMPLATE_LEAK_MARKERS:
+        if marker.lower() in low:
+            return False, f"template leak: {marker!r} in response"
+    if GREETING_USER_MSG.lower() in low:
+        return False, "echoed the prompt back"
+    if "marta" not in low:
+        return False, "does not name the user"
+    return True, ""
+
+
 def run_greeting(client: OpenAI, model: str) -> tuple[bool, float, str]:
     t0 = time.perf_counter()
     resp = client.chat.completions.create(
         model=model,
         messages=[
             {"role": "system", "content": GREETING_SYSTEM},
-            {"role": "user", "content": "[YT @marta_lofi] hola!! primera vez por aqui"},
+            {"role": "user", "content": GREETING_USER_MSG},
         ],
         max_tokens=2048,
         temperature=0.7,
     )
     dt = time.perf_counter() - t0
     text = (resp.choices[0].message.content or "").strip()
-    ok = bool(text) and "marta" in text.lower()
-    return ok, dt, text[:90]
+    ok, why = check_greeting(text)
+    detail = text[:90] if ok else f"{why} | got {text[:60]!r}"
+    return ok, dt, detail
 
 
 def run_tool_call(client: OpenAI, model: str) -> tuple[bool, float, str]:
