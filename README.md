@@ -273,7 +273,7 @@ python main.py --regenerate-beatgrid --force   # re-analyse everything
 | `AZURE_OPENAI_API_VERSION` | Optional | Chat API version (default `2024-10-21`) |
 | `AZURE_OPENAI_IMAGE_API_VERSION` | Optional | Image API version (default `2024-02-01`) |
 | `AGENT_PROVIDER=ollama` | One of these | Use a local Ollama model (default: `gemma4:4b`) |
-| `OLLAMA_BASE_URL` | Optional | Override Ollama endpoint (default: `http://localhost:11434/v1`) |
+| `OLLAMA_BASE_URL` | Optional | Override the local OpenAI-compatible endpoint (default: `http://localhost:11434/v1`). Also the knob for LM Studio — point it at the server's IP, not `localhost`, when the backend runs in Docker or the server sits on another host |
 | `AGENT_MODEL` | Optional | Override the model for any provider |
 
 ---
