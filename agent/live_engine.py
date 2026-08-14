@@ -1646,6 +1646,21 @@ class LiveEngineBrowser:
         audio engine handles encoding seamlessly — so the path is
         simpler: append, reset the low-water guard, and let the next
         ``report_playback_pos`` ping pick up the new tail naturally.
+
+        v3.11 — an append that lands directly behind the cursor MUST
+        rebuild the transition plan. ``_rebuild_transition_plan`` nulls
+        the plan whenever the queue has no successor, and the four
+        cursor-move callers (reconnect, ``_emit_next_track``,
+        ``skip_track``, ``_begin_crossfade``) are the only other places
+        that rebuild it. So once an endless set runs dry the plan goes
+        None and NOTHING restores it: the fallback appends a successor
+        here, the upcoming crossfade ships empty ``phase_lock`` anchors,
+        and the frontend silently drops to its legacy linear fade for
+        the REST OF THE SESSION. Observed live 2026-08-13: the last
+        ``[beatmatch]`` line was transition 42->43 at 12:52, then 2h40m
+        of unplanned transitions — the LLM had stopped calling
+        ``extend_set`` (0 calls across 17 ``playlist_running_low``
+        pokes), so every append came from the deterministic fallback.
         """
         if not track or not track.get("id"):
             return "append_track: track must include an 'id' field."
@@ -1667,6 +1682,7 @@ class LiveEngineBrowser:
                     "or queued — refusing duplicate append. Pick a "
                     "different track."
                 )
+            became_successor = False
             if self._endless_appended >= ENDLESS_APPEND_CAP:
                 msg = (
                     f"Append cap reached ({ENDLESS_APPEND_CAP}); "
@@ -1679,10 +1695,18 @@ class LiveEngineBrowser:
                 self._low_water_fired = False
                 self._low_water_at = None
                 self._endless_appended += 1
+                # Did this land directly behind the cursor? Only then was
+                # the plan None (no successor to plan for) and only then
+                # does the upcoming crossfade need new anchors.
+                became_successor = len(self.playlist) - 1 == self._idx + 1
             position = len(self.playlist)
         if cap_reached:
             self._emit(ENDLESS_WARNING, reason="cap_reached", message=msg)
             return msg
+        # Outside the lock: ``_rebuild_transition_plan`` takes ``_lock``
+        # itself and it is a plain (non-reentrant) ``threading.Lock``.
+        if became_successor:
+            self._rebuild_transition_plan()
         return (
             f"Appended '{track.get('display_name', track['id'])}' "
             f"at position {position}."
