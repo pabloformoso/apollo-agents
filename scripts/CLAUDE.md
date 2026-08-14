@@ -30,6 +30,31 @@
     `bonsai-27b` 18.8s / 5.7s, `muse-glimmer` ~95s and unusable (LM
     Studio cannot parse its chat template, so control tokens leak into
     the text). e4b stays the default.
+- `bench_extend_set.py` — **the gate that actually predicts live
+  behaviour.** The smoke above is necessary but NOT sufficient: it asks
+  a toy question (one tool, three short ids on a plate) that every
+  model passes, including gemma-4-e4b, which contributed zero
+  `extend_set` calls across 17 real `playlist_running_low` pokes. This
+  bench replays the real turn instead — the full `_LIVE_DJ_SYSTEM`, all
+  ten `_LIVE_TOOLS`, the real `_format_turn` text, and the REAL
+  `pick_next_track` / `extend_set` against `tracks.json` (so the
+  eligibility screen, the genre fence and the coaching error strings
+  are all live). Only the audio engine is faked. Gotchas:
+  - Needs `tracks/tracks.json` → run from the main checkout, or copy
+    the catalog in (it is gitignored, so it won't dirty a worktree).
+  - The symptom is a RATE, not an event: run ≥10 trials per model, and
+    read the breakdown (`silent` vs `rejected` vs `picked_only`), not
+    just the pass line. Those three are different bugs.
+  - `appended` is ground truth from the fake engine's recorder, never
+    from the model's prose — a model claiming it appended is the live
+    failure mode itself.
+  - It preflights the endpoint (reachable + models actually served) and
+    refuses to run otherwise. Do not remove that check: importing
+    `agent.run` fires `load_dotenv()`, so a stale worktree `.env` can
+    silently override `--base-url`'s default — on 2026-08-14 it pointed
+    at the pre-tunnel LAN host and 20 trials of timeouts were reported
+    as a clean "0% append rate, silent=10". A dead endpoint and a mute
+    model land in the SAME bucket. Pass `--base-url` explicitly.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
 
 Convention: scripts are operator-facing and safe to run against the
