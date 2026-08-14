@@ -87,9 +87,22 @@ TRACK_ENDED         = "track_ended"
 SESSION_ENDED       = "session_ended"
 # v2.6.0 — Endless / improvisation mode. Fires when only one track is
 # left in the queue and the next ``approaching_crossfade`` would trip
-# the final SESSION_ENDED. The LLM has ~5 s of grace to call
+# the final SESSION_ENDED, giving the LLM a deadline to call
 # ``extend_set`` before the engine deterministically auto-picks an
 # in-genre continuation from the catalog.
+#
+# How long that deadline actually is differs by engine, and the old
+# blanket "~5 s of grace" comment here was wrong for the one that runs
+# the stream:
+#   * LiveEngineBrowser (web / prod) — both call sites pass
+#     ``track_over=True``, which SKIPS the ENDLESS_GRACE_SEC check
+#     entirely. The fallback runs when the track genuinely ends, so the
+#     budget is ``approach_warn_sec`` (30 s) plus the crossfade tail.
+#   * LiveEngineLocal (CLI) — polls without ``track_over``, so
+#     ENDLESS_GRACE_SEC is the real deadline there.
+# Measured 2026-08-14 with scripts/bench_extend_set.py: a model needs
+# ~12 s to go poke → pick_next_track → extend_set, which fits the
+# browser budget comfortably and blows the CLI one every time.
 PLAYLIST_RUNNING_LOW = "playlist_running_low"
 ENDLESS_WARNING      = "endless_warning"
 # v3.0.1 — phase-lock observability. Fires once per (current → next)
@@ -125,7 +138,10 @@ _CRITIC_WARNING_MESSAGES = {
 }
 
 # Grace window the LLM gets to append a successor track before the
-# deterministic in-engine fallback kicks in.
+# deterministic in-engine fallback kicks in. CLI path only — the
+# browser engine reaches its fallback via ``track_over=True``, which
+# bypasses this check (see PLAYLIST_RUNNING_LOW above). Raising it will
+# NOT give the streaming DJ more thinking time.
 ENDLESS_GRACE_SEC = 5.0
 # Hard cap on how many tracks a single endless session can add. Prevents
 # runaway behaviour from a misbehaving agent or LLM hallucinated loops.
