@@ -615,7 +615,7 @@ web/
   backend/           # FastAPI: brief_parser, notes, arc, render, session_store
     app.py           # routes + WS dispatch
     arc.py           # energy-arc derivation from playlist
-    brief_parser.py  # Haiku one-shot brief → ParsedBrief
+    brief_parser.py  # one-shot brief → ParsedBrief (configured provider)
     notes.py         # critic problems → CriticNote[] with stable ids
     render.py        # async MP4 build + SSE progress
   frontend/
