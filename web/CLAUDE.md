@@ -9,6 +9,17 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   `pipeline.load_catalog` feeds stream-by-id, ratings and the library
   UI — a short track must still resolve. The eligibility screen lives
   in the SELECTION paths (`agent/eligibility.py` consumers).
+- **`brief_parser` follows `AGENT_PROVIDER`, never a hardcoded
+  vendor** (v3.11). It called Anthropic unconditionally, so on this
+  box — no `ANTHROPIC_API_KEY` since the move to local LM Studio —
+  every free-text brief silently parsed to all-null and the planner
+  fell back to the conversational genre-guard. Detection is read at
+  CALL time (not import) so a late-loaded `.env` still works, and
+  `AGENT_PROVIDER=mock` short-circuits before any network. The local /
+  Azure path asks for a JSON object rather than a forced tool call:
+  small models are markedly better at emitting JSON than at
+  function-calling, and `_normalize` treats the payload as untrusted
+  either way.
 - **Live WS roles**: `/live/stream` = PRIMARY (drives playback, sends
   `playback_pos` every ~250 ms and `track_ended`); `/live/viewer` =
   read-only follower (OBS). Viewers never send. A wrongly-primary OBS
