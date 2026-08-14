@@ -4,13 +4,41 @@ The LLM call inside ``parse`` is exercised only via monkeypatched stubs
 so the suite stays deterministic and free of network calls. The pure
 ``_normalize`` helper is the bulk of the coverage — it's where the
 type-coercion + clamp + enum-validation logic lives.
+
+Since v3.11 ``parse`` dispatches on the CONFIGURED provider, so every
+test that reaches it must pin the environment: the ``_clean_env``
+fixture below strips the provider vars so an ambient ``.env`` (the dev
+box exports ``AGENT_PROVIDER=ollama``) can never send a unit test at a
+real endpoint.
 """
 from __future__ import annotations
 
 import pytest
 
 from web.backend import brief_parser
-from web.backend.brief_parser import _empty, _normalize, parse
+from web.backend.brief_parser import (
+    _empty,
+    _normalize,
+    detect_provider,
+    extract_json_object,
+    parse,
+)
+
+_PROVIDER_ENV = (
+    "AGENT_PROVIDER",
+    "ANTHROPIC_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_DEPLOYMENT",
+    "OLLAMA_BASE_URL",
+    "AGENT_MODEL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_env(monkeypatch):
+    for name in _PROVIDER_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 
 # ─── _normalize ──────────────────────────────────────────────────────
@@ -161,6 +189,278 @@ def test_parse_handles_sdk_exception(monkeypatch):
 
     monkeypatch.setattr(anthropic, "Anthropic", _ExplodingClient, raising=False)
     assert parse("90 minute techno set") == _empty()
+
+
+# ─── detect_provider ─────────────────────────────────────────────────
+
+
+def test_explicit_provider_wins_over_present_keys(monkeypatch):
+    """An operator who pins AGENT_PROVIDER means it — a stale Anthropic
+    key left in .env must not silently reroute the parser."""
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "leftover")
+    assert detect_provider() == "ollama"
+
+
+def test_provider_name_is_normalized(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "  Ollama  ")
+    assert detect_provider() == "ollama"
+
+
+def test_falls_back_to_anthropic_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    assert detect_provider() == "anthropic"
+
+
+def test_falls_back_to_azure_key(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
+    assert detect_provider() == "azure"
+
+
+def test_anthropic_key_outranks_azure_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
+    assert detect_provider() == "anthropic"
+
+
+def test_falls_back_to_local_endpoint(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://100.68.5.104:1234/v1")
+    assert detect_provider() == "ollama"
+
+
+def test_nothing_configured_defaults_to_anthropic():
+    """Preserves the old behaviour: fail with a clear missing-key path."""
+    assert detect_provider() == "anthropic"
+
+
+# ─── extract_json_object ─────────────────────────────────────────────
+
+
+def test_extracts_a_bare_object():
+    assert extract_json_object('{"genre": "lofi"}') == {"genre": "lofi"}
+
+
+def test_extracts_from_a_fenced_block():
+    text = 'Sure!\n```json\n{"genre": "techno"}\n```\nHope that helps.'
+    assert extract_json_object(text) == {"genre": "techno"}
+
+
+def test_extracts_object_wrapped_in_prose():
+    text = 'Here is what I understood: {"genre": "aural", "duration_min": 60} — enjoy!'
+    assert extract_json_object(text) == {"genre": "aural", "duration_min": 60}
+
+
+def test_handles_nested_objects():
+    assert extract_json_object('{"a": {"b": 1}}') == {"a": {"b": 1}}
+
+
+def test_braces_inside_strings_do_not_close_the_object():
+    """A ``}`` inside a value must not truncate the scan."""
+    assert extract_json_object('{"mood": "warm }not the end{"}') == {
+        "mood": "warm }not the end{"
+    }
+
+
+def test_escaped_quote_inside_a_string_is_survived():
+    assert extract_json_object('{"mood": "he said \\"hi\\""}') == {
+        "mood": 'he said "hi"'
+    }
+
+
+def test_no_object_returns_none():
+    assert extract_json_object("I could not parse that, sorry.") is None
+
+
+def test_empty_text_returns_none():
+    assert extract_json_object("") is None
+
+
+def test_unbalanced_object_returns_none():
+    assert extract_json_object('{"genre": "lofi"') is None
+
+
+def test_malformed_json_returns_none():
+    assert extract_json_object("{genre: lofi,,}") is None
+
+
+def test_object_wrapped_in_a_list_is_still_recovered():
+    """The scan starts at the first ``{``, so a list wrapper is harmless."""
+    assert extract_json_object('[{"genre": "lofi"}]') == {"genre": "lofi"}
+
+
+def test_top_level_json_scalar_returns_none():
+    assert extract_json_object("42") is None
+
+
+# ─── _normalize additions for the schema-less path ───────────────────
+
+
+def test_normalize_recovers_a_quoted_duration():
+    """No tool schema on the local path — models quote the number."""
+    assert _normalize({"duration_min": "60"})["duration_min"] == 60
+    assert _normalize({"duration_min": "90 min"})["duration_min"] == 90
+
+
+def test_normalize_rejects_out_of_range_quoted_duration():
+    assert _normalize({"duration_min": "900"})["duration_min"] is None
+
+
+def test_normalize_rejects_boolean_duration():
+    """``True`` is an int subclass — it must not become 1 minute."""
+    assert _normalize({"duration_min": True})["duration_min"] is None
+
+
+def test_normalize_treats_the_string_null_as_null():
+    """Small models write the word instead of the JSON literal."""
+    out = _normalize({"mood": "null", "tempo": "NULL"})
+    assert out["mood"] is None
+    assert out["tempo"] is None
+
+
+# ─── parse: provider dispatch ────────────────────────────────────────
+
+
+def test_mock_provider_never_calls_an_llm(monkeypatch):
+    """E2E runs set AGENT_PROVIDER=mock precisely to stay offline."""
+    monkeypatch.setenv("AGENT_PROVIDER", "mock")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("no LLM call may happen under mock")
+
+    monkeypatch.setattr(brief_parser, "_parse_anthropic", _boom)
+    monkeypatch.setattr(brief_parser, "_parse_openai_compatible", _boom)
+    assert parse("30 min of lofi") == _empty()
+
+
+def test_local_provider_is_used_without_any_anthropic_key(monkeypatch):
+    """The regression this change exists for: a box with no Anthropic key
+    used to throw every free-text brief away."""
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://x/v1")
+    monkeypatch.setenv("AGENT_MODEL", "google/gemma-4-e4b")
+
+    seen = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            seen.update(kwargs)
+            return _reply('{"genre": "Aural", "duration_min": "60", '
+                          '"mood": "calm", "venue": "home", '
+                          '"energy": "plateau", "tempo": "50–56 BPM"}')
+
+    monkeypatch.setattr(
+        brief_parser, "_build_openai_client",
+        lambda _p: (_client(_Completions()), "google/gemma-4-e4b"),
+    )
+
+    assert parse("an hour of calm aural at home") == {
+        "genre": "aural",
+        "duration_min": 60,
+        "mood": "calm",
+        "venue": "home",
+        "energy": "plateau",
+        "tempo": "50–56 BPM",
+    }
+    assert seen["model"] == "google/gemma-4-e4b"
+    assert seen["temperature"] == 0.0
+
+
+def test_local_provider_unparseable_reply_degrades_to_null(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+
+    class _Completions:
+        def create(self, **_):
+            return _reply("I think you want something chill!")
+
+    monkeypatch.setattr(
+        brief_parser, "_build_openai_client",
+        lambda _p: (_client(_Completions()), "m"),
+    )
+    assert parse("30 min of lofi") == _empty()
+
+
+def test_local_provider_empty_content_degrades_to_null(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+
+    class _Completions:
+        def create(self, **_):
+            return _reply(None)
+
+    monkeypatch.setattr(
+        brief_parser, "_build_openai_client",
+        lambda _p: (_client(_Completions()), "m"),
+    )
+    assert parse("30 min of lofi") == _empty()
+
+
+def test_local_provider_network_error_degrades_to_null(monkeypatch):
+    """A dead tunnel must not 500 the session POST."""
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+
+    class _Completions:
+        def create(self, **_):
+            raise ConnectionError("tunnel is down")
+
+    monkeypatch.setattr(
+        brief_parser, "_build_openai_client",
+        lambda _p: (_client(_Completions()), "m"),
+    )
+    assert parse("30 min of lofi") == _empty()
+
+
+def test_missing_model_for_provider_returns_empty(monkeypatch):
+    """Azure with no deployment name configured: bail, don't call."""
+    monkeypatch.setenv("AGENT_PROVIDER", "azure")
+
+    class _Completions:
+        def create(self, **_):
+            raise AssertionError("must not call without a model")
+
+    monkeypatch.setattr(
+        brief_parser, "_build_openai_client",
+        lambda _p: (_client(_Completions()), ""),
+    )
+    assert parse("30 min of lofi") == _empty()
+
+
+def test_empty_brief_short_circuits_before_provider_detection(monkeypatch):
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+
+    def _boom(*_a, **_k):
+        raise AssertionError("empty brief must not reach a provider")
+
+    monkeypatch.setattr(brief_parser, "_parse_openai_compatible", _boom)
+    assert parse("  \n ") == _empty()
+
+
+def test_azure_client_is_built_from_azure_env(monkeypatch):
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "k")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    client, model = brief_parser._build_openai_client("azure")
+    assert model == "gpt-4o"
+    assert "example.openai.azure.com" in str(client.base_url)
+
+
+def test_local_client_points_at_the_configured_endpoint(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://100.68.5.104:1234/v1")
+    monkeypatch.setenv("AGENT_MODEL", "google/gemma-4-e4b")
+    client, model = brief_parser._build_openai_client("ollama")
+    assert model == "google/gemma-4-e4b"
+    assert "100.68.5.104:1234" in str(client.base_url)
+
+
+# ─── stub helpers for the OpenAI-compatible shape ────────────────────
+
+
+def _reply(content):
+    message = type("M", (), {"content": content})()
+    choice = type("C", (), {"message": message})()
+    return type("R", (), {"choices": [choice]})()
+
+
+def _client(completions):
+    return type("Client", (), {"chat": type("Chat", (), {"completions": completions})()})()
 
 
 def test_parse_handles_response_without_tool_use(monkeypatch):

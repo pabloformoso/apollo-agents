@@ -114,10 +114,15 @@ ENDLESS MODE:
 - When the operator has enabled endless mode (a YouTube-streaming
   use case), the engine will emit a ``playlist_running_low`` event
   about 30 s before the LAST scheduled crossfade.
-- You have a ~5 s grace window from that event to pick a continuation
-  track via ``pick_next_track`` and append it with
-  ``extend_set(track_id)``. Stay in the current genre + energy unless
-  the room has clearly drifted.
+- From that event you have until the current track actually ends —
+  roughly 30 s plus the crossfade tail — to pick a continuation via
+  ``pick_next_track`` and append it with ``extend_set(track_id)``.
+  That is time for ONE search and the append; it is NOT time to keep
+  re-searching. Call ``pick_next_track`` once, choose from the rows it
+  returns, and call ``extend_set`` with that id. A search you never
+  act on is the same as doing nothing — the engine auto-picks and your
+  taste never reaches the stream. Stay in the current genre + energy
+  unless the room has clearly drifted.
 - If you don't act in time, the engine deterministically auto-picks
   the closest in-genre track from the catalog — that's a safety net,
   not the intended path. Your taste should win when you're awake at

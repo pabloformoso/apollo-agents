@@ -558,9 +558,13 @@ async def create_session(
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Create a session. v2.6.0 — when ``brief`` is provided, parse it
-    synchronously (Haiku ~300 ms) and kick off planning + critique as a
-    background task so the frontend can navigate to ``/curate``
-    immediately and watch progress via ``/ws/sessions/{id}``.
+    synchronously and kick off planning + critique as a background task
+    so the frontend can navigate to ``/curate`` immediately and watch
+    progress via ``/ws/sessions/{id}``.
+
+    The parse runs on whichever provider is configured (v3.11), so its
+    cost is provider-dependent: ~300 ms on Haiku, seconds on a local
+    model, bounded by ``brief_parser.TIMEOUT_SEC``.
 
     Legacy callers (the v2.5 ``/session/[id]`` route) post no body and
     still get an empty session back — the brief flow is purely additive.
