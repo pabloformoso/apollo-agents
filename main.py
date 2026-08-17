@@ -175,6 +175,14 @@ ARTWORK_PROMPTS = {
         "Intimate, hypnotic, warm darkness. Film grain, shallow depth of field, "
         "shot on Leica M10, 50mm f/1.4. No text, no people."
     ),
+    "healing-aura": (
+        "Serene meditative scene evoking '{track_name}' — deep stillness and slow breath. "
+        "Mist over glassy water at first light, smooth balanced stones, pale jade and soft "
+        "aqua tones bleeding into warm ivory, a single shaft of diffused light through fog. "
+        "Weightless, spacious, unhurried — nothing sharp, nothing urgent. "
+        "Soft focus, gentle gradients, natural light only. "
+        "Shot on Hasselblad, 80mm lens, high-key soft grading. No text, no people."
+    ),
 }
 
 # Video backgrounds (looped clips instead of AI artwork)
@@ -245,6 +253,16 @@ BPM_GENRE_RANGES = {
     # late-night ballads; upper bound 140 catches the faster fusion /
     # acid-jazz end without colliding with deep house territory.
     "soul jazz": (75, 140),
+    # Healing — binaural meditation drones, flute and chime beds. These
+    # have no percussive transient for librosa to lock onto, so it
+    # routinely reads them at 3-4x their real pulse (a 58 BPM drone
+    # detected as 232). The window is deliberately exactly one octave
+    # wide (50→100, a 2:1 ratio) so at most one rung of the octave
+    # ladder can land inside it — a wider window would let two
+    # candidates qualify and the midpoint tie-break would pick
+    # arbitrarily. Without this range these tracks get tagged at techno
+    # tempo and poison BPM matching for the whole set.
+    "healing": (50, 100),
 }
 
 # Default themes per genre folder for smart-generated sessions
@@ -327,6 +345,23 @@ GENRE_THEMES = {
         "waveform_color": [217, 142, 59],
         "particle_color": [240, 180, 100],
         "bg_darken": 0.8,
+        "title_font_size": 32,
+    },
+    # Healing — binaural meditation / spa. Soft jade title over a deep
+    # teal-black backdrop, pale mint particles. Gets its own
+    # ``healing-aura`` artwork preset rather than borrowing
+    # ``organic-zen``: that one is warm desert / golden hour, which
+    # fights the cool high-key stillness this genre is going for.
+    # ``bg_darken`` is high (0.85) because the artwork is deliberately
+    # bright — without it the pale backdrop swallows the title.
+    "healing": {
+        "artwork_style": "healing-aura",
+        "title_color": "#9FE0D0",
+        "title_stroke_color": "#0C2A2A",
+        "bg_color": [8, 18, 22],
+        "waveform_color": [159, 224, 208],
+        "particle_color": [200, 240, 230],
+        "bg_darken": 0.85,
         "title_font_size": 32,
     },
 }
@@ -1409,11 +1444,21 @@ def _looks_like_legacy_filename(name: str | None) -> bool:
     return bool(_UUID_RE.search(name))
 
 
-def _attach_suno_metadata(entry: dict, audio_path: str) -> bool:
+def _attach_suno_metadata(entry: dict, audio_path: str, prefer_title: bool = False) -> bool:
     """Ensure entry has a `suno` block and a clean `display_name` if a sidecar exists.
 
     Works for any input extension (`.wav`, `.mp3`, ...). Returns True if
     entry was mutated.
+
+    By default the Suno title only replaces a `display_name` that is empty or
+    still embeds a UUID (`_looks_like_legacy_filename`) — that guard keeps us
+    from clobbering names on already-catalogued entries. Newer exports use
+    human-readable filenames (e.g. ``Healing-Amber_Bloom``) that aren't
+    "legacy" by that test, so a *fresh* entry would otherwise keep the raw
+    filename forever and show up on the video title with its genre prefix and
+    underscores intact. Pass ``prefer_title=True`` (build_catalog does, for new
+    entries) to always adopt the Suno title. A name a disambiguation pass has
+    already chosen (``suno.disambiguated``) is never overwritten.
     """
     mutated = False
     if "suno" not in entry:
@@ -1424,7 +1469,8 @@ def _attach_suno_metadata(entry: dict, audio_path: str) -> bool:
     suno = entry.get("suno") or {}
     title = suno.get("title")
     current = entry.get("display_name")
-    if title and (not current or _looks_like_legacy_filename(current)):
+    allow = prefer_title or not current or _looks_like_legacy_filename(current)
+    if title and allow and not suno.get("disambiguated"):
         if current != title:
             entry["display_name"] = title
             mutated = True
@@ -1682,7 +1728,7 @@ def build_catalog():
             "beatgrid": beatgrid,
             "waveform_peaks": waveform_peaks,
         }
-        _attach_suno_metadata(new_entry, audio_path)
+        _attach_suno_metadata(new_entry, audio_path, prefer_title=True)
         updated[rel_path] = new_entry
         new_count += 1
 
