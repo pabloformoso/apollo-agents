@@ -22,6 +22,8 @@ from pathlib import Path
 
 from pydub import AudioSegment
 
+from agent.genre_config import BPM_GENRE_RANGES, GENRE_THEMES
+
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
@@ -86,18 +88,12 @@ def _camelot_step_distance(key_a: str, key_b: str) -> int:
     return 6  # unreachable on a 24-node wheel → treat as max clash
 
 
-_BPM_GENRE_RANGES = {
-    "lofi - ambient": (60, 110),
-    "techno": (120, 160),
-    "cyberpunk": (120, 160),
-    "deep house": (115, 135),
-    # Keep in sync with ``BPM_GENRE_RANGES`` in main.py. Only used here to
-    # scale the energy curve, so a missing genre degrades to the (60, 200)
-    # fallback rather than crashing — but for a 50-100 BPM genre that
-    # fallback flattens every track to near-zero energy and the arranger
-    # can no longer tell a drone from a build.
-    "healing": (50, 100),
-}
+# Shared with main.py via agent/genre_config.py. Only used here to scale the
+# energy curve, so a genre missing from the table degrades to the (60, 200)
+# fallback rather than crashing — but for a 50-100 BPM genre that fallback
+# flattens every track to near-zero energy and the arranger can no longer
+# tell a drone from a build. Aliased to the historic private name.
+_BPM_GENRE_RANGES = BPM_GENRE_RANGES
 
 
 def _bpm_diff_bucket(diff: float) -> str:
@@ -967,14 +963,11 @@ def _parse_build_progress_line(line: str) -> dict | None:
 
 # v2.6.0 — extracted from build_session so the async render endpoint in
 # `web/backend/render.py` can write the same draft + theme payload without
-# invoking the sync subprocess loop below.
-GENRE_THEMES: dict[str, dict] = {
-    "lofi - ambient": {"artwork_style": "anime", "title_color": "#E8D5B7"},
-    "deep house": {"artwork_style": "deep-house-neon", "title_color": "#6A5AFF"},
-    "techno": {"artwork_style": "dark-techno", "title_color": "#FF1744"},
-    "cyberpunk": {"artwork_style": "dark-techno", "title_color": "#00FF88"},
-    "healing": {"artwork_style": "healing-aura", "title_color": "#9FE0D0"},
-}
+# invoking the sync subprocess loop below. ``GENRE_THEMES`` is imported from
+# agent/genre_config.py at the top of this module; it used to be a hand-kept
+# two-field subset of main.py's table, which meant genres added to main.py
+# alone wrote an empty theme here and web-rendered sessions fell back to the
+# `abstract` artwork style.
 
 
 def _write_draft_session(session_name: str, context_variables: dict) -> Path:

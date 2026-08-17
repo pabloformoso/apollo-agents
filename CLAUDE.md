@@ -113,8 +113,9 @@ fonts/
 
 ## Genre themes
 
-Defined in `GENRE_THEMES` dict in `main.py`. Each genre has: `artwork_style`,
-`title_color`, `title_stroke_color`, `bg_color`, `waveform_color`, `particle_color`.
+Defined in the `GENRE_THEMES` dict in `agent/genre_config.py` (re-exported by
+`main.py` under the same name). Each genre has: `artwork_style`, `title_color`,
+`title_stroke_color`, `bg_color`, `waveform_color`, `particle_color`.
 
 Available `artwork_style` values: `abstract`, `realistic`, `anime`,
 `dystopic-calm`, `dark-techno`, `organic-zen`, `deep-house-neon`,
@@ -126,29 +127,36 @@ asserts every `GENRE_THEMES` entry points at a real `ARTWORK_PROMPTS` key.
 
 ## Adding a new genre
 
+Both genre tables live in **`agent/genre_config.py`** — one dependency-free
+module, imported by `main.py` and `agent/tools.py` alike. Edit it once; there
+is no second copy to mirror.
+
 1. Create `tracks/<genre-name>/` and add WAV files
-2. Add a `BPM_GENRE_RANGES` entry in `main.py` **before** building the catalog.
-   This is not optional for slow or beatless material: librosa locks onto
-   2-4× the real pulse on drones and pads, and the range drives the octave
-   ladder that corrects it. Make the window exactly one octave wide
-   (`hi == 2 * lo`) so only one rung of the ladder can qualify. A genre with
-   no range gets its raw detection stored verbatim, which poisons BPM
-   matching for every set that touches it.
+2. Add a `BPM_GENRE_RANGES` entry in `agent/genre_config.py` **before**
+   building the catalog. This is not optional for slow or beatless material:
+   librosa locks onto 2-4× the real pulse on drones and pads, and the range
+   drives the octave ladder that corrects it. Make the window exactly one
+   octave wide (`hi == 2 * lo`) so only one rung of the ladder can qualify.
+   A genre with no range gets its raw detection stored verbatim, which
+   poisons BPM matching for every set that touches it.
 3. Run `python main.py --build-catalog` (see the Docker note below — madmom
    is not installed on the host)
-4. Add a theme entry to `GENRE_THEMES` in `main.py`, and a new
-   `ARTWORK_PROMPTS` template if no existing style fits
-5. Mirror the genre into `agent/tools.py` — it keeps its **own copies** of
-   `_BPM_GENRE_RANGES` and `GENRE_THEMES` for the web render endpoint and the
-   playlist energy curve. These have drifted from `main.py` before; a missing
-   entry degrades silently rather than raising
+4. Add a `GENRE_THEMES` entry in the same module, plus a new
+   `ARTWORK_PROMPTS` template in `main.py` if no existing style fits
+
+`agent/genre_config.py` must stay import-light — `agent/tools.py` pulls it in
+at module scope, so an `import main` there would drag librosa and moviepy into
+every agent process. `tests/test_genre_healing.py` guards this, along with
+key-set parity between the two consumers.
 
 `--build-catalog` needs madmom, which only exists in the backend image. Run it
 detached so it survives the host shell, layering worktree code over the main
-checkout:
+checkout. Mount `agent/genre_config.py` alongside `main.py` — the genre tables
+live there now, so mounting `main.py` alone silently builds against the main
+checkout's genre list:
 
 ```bash
-docker compose run -d --no-deps --name apollo-build -v "$PWD/main.py:/app/main.py" backend python main.py --build-catalog
+docker compose run -d --no-deps --name apollo-build -v "$PWD/main.py:/app/main.py" -v "$PWD/agent/genre_config.py:/app/agent/genre_config.py" backend python main.py --build-catalog
 ```
 
 It is strictly serial (~1-2 min/track) and writes `tracks.json` **only at the

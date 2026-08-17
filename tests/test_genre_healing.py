@@ -14,10 +14,14 @@ Covers:
     ``tracks/Healing`` folder name
   - The new ``healing-aura`` artwork prompt, and a guard that no genre
     theme points at a non-existent artwork style
-  - main.py <-> agent/tools.py parity for the duplicated genre dicts
+  - main.py <-> agent/tools.py parity for the genre dicts, which both now
+    re-export from agent/genre_config.py
 """
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -30,6 +34,8 @@ from main import (
     _get_session_theme,
     detect_bpm,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _patched_detect(raw_bpm: float, genre_folder: str = "") -> float:
@@ -174,7 +180,14 @@ class TestHealingArtworkPrompt:
 
 
 class TestAgentToolsParity:
-    """agent/tools.py keeps its own copies of both dicts; they must agree."""
+    """main.py and agent/tools.py must expose the same genre tables.
+
+    They used to hold independent copies and drifted: tools.py sat a whole
+    release without ``cocktail house`` or ``soul jazz``, which flattened the
+    arranger's energy curve for those genres and wrote an empty theme into
+    web-rendered sessions. Both now re-export agent/genre_config.py, so these
+    tests double as a guard against anyone reintroducing a local literal.
+    """
 
     def test_bpm_range_matches_main(self):
         from agent.tools import _BPM_GENRE_RANGES
@@ -198,14 +211,98 @@ class TestAgentToolsParity:
         )
 
     def test_shared_genres_do_not_disagree(self):
-        """Where both files know a genre, the ranges must be identical.
-
-        The two dicts have already drifted once (tools.py is missing
-        several genres main.py knows). This guards the overlap so a future
-        edit to one side cannot silently contradict the other.
-        """
+        """Where both sides know a genre, the ranges must be identical."""
         from agent.tools import _BPM_GENRE_RANGES
 
         shared = set(_BPM_GENRE_RANGES) & set(BPM_GENRE_RANGES)
         for genre in shared:
             assert _BPM_GENRE_RANGES[genre] == BPM_GENRE_RANGES[genre], genre
+
+    def test_bpm_range_key_sets_are_identical(self):
+        """Not just the overlap — neither side may know a genre the other doesn't.
+
+        A genre missing from tools.py falls back to the (60, 200) energy
+        window, which silently squashes the arranger's dynamic range instead
+        of failing. Key-set equality is what makes that unrepresentable.
+        """
+        from agent.tools import _BPM_GENRE_RANGES
+
+        assert set(_BPM_GENRE_RANGES) == set(BPM_GENRE_RANGES)
+
+    def test_theme_key_sets_are_identical(self):
+        """A genre missing here writes ``{}`` into the draft session theme."""
+        from agent.tools import GENRE_THEMES as TOOLS_THEMES
+
+        assert set(TOOLS_THEMES) == set(GENRE_THEMES)
+
+    def test_themes_are_complete_not_a_subset(self):
+        """tools.py used to carry a 2-field subset of each theme.
+
+        The render endpoint writes this dict straight into the draft
+        session, so a trimmed copy shipped partial colors downstream.
+        """
+        from agent.tools import GENRE_THEMES as TOOLS_THEMES
+
+        assert TOOLS_THEMES == GENRE_THEMES
+
+    def test_both_sides_are_the_same_object(self):
+        """Identity, not just equality — proves there is one source of truth.
+
+        Equality would still pass if someone pasted a fresh literal back
+        into either file; identity only holds while both import
+        agent/genre_config.py.
+        """
+        from agent import genre_config
+        from agent.tools import GENRE_THEMES as TOOLS_THEMES
+        from agent.tools import _BPM_GENRE_RANGES
+
+        assert _BPM_GENRE_RANGES is genre_config.BPM_GENRE_RANGES
+        assert BPM_GENRE_RANGES is genre_config.BPM_GENRE_RANGES
+        assert TOOLS_THEMES is genre_config.GENRE_THEMES
+        assert GENRE_THEMES is genre_config.GENRE_THEMES
+
+
+class TestGenreConfigIsDependencyFree:
+    """The shared module must stay importable without the render stack.
+
+    agent/tools.py imports it at module scope and the web backend reaches it
+    from there; if it ever grows an ``import main`` (or any transitive pull of
+    librosa/moviepy) that import cost lands on every agent process. Extracting
+    the dicts was only worth doing because this stays true.
+    """
+
+    HEAVY = ("librosa", "moviepy", "main", "pydub", "soundfile")
+
+    def test_imports_without_heavy_deps(self):
+        # Tagged lines, not positional ones: "nothing leaked" prints an empty
+        # value, and a bare blank line is indistinguishable from stray output.
+        code = (
+            "import sys, agent.genre_config as gc;"
+            f"print('LEAKED:' + ','.join(m for m in {self.HEAVY!r} if m in sys.modules));"
+            "print('COUNTS:%d %d' % (len(gc.BPM_GENRE_RANGES), len(gc.GENRE_THEMES)))"
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        def _tagged(tag: str) -> str:
+            for line in proc.stdout.splitlines():
+                if line.startswith(tag):
+                    return line[len(tag):].strip()
+            raise AssertionError(f"no {tag} line in: {proc.stdout!r}")
+
+        assert _tagged("LEAKED:") == "", (
+            f"genre_config pulled in {_tagged('LEAKED:')}"
+        )
+        # Sanity: the subprocess really loaded populated tables, so an import
+        # that silently produced empty dicts can't pass as "nothing leaked".
+        assert _tagged("COUNTS:") == f"{len(BPM_GENRE_RANGES)} {len(GENRE_THEMES)}"
+
+    def test_every_theme_genre_has_a_bpm_range(self):
+        """The two tables are edited together; a themed genre with no range
+        still detects BPM against the wide default and mis-tags its catalog."""
+        assert set(GENRE_THEMES) <= set(BPM_GENRE_RANGES)
