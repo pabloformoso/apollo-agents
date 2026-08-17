@@ -43,6 +43,7 @@ import {
 } from "@/components/ember/primitives";
 import { Banner, Spinner, toast } from "@/components/ember/feedback";
 
+import { playlistRowKey } from "@/lib/playlistKeys";
 const STAGE_ORDER: ReadonlyArray<[string, string]> = [
   ["stems", "Stems aligned"],
   ["crossfades", "Crossfades rendered"],
@@ -449,7 +450,7 @@ export default function RenderPage() {
                       const ss = total % 60;
                       return (
                         <div
-                          key={t.id}
+                          key={playlistRowKey(t.id, i)}
                           className="grid grid-cols-[44px_1fr_36px]"
                         >
                           <span className="text-ember">

@@ -36,6 +36,7 @@ import {
 } from "@/components/ember/primitives";
 import { Banner, Spinner, toast } from "@/components/ember/feedback";
 
+import { playlistRowKey } from "@/lib/playlistKeys";
 // ── Stats helpers ────────────────────────────────────────────────────────
 function avg(xs: number[]): number {
   if (!xs.length) return 0;
@@ -503,7 +504,7 @@ export default function CuratePage() {
           <ul className="list-none m-0 p-0 flex flex-col overflow-auto">
             {tracks.map((t, i) => (
               <li
-                key={t.id}
+                key={playlistRowKey(t.id, i)}
                 className="grid grid-cols-[32px_60px_1fr_70px_50px_90px_28px] gap-4 items-center py-3.5 border-b border-line"
               >
                 <span className="font-display italic text-2xl text-faint">
