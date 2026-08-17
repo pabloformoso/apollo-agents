@@ -2092,14 +2092,16 @@ describe("useLiveSession", () => {
     });
 
     it("schedules the drop at when + drop_offset / incoming_rate", async () => {
-      // v3.4 — the drop time anchors against the SAME `when` as the
-      // source's start() and the gain ramps, not against
-      // ctx.currentTime. Because audio rendering is sample-accurate
-      // against that single `when`, the filter snap and the source's
-      // first samples and the gain crossover all hit the same audio
-      // frame. drop_at_incoming_sec=5.902, anchor=0, rate=1.0,
-      // when=currentTime + SCHEDULE_LOOKAHEAD_SEC (=0.05) →
-      // drop schedules at 0.05 + 5.902 = 5.952s.
+      // The drop time anchors against the SAME `when` as the source's
+      // start() and the gain ramps. drop_at_incoming_sec=5.902, anchor=0,
+      // rate=1.0 → drop = when + 5.902.
+      //
+      // v3.6 — `when` is now aligned to the outgoing downbeat
+      // (outgoing_anchor_sec), no longer a fixed currentTime + lookahead, so
+      // we assert the INVARIANT (drop == source-start `when` + dropDelay) by
+      // reading the actual `when` the incoming source started at, rather than
+      // a hardcoded absolute. The alignment math itself is unit-tested in
+      // crossfade_timing.test.ts.
       const { playlist } = await bootstrapAndStart("sid-bs-2");
       await act(async () => {
         FakeWebSocket.lastInstance!.pushServerEvent({
@@ -2111,6 +2113,12 @@ describe("useLiveSession", () => {
         });
         await new Promise((r) => setTimeout(r, 10));
       });
+      // The incoming source is the most recently created one; its start()
+      // call carries the `when` everything chains off.
+      const incomingSource =
+        FakeBufferSource.instances[FakeBufferSource.instances.length - 1];
+      const sourceWhen = (incomingSource.start.mock.calls[0] as unknown[])[0] as number;
+
       const incomingFilter = FakeBiquadFilterNode.instances.find((f) =>
         f.frequency.setValueAtTime.mock.calls.some(
           (c) => c[0] === 120,
@@ -2121,10 +2129,9 @@ describe("useLiveSession", () => {
         (c) => c[0] === 20,
       );
       expect(dropCall).toBeDefined();
-      // Drop schedules at when + dropDelay. With the fake context's
-      // currentTime starting at 0 and SCHEDULE_LOOKAHEAD_SEC=0.05,
-      // when=0.05, dropDelay=5.902/1.0=5.902 → expected 5.952.
-      expect(dropCall![1] as number).toBeCloseTo(5.952, 2);
+      // dropDelay = 5.902 / incoming_rate(1.0) = 5.902, scheduled at
+      // sourceWhen + dropDelay — invariant regardless of where `when` lands.
+      expect(dropCall![1] as number).toBeCloseTo(sourceWhen + 5.902, 2);
     });
 
     it("does NOT schedule bass_swap automation when transition_style is smooth_blend", async () => {
@@ -2193,6 +2200,38 @@ describe("useLiveSession", () => {
         ),
       );
       expect(allResets.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // --- W2: beatmatch measurement emit ------------------------------------
+    it("emits a beatmatch_measurement on crossfade with the right shape", async () => {
+      const { playlist } = await bootstrapAndStart("sid-bm-1");
+      await act(async () => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "crossfade",
+          to_track: playlist[1],
+          from_track: playlist[0],
+          crossfade_sec: 12,
+          phase_lock: {
+            ...bassSwapPayload,
+            transition_style: "smooth_blend" as const,
+            bass_swap: undefined,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5));
+      });
+      const measurements = FakeWebSocket.lastInstance!.sent
+        .map((s) => JSON.parse(s))
+        .filter((m) => m.type === "beatmatch_measurement");
+      expect(measurements.length).toBe(1);
+      const m = measurements[0];
+      // This describe's v2Track is bpm 122, key 8A → bucket 122-124.
+      expect(m.profile).toBe("8A->8A|bpm122-124");
+      expect(m.key_pair).toBe("8A->8A");
+      expect(m.bpm_bucket).toBe("122-124");
+      expect(typeof m.offset_ms).toBe("number");
+      expect(m.offset_ms).toBeGreaterThanOrEqual(0);
+      expect(m.pitch_bend_ms).toBe(0); // no pitch-bend yet (W3 fills it)
     });
   });
 

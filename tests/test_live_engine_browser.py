@@ -645,15 +645,26 @@ class TestBrowserPhaseLockTempoMatching:
         payload = engine._phase_lock_payload()
         assert payload["incoming_rate"] == 1.0
 
-    def test_incoming_rate_is_one_when_delta_within_threshold(self):
-        """5-BPM delta is the threshold — exactly equal still counts as
-        "no audible benefit from stretching" (mirrors CLI behaviour)."""
+    def test_incoming_rate_is_one_only_within_micro_threshold(self):
+        """v3.6 — the browser crossfade now uses the tighter
+        GRIDWARP_BPM_MATCH_THRESHOLD (0.3), so only true detection noise is
+        a no-op. A 0.2-BPM delta still collapses to 1.0..."""
+        engine = LiveEngineBrowser(crossfade_sec=12)
+        engine.play(
+            [_v2_track("a", bpm=128.0), _v2_track("b", bpm=127.8)]
+        )
+        payload = engine._phase_lock_payload()
+        assert payload["incoming_rate"] == 1.0
+
+    def test_incoming_rate_corrects_small_subfive_delta(self):
+        """...but a 4-BPM delta — silently free-running pre-v3.6 (5-BPM dead
+        zone) and a cause of deep-house contrabombo — is now corrected."""
         engine = LiveEngineBrowser(crossfade_sec=12)
         engine.play(
             [_v2_track("a", bpm=128.0), _v2_track("b", bpm=124.0)]
         )
         payload = engine._phase_lock_payload()
-        assert payload["incoming_rate"] == 1.0
+        assert payload["incoming_rate"] == round(128.0 / 124.0, 6)
 
     def test_incoming_rate_scales_when_delta_exceeds_threshold(self):
         """120 BPM outgoing → 130 BPM incoming: incoming must be slowed

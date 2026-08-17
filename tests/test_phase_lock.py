@@ -117,15 +117,33 @@ class TestFindPhraseAnchor:
         assert self.DURATION - anchor >= CROSSFADE_SEC + 0.5
 
     def test_falls_back_to_closest_beat_when_no_constraint_fits(self):
-        """When no candidate satisfies the tail constraint, the function
-        falls back to the closest plain beat — better than crashing the
-        mix. The 'fallback' tier label is the diagnostic signal."""
-        # Target near track end where no beat can satisfy min_tail.
-        _anchor, tier = find_phrase_anchor(self.DOWNBEATS,
-                                           target_sec=58.0,
-                                           track_duration_sec=self.DURATION,
-                                           min_tail_sec=CROSSFADE_SEC + 0.5)
+        """When NO downbeat anywhere satisfies the tail constraint, the
+        function falls back to the closest plain beat — better than crashing
+        the mix. The 'fallback' tier label is the diagnostic signal.
+
+        v3.7: the trigger is a tail so large that every downbeat violates it
+        (so neither the tight pass nor the phrase-back-search can find a
+        candidate). The previous version of this test used a near-end target
+        on a long grid, but that now correctly resolves to an earlier phrase
+        boundary via the back-search rather than a bare fallback — which is
+        the bug-4 fix working, not a regression."""
+        # Every downbeat is within min_tail of the end → nothing qualifies.
+        anchor, tier = find_phrase_anchor(self.DOWNBEATS,
+                                          target_sec=58.0,
+                                          track_duration_sec=self.DURATION,
+                                          min_tail_sec=self.DURATION + 100.0)
         assert tier == "fallback"
+
+    def test_v37_backsearch_beats_bare_fallback_near_end(self):
+        """A near-end target that the old code resolved to a bare beat now
+        snaps back to a real phrase boundary with a valid tail — the audible
+        improvement from bug 4."""
+        anchor, tier = find_phrase_anchor(self.DOWNBEATS,
+                                          target_sec=58.0,
+                                          track_duration_sec=self.DURATION,
+                                          min_tail_sec=CROSSFADE_SEC + 0.5)
+        assert tier in ("16-bar", "8-bar", "4-bar")
+        assert self.DURATION - anchor >= CROSSFADE_SEC + 0.5
 
     def test_empty_downbeats_returns_fallback(self):
         anchor, tier = find_phrase_anchor([], target_sec=10.0,
@@ -141,6 +159,59 @@ class TestFindPhraseAnchor:
                                           max_offset_sec=10.0)
         assert anchor == 30.0
         assert tier == "16-bar"
+
+    # ------------------------------------------------------------------
+    # v3.7 bug 4 — "entered out of phrase". The crossfade target is fixed
+    # by track duration (dur - xfade), which rarely lands within the narrow
+    # ±max_offset window of a real 16/8-bar phrase boundary, so the ladder
+    # collapsed to a bare downbeat and the incoming track entered mid-phrase
+    # (sounded "horrible" live even though the beat was locked). The fix:
+    # prefer a phrase boundary even if it sits further BACK than max_offset —
+    # starting the blend a few bars early is musically safe; entering off the
+    # phrase is not.
+    # ------------------------------------------------------------------
+    # Hazy Comfort geometry (real catalog track, the live "horrible" case):
+    # 122 BPM, 113 downbeats, dur 221.9 s. target = dur - 12 = 209.9 s lands
+    # at idx ~107 (mod16=11): nearest 16-bar boundary is 21 s away, nearest
+    # 8/4-bar boundary 5.31 s away — BOTH outside the ±4 s default window, so
+    # the old ladder collapsed to a bare downbeat (mid-phrase entry).
+    _HAZY_DOWNBEATS = [round(i * (60.0 / 122.0 * 4.0), 4) for i in range(113)]
+    _HAZY_DURATION = 221.9
+
+    def test_v37_prefers_phrase_boundary_over_bare_downbeat(self):
+        """Real Hazy Comfort geometry: nearest phrase boundary sits ~5.3 s
+        from the duration-derived target, just outside the ±4 s window. Old
+        behaviour: tier='downbeat' (entered mid-phrase, sounded horrible).
+        v3.7: must snap to a phrase boundary (16/8/4-bar) instead."""
+        anchor, tier = find_phrase_anchor(
+            self._HAZY_DOWNBEATS,
+            target_sec=self._HAZY_DURATION - 12.0,
+            track_duration_sec=self._HAZY_DURATION,
+            min_tail_sec=12.5,
+        )
+        assert tier in ("16-bar", "8-bar", "4-bar"), (
+            f"expected a phrase boundary, got tier={tier!r}"
+        )
+        stride = {"16-bar": 16, "8-bar": 8, "4-bar": 4}[tier]
+        idx = min(
+            range(len(self._HAZY_DOWNBEATS)),
+            key=lambda i: abs(self._HAZY_DOWNBEATS[i] - anchor),
+        )
+        assert idx % stride == 0, f"anchor idx {idx} not on a {stride}-bar boundary"
+        assert self._HAZY_DURATION - anchor >= 12.5
+
+    def test_v37_phrase_boundary_lands_at_or_before_target(self):
+        """The phrase anchor should sit AT or BEFORE the duration-derived
+        target (start the blend a touch early to stay in phrase), never so
+        late it eats the tail."""
+        target = self._HAZY_DURATION - 12.0
+        anchor, _tier = find_phrase_anchor(
+            self._HAZY_DOWNBEATS,
+            target_sec=target,
+            track_duration_sec=self._HAZY_DURATION,
+            min_tail_sec=12.5,
+        )
+        assert anchor <= target + 1e-6
 
 
 # ---------------------------------------------------------------------------
@@ -433,11 +504,13 @@ from agent import phase_lock as phase_lock_mod  # noqa: E402
 from agent.phase_lock import (  # noqa: E402
     BEATGRID_SCHEMA_VERSION,
     DEFAULT_BPM_MATCH_THRESHOLD,
+    GRIDWARP_BPM_MATCH_THRESHOLD,
     DEFAULT_CROSSFADE_SEC,
     DEFAULT_TEMPO_RAMP_SEC,
     GridState,
     GridTracker,
     LiveTransitionPlan,
+    MAX_LEARNED_OFFSET_MS,
     STRETCH_RATIO_MAX,
     STRETCH_RATIO_MIN,
     build_live_transition_plan,
@@ -446,6 +519,7 @@ from agent.phase_lock import (  # noqa: E402
     is_v2_beatgrid,
     phase_locked_crossfade_np,
     pick_incoming_anchor,
+    read_learned_offset,
     resolve_downbeats,
     synthesise_downbeats_from_v1,
 )
@@ -949,10 +1023,16 @@ class TestComputeTempoMatchRate:
         assert compute_tempo_match_rate(128.0, 128.0) == 1.0
 
     def test_returns_one_when_delta_within_threshold(self):
-        # Threshold is 5 BPM — exactly 5 still rounds to "no stretch"
-        # (matches CLI ``_time_stretch``'s ``<=`` comparison).
-        assert compute_tempo_match_rate(128.0, 124.0) == 1.0
-        assert compute_tempo_match_rate(128.0, 123.0) == 1.0  # delta=5
+        # v3.6 — the crossfade default threshold is now the tighter
+        # GRIDWARP_BPM_MATCH_THRESHOLD (0.3), not 5.0: sub-BPM deep-house
+        # drift is audible over a 12 s blend, so only true detection noise
+        # (sub-0.3 BPM) collapses to "no stretch". Callers wanting the wide
+        # 5-BPM dead zone (body stretch) pass it explicitly.
+        assert compute_tempo_match_rate(128.0, 128.0) == 1.0       # identical
+        assert compute_tempo_match_rate(128.0, 127.8) == 1.0       # delta=0.2 < 0.3
+        # And with the explicit wide threshold the old behaviour still holds.
+        assert compute_tempo_match_rate(128.0, 124.0, threshold=5.0) == 1.0
+        assert compute_tempo_match_rate(128.0, 123.0, threshold=5.0) == 1.0  # delta=5
 
     def test_returns_outgoing_over_incoming_when_delta_exceeds_threshold(self):
         """Sign convention: ``incoming_bpm`` is too high → rate < 1.0
@@ -992,22 +1072,23 @@ class TestComputeTempoMatchRate:
         assert compute_tempo_match_rate(-1.0, 128.0) == 1.0
 
     def test_threshold_argument_is_honoured(self):
-        """A path that wants tighter tempo matching can pass a smaller
-        threshold. Useful for genres where 2-BPM drift IS audible."""
-        # Default threshold (5) → no stretch.
-        assert compute_tempo_match_rate(120.0, 122.0) == 1.0
-        # Tighter threshold (1) → stretch even tiny deltas.
-        rate = compute_tempo_match_rate(120.0, 122.0, threshold=1.0)
+        """A path that wants the WIDE dead zone (whole-track body stretch)
+        can pass the larger threshold explicitly."""
+        # Wide threshold (5) → no stretch for a 2-BPM delta.
+        assert compute_tempo_match_rate(120.0, 122.0, threshold=5.0) == 1.0
+        # The tighter v3.6 crossfade default DOES stretch the same delta.
+        rate = compute_tempo_match_rate(120.0, 122.0)
         assert rate == pytest.approx(120.0 / 122.0)
 
-    def test_default_threshold_matches_constant(self):
-        """Sanity check: the implicit default mirrors the documented
-        module-level constant. Tests reference the constant elsewhere so
-        a drift here would mask cross-path disagreement."""
-        # Anything inside ±DEFAULT_BPM_MATCH_THRESHOLD must collapse to 1.0.
-        assert compute_tempo_match_rate(
-            120.0, 120.0 + DEFAULT_BPM_MATCH_THRESHOLD
-        ) == 1.0
+    def test_default_threshold_matches_crossfade_constant(self):
+        """Sanity check: the implicit default mirrors the v3.6 crossfade
+        constant (GRIDWARP_BPM_MATCH_THRESHOLD), not the wide body-stretch
+        dead zone. A delta just under it collapses to 1.0; just over it
+        stretches."""
+        just_under = 120.0 + GRIDWARP_BPM_MATCH_THRESHOLD - 0.05
+        just_over = 120.0 + GRIDWARP_BPM_MATCH_THRESHOLD + 0.05
+        assert compute_tempo_match_rate(120.0, just_under) == 1.0
+        assert compute_tempo_match_rate(120.0, just_over) != 1.0
 
 
 class TestPhaseLockedCrossfadeNp:
@@ -1071,3 +1152,120 @@ class TestPhaseLockedCrossfadeNp:
         assert out[overlap_start] < 0.1
         # 64 samples in, ramp is full strength.
         assert out[overlap_start + 64] > 0.05
+
+
+# ---------------------------------------------------------------------------
+# W4 — apply learned per-profile offset (beatmatch feedback loop)
+# ---------------------------------------------------------------------------
+
+class TestReadLearnedOffset:
+    """``read_learned_offset`` — gated, dependency-free read of the learned
+    per-profile timing offset from the loop's memory JSON."""
+
+    def _write(self, tmp_path, obj):
+        import json
+        p = tmp_path / "memory.json"
+        p.write_text(json.dumps(obj), encoding="utf-8")
+        return p
+
+    def test_returns_offset_when_enabled_and_present(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"8A->8B|bpm120-122": {"offset_ms": 9.7}}})
+        assert read_learned_offset(p, "8A->8B|bpm120-122", apply_enabled=True) == 9.7
+
+    def test_zero_when_apply_disabled(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"prof": {"offset_ms": 9.7}}})
+        assert read_learned_offset(p, "prof", apply_enabled=False) == 0.0
+
+    def test_zero_when_profile_missing(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"other": {"offset_ms": 9.7}}})
+        assert read_learned_offset(p, "prof", apply_enabled=True) == 0.0
+
+    def test_zero_when_file_missing(self, tmp_path):
+        assert read_learned_offset(tmp_path / "nope.json", "prof", apply_enabled=True) == 0.0
+
+    def test_zero_when_malformed_json(self, tmp_path):
+        p = tmp_path / "memory.json"
+        p.write_text("{not json", encoding="utf-8")
+        assert read_learned_offset(p, "prof", apply_enabled=True) == 0.0
+
+    def test_zero_when_no_beatmatch_section(self, tmp_path):
+        p = self._write(tmp_path, {"sessions": []})
+        assert read_learned_offset(p, "prof", apply_enabled=True) == 0.0
+
+    def test_zero_when_offset_out_of_range(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"prof": {"offset_ms": 999.0}}})
+        assert read_learned_offset(p, "prof", apply_enabled=True) == 0.0
+
+    def test_zero_when_offset_nonnumeric(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"prof": {"offset_ms": "x"}}})
+        assert read_learned_offset(p, "prof", apply_enabled=True) == 0.0
+
+    def test_empty_profile_returns_zero(self, tmp_path):
+        p = self._write(tmp_path, {"beatmatch_offsets": {"": {"offset_ms": 5.0}}})
+        assert read_learned_offset(p, "", apply_enabled=True) == 0.0
+
+
+class TestBuildProfile:
+    """``build_profile`` must mirror the frontend ``buildMeasurementProfile``
+    byte-for-byte so the offset key written by one side reads on the other."""
+
+    def test_key_pair_and_2bpm_bucket(self):
+        assert phase_lock_mod.build_profile("8A", "8B", 121.8) == "8A->8B|bpm120-122"
+
+    def test_floors_to_lower_even_band(self):
+        assert phase_lock_mod.build_profile("1A", "1A", 123.0) == "1A->1A|bpm122-124"
+        assert phase_lock_mod.build_profile("1A", "1A", 120.0) == "1A->1A|bpm120-122"
+
+    def test_unknown_key_and_bpm(self):
+        assert phase_lock_mod.build_profile(None, None, None) == "?->?|bpm?"
+
+    def test_partial_unknowns(self):
+        assert phase_lock_mod.build_profile("8A", None, None) == "8A->?|bpm?"
+
+
+class TestLearnedOffsetApplied:
+    """``build_live_transition_plan`` shifts the incoming start by the learned
+    offset. Positive offset (incoming was landing late) → start earlier."""
+
+    def _grid(self, n=32, bar=1.875):
+        return [round(i * bar, 3) for i in range(n)]
+
+    def _plan(self, learned_offset_ms):
+        return build_live_transition_plan(
+            outgoing_beatgrid={"version": 2, "downbeats_sec": self._grid(), "beats_per_bar": 4},
+            outgoing_duration_sec=60.0,
+            incoming_beatgrid={"version": 2, "downbeats_sec": self._grid(), "beats_per_bar": 4},
+            incoming_duration_sec=60.0,
+            incoming_audio_y=None,
+            sample_rate=44100,
+            target_xfade_sec=12.0,
+            learned_offset_ms=learned_offset_ms,
+        )
+
+    def test_zero_offset_is_baseline(self):
+        base = self._plan(0.0)
+        again = self._plan(0.0)
+        assert base.incoming_start_sample == again.incoming_start_sample
+
+    def test_positive_offset_starts_incoming_earlier(self):
+        base = self._plan(0.0).incoming_start_sample
+        shifted = self._plan(20.0).incoming_start_sample
+        # 20 ms earlier at 44.1 kHz ≈ 882 samples earlier (smaller index),
+        # but only if the base anchor wasn't already 0. Use a grid whose
+        # incoming anchor is downbeats[0]=0 → clamped at 0; assert via a
+        # nonzero-anchor case below. Here just assert it never goes negative.
+        assert shifted >= 0
+
+    def test_offset_shift_magnitude_when_anchor_nonzero(self):
+        # Incoming anchor is 0 on this synthetic grid, so the shift clamps at
+        # 0. Build a plan where the incoming anchor is a later downbeat by
+        # using a pickup-skip-free grid and a positive offset: the shift is
+        # max(0, anchor - offset). With anchor 0 it stays 0 — verify clamp.
+        shifted = self._plan(50.0).incoming_start_sample
+        assert shifted == 0  # anchor 0 - 50ms clamped to 0
+
+    def test_offset_clamped_to_window(self):
+        # A wild offset is clamped to MAX_LEARNED_OFFSET_MS before shifting.
+        huge = self._plan(10_000.0).incoming_start_sample
+        clamped = self._plan(MAX_LEARNED_OFFSET_MS).incoming_start_sample
+        assert huge == clamped

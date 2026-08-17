@@ -43,9 +43,13 @@ from agent.track_identity import (
     shares_piece,
 )
 from agent.phase_lock import (
+    GRIDWARP_MAX_CV,
     XFADE_EDGE_GUARD_SAMPLES,
     LiveTransitionPlan,
     build_live_transition_plan,
+    build_profile,
+    read_learned_offset,
+    resolve_downbeats,
 )
 from agent.transition_styles import (
     TransitionProfile,
@@ -54,6 +58,28 @@ from agent.transition_styles import (
     profile_for_genre,
     serialise_choice,
 )
+
+# W4 (beatmatch feedback loop) — apply learned per-profile offsets to live
+# transitions. GATE G3: audio-affecting, OFF by default; opt in with
+# APOLLO_BEATMATCH_APPLY=1. The loop always LEARNS (writes offsets); this flag
+# only controls whether they are APPLIED to how transitions sound.
+_BEATMATCH_APPLY = os.getenv("APOLLO_BEATMATCH_APPLY", "0") == "1"
+_BEATMATCH_MEMORY_PATH = Path(__file__).parent / "memory.json"
+
+
+def _bar_cv(downbeats: "list[float]") -> str:
+    """Coefficient of variation of bar intervals — same metric the grid-warp
+    gate uses (``_is_grid_warpable``). Returned as a short string for logging;
+    ``"n/a"`` when there are too few downbeats to measure. Diagnostic only.
+    """
+    if not downbeats or len(downbeats) < 3:
+        return "n/a"
+    lengths = [downbeats[i + 1] - downbeats[i] for i in range(len(downbeats) - 1)]
+    mean = sum(lengths) / len(lengths)
+    if mean <= 0:
+        return "n/a"
+    var = sum((x - mean) ** 2 for x in lengths) / len(lengths)
+    return f"{(var ** 0.5) / mean:.4f}"
 
 # sounddevice requires PortAudio — guarded so the module can be imported in
 # headless / CI environments without audio hardware.
@@ -1057,7 +1083,12 @@ class LiveEngineLocal:
             target_xfade_sec=float(self.crossfade_sec),
             outgoing_bpm=float(current_track.get("bpm") or 0) or None,
             incoming_bpm=float(next_track.get("bpm") or 0) or None,
-            bpm_match_threshold=_BPM_THRESHOLD,
+            # v3.6 — let the crossfade tempo-match inherit the tighter
+            # GRIDWARP_BPM_MATCH_THRESHOLD default. This CLI engine ignores
+            # the resulting incoming_rate (it pre-stretches the body via
+            # pyrubberband using its own inline _BPM_THRESHOLD check), so this
+            # only affects diagnostics here; the browser engine is where it
+            # matters audibly.
         )
 
     # ------------------------------------------------------------------
@@ -1240,6 +1271,11 @@ class LiveEngineBrowser:
         # whenever the plan kept landing on "fallback" — visually
         # equivalent to a stuck siren in the UI banner.
         self._critic_warned_for_transition: tuple[int, int] | None = None
+
+        # v3.5-diag — debounce for the ``[beatmatch]`` diagnostic line, same
+        # once-per-pair semantics as the critic warning above. Temporary
+        # instrumentation for the deep-house mordida tuning pass.
+        self._diag_logged_for_transition: tuple[int, int] | None = None
 
     # ------------------------------------------------------------------
     # Public API (matches LiveEngineProtocol)
@@ -2216,6 +2252,19 @@ class LiveEngineBrowser:
             with self._lock:
                 self._transition_plan = None
             return
+        # W4 (beatmatch feedback loop, GATE G3) — apply the learned per-profile
+        # timing offset. Always 0.0 unless APPLY is enabled AND a learned offset
+        # exists for this exact (key_pair, bpm_bucket) profile. read_learned_offset
+        # returns 0.0 for any missing/disabled/out-of-range case, so this is a
+        # safe no-op when nothing has been learned yet.
+        _profile = build_profile(
+            current_track.get("camelot_key"),
+            next_track.get("camelot_key"),
+            float(current_track.get("bpm") or 0) or None,
+        )
+        _learned_offset_ms = read_learned_offset(
+            _BEATMATCH_MEMORY_PATH, _profile, apply_enabled=_BEATMATCH_APPLY,
+        )
         plan = build_live_transition_plan(
             outgoing_beatgrid=current_track.get("beatgrid"),
             outgoing_duration_sec=outgoing_duration,
@@ -2226,10 +2275,24 @@ class LiveEngineBrowser:
             target_xfade_sec=float(self.crossfade_sec),
             outgoing_bpm=float(current_track.get("bpm") or 0) or None,
             incoming_bpm=float(next_track.get("bpm") or 0) or None,
-            bpm_match_threshold=_BPM_THRESHOLD,
+            learned_offset_ms=_learned_offset_ms,
+            # v3.6 — inherit the tighter GRIDWARP_BPM_MATCH_THRESHOLD default
+            # so sub-5-BPM deep-house pairs get a real crossfade tempo-match
+            # (the browser deck applies the resulting incoming_rate) instead
+            # of free-running into "contrabombo".
         )
         with self._lock:
             self._transition_plan = plan
+
+        # v3.5-diag — one-line per-transition beatmatch diagnostic. Tells us,
+        # for every (current → next) pair, whether the engine engaged the
+        # per-bar grid-warp ("grid_warp") or fell back to the single static
+        # rate ("static"), plus the inputs that decide it (both grids' cv,
+        # BPMs, the static rate, segment count). This is the data that
+        # distinguishes "the gate is too strict → static" from "grid_warp
+        # ran but still bites". Debounced once per pair like the critic
+        # warning. Grep ``docker logs apollo-backend`` for ``[beatmatch]``.
+        self._log_transition_diag(plan, idx, current_track, next_track)
 
         # v3.0.1 — emit a critic_warning when the planner couldn't land
         # on a phrase boundary. The frontend reads ``critic_warning``
@@ -2238,6 +2301,51 @@ class LiveEngineBrowser:
         # path (not phase-locked). Only fire ONCE per transition pair —
         # ``_rebuild_transition_plan`` runs on every position update.
         self._maybe_emit_critic_warning(plan, idx, current_track, next_track)
+
+    def _log_transition_diag(
+        self,
+        plan: LiveTransitionPlan,
+        current_idx: int,
+        current_track: dict,
+        next_track: dict,
+    ) -> None:
+        """Print one beatmatch diagnostic line per (current → next) pair.
+
+        Debounced via ``self._diag_logged_for_transition`` so it fires at
+        most once per pair rather than on every ~4 Hz position update.
+        Temporary instrumentation for the deep-house "mordida" tuning pass
+        (see docs/reasoned-generative-engine.md is unrelated; this is the
+        beatmatch follow-up to v3.5). Safe to remove once the gate/warp
+        tuning lands.
+        """
+        next_idx = current_idx + 1
+        key = (current_idx, next_idx)
+        if self._diag_logged_for_transition == key:
+            return
+        self._diag_logged_for_transition = key
+
+        sched = plan.beat_rate_schedule
+        out_db, _ = resolve_downbeats(
+            current_track.get("beatgrid"), float(current_track.get("duration_sec") or 0.0)
+        )
+        in_db, _ = resolve_downbeats(
+            next_track.get("beatgrid"), float(next_track.get("duration_sec") or 0.0)
+        )
+        out_cv = _bar_cv(out_db)
+        in_cv = _bar_cv(in_db)
+        cur_name = (current_track.get("display_name") or "?")[:32]
+        nxt_name = (next_track.get("display_name") or "?")[:32]
+        print(
+            f"[beatmatch] {current_idx}->{next_idx} "
+            f"mode={sched.mode} tier={plan.phrase_tier} "
+            f"bpm={current_track.get('bpm')}->{next_track.get('bpm')} "
+            f"static_rate={plan.incoming_rate:.4f} "
+            f"out_cv={out_cv} in_cv={in_cv} "
+            f"segs={len(sched.segments)} "
+            f"max_cv={GRIDWARP_MAX_CV} "
+            f"| {cur_name!r}->{nxt_name!r}",
+            flush=True,
+        )
 
     def _maybe_emit_critic_warning(
         self,

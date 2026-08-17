@@ -51,6 +51,7 @@ import {
 import { Spinner, toast } from "@/components/ember/feedback";
 import { TrackPicker } from "@/components/ember/TrackPicker";
 
+import { playlistRowKey, playlistRowIds } from "@/lib/playlistKeys";
 // Same coefficients as `web/backend/arc.py`. Pure UI fallback for legacy
 // sessions whose to_dict pre-dates v2.6.0.
 function energyFor(t: Track): number {
@@ -65,13 +66,17 @@ type EditorEvent = {
 
 interface CardProps {
   track: Track;
+  /** Position-qualified id — see `lib/playlistKeys`. NOT `track.id`: a
+   *  playlist may repeat a track, and two cards sharing a sortable id
+   *  make dnd-kit resolve a drag to whichever copy comes first. */
+  rowId: string;
   index: number;
   selected: boolean;
   onSelect: () => void;
   onDelete: () => void;
 }
 
-function TrackCard({ track, index, selected, onSelect, onDelete }: CardProps) {
+function TrackCard({ track, rowId, index, selected, onSelect, onDelete }: CardProps) {
   const {
     attributes,
     listeners,
@@ -79,7 +84,7 @@ function TrackCard({ track, index, selected, onSelect, onDelete }: CardProps) {
     transform,
     transition,
     isDragging,
-  } = useSortable({ id: track.id });
+  } = useSortable({ id: rowId });
   const style: React.CSSProperties = {
     transform: CSS.Transform.toString(transform),
     transition,
@@ -198,8 +203,12 @@ export default function EditorPage() {
   const onDragEnd = useCallback(
     async (e: DragEndEvent) => {
       if (!sessionId || !e.over || e.active.id === e.over.id) return;
-      const fromIdx = tracks.findIndex((t) => t.id === e.active.id);
-      const toIdx = tracks.findIndex((t) => t.id === e.over!.id);
+      // Resolve through the position-qualified row ids, not track.id:
+      // findIndex on a repeated track id always returns the first copy,
+      // so dragging the second one silently moved the wrong card.
+      const rowIds = playlistRowIds(tracks);
+      const fromIdx = rowIds.indexOf(String(e.active.id));
+      const toIdx = rowIds.indexOf(String(e.over.id));
       if (fromIdx < 0 || toIdx < 0) return;
       const newOrder = arrayMove(
         tracks.map((_, i) => i),
@@ -384,13 +393,14 @@ export default function EditorPage() {
             onDragEnd={onDragEnd}
           >
             <SortableContext
-              items={tracks.map((t) => t.id)}
+              items={playlistRowIds(tracks)}
               strategy={horizontalListSortingStrategy}
             >
               <div className="flex gap-3 overflow-auto pb-2">
                 {tracks.map((t, i) => (
                   <TrackCard
-                    key={t.id}
+                    key={playlistRowKey(t.id, i)}
+                    rowId={playlistRowKey(t.id, i)}
                     track={t}
                     index={i}
                     selected={i === sel}

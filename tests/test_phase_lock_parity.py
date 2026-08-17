@@ -322,8 +322,16 @@ class TestTempoMatchRateParity:
         else:
             cli_ratio = max(_STRETCH_MIN, min(_STRETCH_MAX, out_bpm / in_bpm))
 
-        # Browser path goes through compute_tempo_match_rate.
-        browser_rate = compute_tempo_match_rate(out_bpm, in_bpm)
+        # Browser path goes through compute_tempo_match_rate. v3.6 gave the
+        # crossfade rate a TIGHTER default threshold (0.3) than the CLI's
+        # body-stretch dead zone (_BPM_THRESHOLD=5), so to compare like with
+        # like we pass the CLI's threshold explicitly here. (The crossfade's
+        # tighter default is asserted separately in test_phase_lock.py; that
+        # divergence is intentional — the browser corrects sub-5-BPM drift
+        # the CLI body-stretch ignores.)
+        browser_rate = compute_tempo_match_rate(
+            out_bpm, in_bpm, threshold=_BPM_THRESHOLD
+        )
 
         assert browser_rate == pytest.approx(cli_ratio), (
             f"Tempo-match parity broken for {out_bpm}→{in_bpm} BPM: "
@@ -340,15 +348,20 @@ class TestTempoMatchRateParity:
         the rate the browser applies equals the implicit rate the
         offline mixer applies to the incoming track for the "match
         outgoing" case (small delta)."""
-        out_bpm, in_bpm = 128.0, 124.0  # delta = 4 → within threshold
+        from agent.live_engine import _BPM_THRESHOLD
+
+        out_bpm, in_bpm = 128.0, 124.0  # delta = 4 → within body dead zone
         trans_bpm = compute_transition_bpm(out_bpm, in_bpm)
         # Match-outgoing branch: trans_bpm equals out_bpm.
         assert trans_bpm == out_bpm
-        # Browser rate is 1.0 because the delta is below the threshold;
-        # offline pyrubberband would also be a near-1.0 ratio
-        # (out_bpm / in_bpm = 1.032 — but the threshold gate keeps both
-        # paths at 1.0). Parity preserved.
-        assert compute_tempo_match_rate(out_bpm, in_bpm) == 1.0
+        # Compared at the body-stretch threshold the browser rate is 1.0,
+        # matching the offline pyrubberband near-1.0 collapse. (At the v3.6
+        # crossfade default the browser WOULD correct this 4-BPM delta — but
+        # that's the crossfade rate, a different mechanism from the offline
+        # body stretch; parity is about the body-stretch decision.)
+        assert compute_tempo_match_rate(
+            out_bpm, in_bpm, threshold=_BPM_THRESHOLD
+        ) == 1.0
 
     def test_browser_engine_payload_carries_parity_rate_to_frontend(self):
         """End-to-end: build a 2-track playlist with a BPM mismatch,

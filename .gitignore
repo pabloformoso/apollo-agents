@@ -69,3 +69,8 @@ web/frontend/.next-debug/
 
 # Misc local screenshots
 login-*.png
+
+# coverage artifacts
+.coverage
+cov.json
+htmlcov/

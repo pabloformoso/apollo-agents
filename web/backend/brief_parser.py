@@ -271,6 +271,16 @@ def _build_openai_client(provider: str):
     return client, os.getenv("AGENT_MODEL", "gemma4:4b")
 
 
+#: The JSON payload itself is ~80 tokens, but a reasoning model spends its
+#: budget thinking before it emits a single character of content. gemma4:12b
+#: (local Ollama since 2026-08-17) needs 502-523 tokens for this prompt, so
+#: the old 512 ceiling truncated the object mid-key and `extract_json_object`
+#: returned None — every free-text brief silently parsed to all-null. This is
+#: a ceiling, not a target: non-reasoning models still stop at ~80 tokens and
+#: pay nothing for the headroom.
+_OPENAI_MAX_TOKENS = 1536
+
+
 def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
     """JSON-object extraction against Azure OpenAI or a local endpoint."""
     client, model = _build_openai_client(provider)
@@ -283,7 +293,7 @@ def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
             {"role": "system", "content": _SYSTEM + _JSON_SUFFIX},
             {"role": "user", "content": brief},
         ],
-        max_tokens=512,
+        max_tokens=_OPENAI_MAX_TOKENS,
         temperature=0.0,  # extraction, not composition
     )
     text = (resp.choices[0].message.content or "").strip()

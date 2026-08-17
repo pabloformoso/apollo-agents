@@ -332,6 +332,32 @@ export default function LivePage() {
             </button>
           )}
 
+          {/* W3 (beatmatch feedback loop) — manual pitch-bend. The DJ nudges
+              the incoming deck earlier/later to fix a transition by ear; the
+              correction is the reinforcement signal that rides on the next
+              beatmatch_measurement. Operator-only (viewer WS writes no-op). */}
+          {!isViewer && (
+            <div className="flex items-center border border-line2" title="Pitch-bend the incoming track to fix a transition by ear — feeds the beatmatch learner">
+              <button
+                onClick={() => live.nudgePitch("earlier")}
+                disabled={!live.connected}
+                aria-label="Nudge incoming track earlier"
+                className="px-3 py-2 text-xs font-sans cursor-pointer text-mute hover:text-ember-text transition-colors"
+              >
+                ⟨ earlier
+              </button>
+              <span className="px-1 text-[10px] text-mute select-none">bend</span>
+              <button
+                onClick={() => live.nudgePitch("later")}
+                disabled={!live.connected}
+                aria-label="Nudge incoming track later"
+                className="px-3 py-2 text-xs font-sans cursor-pointer text-mute hover:text-ember-text transition-colors"
+              >
+                later ⟩
+              </button>
+            </div>
+          )}
+
           {/* v2.7 — YouTube Live Chat ingest pill. Only renders when
               the backend has actually emitted a youtube_status event
               (state !== "off"), which means YT is configured server-side

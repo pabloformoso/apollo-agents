@@ -38,6 +38,7 @@ import type { Phase, ServerEvent, SessionState } from "@/lib/types";
 import { Shell } from "@/components/ember/Shell";
 import { Arrow, Btn, Crumb } from "@/components/ember/primitives";
 
+import { playlistRowKey } from "@/lib/playlistKeys";
 // ---------------------------------------------------------------------------
 // Phase indicator
 // ---------------------------------------------------------------------------
@@ -236,7 +237,7 @@ function PlaylistPanel({ session }: { session: SessionState }) {
           <ul className="list-none m-0 p-0">
             {tracks.map((t, i) => (
               <li
-                key={t.id}
+                key={playlistRowKey(t.id, i)}
                 className="px-5 py-3 border-b border-line flex items-center gap-3"
               >
                 <span className="font-display italic text-lg text-faint w-7 text-right flex-shrink-0">
