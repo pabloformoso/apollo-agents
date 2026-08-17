@@ -487,3 +487,96 @@ def test_parse_handles_response_without_tool_use(monkeypatch):
 
     monkeypatch.setattr(anthropic, "Anthropic", _Client, raising=False)
     assert parse("anything") == _empty()
+
+
+# ─── OpenAI-compatible token budget ──────────────────────────────────
+#
+# Regression guard for 2026-08-17: swapping the local endpoint to
+# gemma4:12b-it-qat on Ollama broke free-text briefs in production. The
+# model reasons before emitting content, so the old 512-token ceiling was
+# spent thinking and the JSON object came back truncated mid-key. The
+# parser degraded to all-null exactly as designed — which is why nothing
+# crashed and nothing alerted.
+
+
+def _stub_openai(monkeypatch, reply: str, captured: dict):
+    """Point the ollama provider at a stub that records its call kwargs."""
+    import openai
+
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://stub:11434/v1")
+    monkeypatch.setenv("AGENT_MODEL", "stub-model")
+
+    class _Message:
+        content = reply
+
+    class _Choice:
+        message = _Message()
+
+    class _Response:
+        choices = [_Choice()]
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        def __init__(self, **_):
+            self.chat = _Chat()
+
+    monkeypatch.setattr(openai, "OpenAI", _Client, raising=False)
+
+
+def test_openai_path_requests_room_for_reasoning_preamble(monkeypatch):
+    """A reasoning model needed 502-523 tokens for this prompt; 512 truncated it."""
+    captured: dict = {}
+    _stub_openai(monkeypatch, '{"genre": "healing", "duration_min": 60}', captured)
+    parse("60 minutes of healing music")
+    assert captured["max_tokens"] >= 1024, (
+        "budget must clear the observed reasoning preamble with headroom"
+    )
+    assert captured["max_tokens"] == brief_parser._OPENAI_MAX_TOKENS
+
+
+def test_openai_path_parses_a_complete_object(monkeypatch):
+    captured: dict = {}
+    _stub_openai(
+        monkeypatch,
+        '{"genre": "Healing", "duration_min": 60, "mood": "tranquila", '
+        '"venue": null, "energy": null, "tempo": "auto"}',
+        captured,
+    )
+    assert parse("Sesion de 60 minutos de musica healing") == {
+        "genre": "healing",  # lowercased by _normalize
+        "duration_min": 60,
+        "mood": "tranquila",
+        "venue": None,
+        "energy": None,
+        "tempo": "auto",
+    }
+
+
+def test_openai_path_truncated_object_degrades_to_null(monkeypatch):
+    """The exact production symptom: a JSON object cut off mid-key.
+
+    It must stay a graceful all-null rather than raise — the endpoint
+    falls through to the genre guard, which asks the user directly.
+    """
+    captured: dict = {}
+    _stub_openai(
+        monkeypatch,
+        '{"genre": "healing", "duration_min": 90, "mood": "deep meditation", "venue": null',
+        captured,
+    )
+    assert parse("90-minute healing set") == _empty()
+
+
+def test_openai_path_empty_reply_degrades_to_null(monkeypatch):
+    """All budget spent on reasoning, zero characters of content."""
+    captured: dict = {}
+    _stub_openai(monkeypatch, "", captured)
+    assert parse("60 minutes of healing music") == _empty()
