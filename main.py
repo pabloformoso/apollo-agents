@@ -1444,11 +1444,21 @@ def _looks_like_legacy_filename(name: str | None) -> bool:
     return bool(_UUID_RE.search(name))
 
 
-def _attach_suno_metadata(entry: dict, audio_path: str) -> bool:
+def _attach_suno_metadata(entry: dict, audio_path: str, prefer_title: bool = False) -> bool:
     """Ensure entry has a `suno` block and a clean `display_name` if a sidecar exists.
 
     Works for any input extension (`.wav`, `.mp3`, ...). Returns True if
     entry was mutated.
+
+    By default the Suno title only replaces a `display_name` that is empty or
+    still embeds a UUID (`_looks_like_legacy_filename`) — that guard keeps us
+    from clobbering names on already-catalogued entries. Newer exports use
+    human-readable filenames (e.g. ``Healing-Amber_Bloom``) that aren't
+    "legacy" by that test, so a *fresh* entry would otherwise keep the raw
+    filename forever and show up on the video title with its genre prefix and
+    underscores intact. Pass ``prefer_title=True`` (build_catalog does, for new
+    entries) to always adopt the Suno title. A name a disambiguation pass has
+    already chosen (``suno.disambiguated``) is never overwritten.
     """
     mutated = False
     if "suno" not in entry:
@@ -1459,7 +1469,8 @@ def _attach_suno_metadata(entry: dict, audio_path: str) -> bool:
     suno = entry.get("suno") or {}
     title = suno.get("title")
     current = entry.get("display_name")
-    if title and (not current or _looks_like_legacy_filename(current)):
+    allow = prefer_title or not current or _looks_like_legacy_filename(current)
+    if title and allow and not suno.get("disambiguated"):
         if current != title:
             entry["display_name"] = title
             mutated = True
@@ -1717,7 +1728,7 @@ def build_catalog():
             "beatgrid": beatgrid,
             "waveform_peaks": waveform_peaks,
         }
-        _attach_suno_metadata(new_entry, audio_path)
+        _attach_suno_metadata(new_entry, audio_path, prefer_title=True)
         updated[rel_path] = new_entry
         new_count += 1
 
