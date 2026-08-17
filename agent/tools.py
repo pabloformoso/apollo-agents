@@ -91,6 +91,12 @@ _BPM_GENRE_RANGES = {
     "techno": (120, 160),
     "cyberpunk": (120, 160),
     "deep house": (115, 135),
+    # Keep in sync with ``BPM_GENRE_RANGES`` in main.py. Only used here to
+    # scale the energy curve, so a missing genre degrades to the (60, 200)
+    # fallback rather than crashing — but for a 50-100 BPM genre that
+    # fallback flattens every track to near-zero energy and the arranger
+    # can no longer tell a drone from a build.
+    "healing": (50, 100),
 }
 
 
@@ -967,6 +973,7 @@ GENRE_THEMES: dict[str, dict] = {
     "deep house": {"artwork_style": "deep-house-neon", "title_color": "#6A5AFF"},
     "techno": {"artwork_style": "dark-techno", "title_color": "#FF1744"},
     "cyberpunk": {"artwork_style": "dark-techno", "title_color": "#00FF88"},
+    "healing": {"artwork_style": "healing-aura", "title_color": "#9FE0D0"},
 }
 
 

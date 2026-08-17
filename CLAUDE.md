@@ -117,13 +117,42 @@ Defined in `GENRE_THEMES` dict in `main.py`. Each genre has: `artwork_style`,
 `title_color`, `title_stroke_color`, `bg_color`, `waveform_color`, `particle_color`.
 
 Available `artwork_style` values: `abstract`, `realistic`, `anime`,
-`dystopic-calm`, `dark-techno`, `organic-zen`, `deep-house-neon`.
+`dystopic-calm`, `dark-techno`, `organic-zen`, `deep-house-neon`,
+`healing-aura`.
+
+An unknown `artwork_style` falls back to `abstract` **silently**, so a typo
+costs a whole session's artwork before anyone notices — `tests/test_genre_healing.py`
+asserts every `GENRE_THEMES` entry points at a real `ARTWORK_PROMPTS` key.
 
 ## Adding a new genre
 
 1. Create `tracks/<genre-name>/` and add WAV files
-2. Run `python main.py --build-catalog`
-3. Optionally add a theme entry to `GENRE_THEMES` in `main.py`
+2. Add a `BPM_GENRE_RANGES` entry in `main.py` **before** building the catalog.
+   This is not optional for slow or beatless material: librosa locks onto
+   2-4× the real pulse on drones and pads, and the range drives the octave
+   ladder that corrects it. Make the window exactly one octave wide
+   (`hi == 2 * lo`) so only one rung of the ladder can qualify. A genre with
+   no range gets its raw detection stored verbatim, which poisons BPM
+   matching for every set that touches it.
+3. Run `python main.py --build-catalog` (see the Docker note below — madmom
+   is not installed on the host)
+4. Add a theme entry to `GENRE_THEMES` in `main.py`, and a new
+   `ARTWORK_PROMPTS` template if no existing style fits
+5. Mirror the genre into `agent/tools.py` — it keeps its **own copies** of
+   `_BPM_GENRE_RANGES` and `GENRE_THEMES` for the web render endpoint and the
+   playlist energy curve. These have drifted from `main.py` before; a missing
+   entry degrades silently rather than raising
+
+`--build-catalog` needs madmom, which only exists in the backend image. Run it
+detached so it survives the host shell, layering worktree code over the main
+checkout:
+
+```bash
+docker compose run -d --no-deps --name apollo-build -v "$PWD/main.py:/app/main.py" backend python main.py --build-catalog
+```
+
+It is strictly serial (~1-2 min/track) and writes `tracks.json` **only at the
+very end** — back the catalog up first, an interrupted run loses everything.
 
 ## Agent tool conventions
 

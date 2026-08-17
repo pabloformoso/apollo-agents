@@ -175,6 +175,14 @@ ARTWORK_PROMPTS = {
         "Intimate, hypnotic, warm darkness. Film grain, shallow depth of field, "
         "shot on Leica M10, 50mm f/1.4. No text, no people."
     ),
+    "healing-aura": (
+        "Serene meditative scene evoking '{track_name}' — deep stillness and slow breath. "
+        "Mist over glassy water at first light, smooth balanced stones, pale jade and soft "
+        "aqua tones bleeding into warm ivory, a single shaft of diffused light through fog. "
+        "Weightless, spacious, unhurried — nothing sharp, nothing urgent. "
+        "Soft focus, gentle gradients, natural light only. "
+        "Shot on Hasselblad, 80mm lens, high-key soft grading. No text, no people."
+    ),
 }
 
 # Video backgrounds (looped clips instead of AI artwork)
@@ -245,6 +253,16 @@ BPM_GENRE_RANGES = {
     # late-night ballads; upper bound 140 catches the faster fusion /
     # acid-jazz end without colliding with deep house territory.
     "soul jazz": (75, 140),
+    # Healing — binaural meditation drones, flute and chime beds. These
+    # have no percussive transient for librosa to lock onto, so it
+    # routinely reads them at 3-4x their real pulse (a 58 BPM drone
+    # detected as 232). The window is deliberately exactly one octave
+    # wide (50→100, a 2:1 ratio) so at most one rung of the octave
+    # ladder can land inside it — a wider window would let two
+    # candidates qualify and the midpoint tie-break would pick
+    # arbitrarily. Without this range these tracks get tagged at techno
+    # tempo and poison BPM matching for the whole set.
+    "healing": (50, 100),
 }
 
 # Default themes per genre folder for smart-generated sessions
@@ -327,6 +345,23 @@ GENRE_THEMES = {
         "waveform_color": [217, 142, 59],
         "particle_color": [240, 180, 100],
         "bg_darken": 0.8,
+        "title_font_size": 32,
+    },
+    # Healing — binaural meditation / spa. Soft jade title over a deep
+    # teal-black backdrop, pale mint particles. Gets its own
+    # ``healing-aura`` artwork preset rather than borrowing
+    # ``organic-zen``: that one is warm desert / golden hour, which
+    # fights the cool high-key stillness this genre is going for.
+    # ``bg_darken`` is high (0.85) because the artwork is deliberately
+    # bright — without it the pale backdrop swallows the title.
+    "healing": {
+        "artwork_style": "healing-aura",
+        "title_color": "#9FE0D0",
+        "title_stroke_color": "#0C2A2A",
+        "bg_color": [8, 18, 22],
+        "waveform_color": [159, 224, 208],
+        "particle_color": [200, 240, 230],
+        "bg_darken": 0.85,
         "title_font_size": 32,
     },
 }
