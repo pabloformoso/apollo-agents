@@ -73,6 +73,8 @@ if _PROVIDER_ENV == "anthropic" or (_HAS_ANTHROPIC and not _PROVIDER_ENV):
     _PROVIDER = "anthropic"
 elif _PROVIDER_ENV == "azure" or (_HAS_AZURE and not _PROVIDER_ENV):
     _PROVIDER = "azure"
+elif _PROVIDER_ENV == "litellm" or (os.getenv("LITELLM_BASE_URL") and not _PROVIDER_ENV):
+    _PROVIDER = "litellm"
 elif _PROVIDER_ENV == "ollama":
     _PROVIDER = "ollama"
 else:
@@ -81,9 +83,17 @@ else:
 _DEFAULT_MODELS = {
     "anthropic": "claude-opus-4-6",
     "azure": os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
+    "litellm": "qwen3.6-27b",
     "ollama": "gemma4:4b",
 }
 _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODELS.get(_PROVIDER, "claude-opus-4-6"))
+
+
+def _openai_compat_config() -> tuple[str, str]:
+    """Return (base_url, api_key) for the OpenAI-compatible providers."""
+    if _PROVIDER == "litellm":
+        return os.environ["LITELLM_BASE_URL"], os.getenv("LITELLM_API_KEY", "sk-litellm")
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "ollama"
 
 # ---------------------------------------------------------------------------
 # Phase tool lists (web-safe: no local playback tools)
@@ -565,17 +575,18 @@ async def _run_openai_streaming(
     emit: Callable,
     max_turns: int,
     base_url: str | None = None,
+    api_key: str = "ollama",
 ) -> str:
     """Streaming runner for OpenAI-compatible APIs.
 
-    When base_url is set, uses AsyncOpenAI (currently only Ollama).
-    Otherwise constructs an AsyncAzureOpenAI client.
+    When base_url is set, uses AsyncOpenAI (Ollama, LM Studio, or a
+    LiteLLM proxy). Otherwise constructs an AsyncAzureOpenAI client.
     """
     import json as _json  # noqa: PLC0415
 
     if base_url:
         from openai import AsyncOpenAI  # noqa: PLC0415
-        client = AsyncOpenAI(base_url=base_url, api_key="ollama")
+        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
     else:
         client = _build_async_azure_client()
     schemas = _build_openai_schemas(tool_fns)
@@ -693,9 +704,9 @@ async def run_agent_streaming(
     """Dispatch to the streaming runner for the configured provider."""
     if _PROVIDER == "anthropic":
         return await _run_anthropic_streaming(system, tool_fns, messages, ctx, emit, max_turns)
-    if _PROVIDER == "ollama":
-        base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-        return await _run_openai_streaming(system, tool_fns, messages, ctx, emit, max_turns, base_url=base)
+    if _PROVIDER in ("ollama", "litellm"):
+        base, key = _openai_compat_config()
+        return await _run_openai_streaming(system, tool_fns, messages, ctx, emit, max_turns, base_url=base, api_key=key)
     return await _run_openai_streaming(system, tool_fns, messages, ctx, emit, max_turns)
 
 

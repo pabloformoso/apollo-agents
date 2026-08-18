@@ -10,10 +10,11 @@ Agents (in order):
   6. Editor REPL    — interactive editing until build
   7. Validator      — auto-triggered after build_session; analyses audio quality
 
-Supports Anthropic, Azure OpenAI, and Ollama — auto-detected from .env:
+Supports Anthropic, Azure OpenAI, LiteLLM, and Ollama — auto-detected from .env:
   ANTHROPIC_API_KEY       → Claude (default: claude-opus-4-6)
   AZURE_OPENAI_API_KEY    → Azure OpenAI (deployment from AZURE_OPENAI_DEPLOYMENT)
-  AGENT_PROVIDER=ollama   → local Ollama (default: gemma4:4b)
+  AGENT_PROVIDER=litellm  → LiteLLM proxy (LITELLM_BASE_URL + LITELLM_API_KEY)
+  AGENT_PROVIDER=ollama   → local Ollama / LM Studio (default: gemma4:4b)
 
 Override: AGENT_MODEL=gpt-4o-mini python agent/run.py
 """
@@ -87,6 +88,8 @@ if not _PROVIDER:
         _PROVIDER = "anthropic"
     elif _HAS_AZURE:
         _PROVIDER = "azure"
+    elif os.getenv("LITELLM_BASE_URL"):
+        _PROVIDER = "litellm"
     elif os.getenv("OLLAMA_BASE_URL") or _ollama_running():
         _PROVIDER = "ollama"
     else:
@@ -95,9 +98,17 @@ if not _PROVIDER:
 _DEFAULT_MODEL = {
     "anthropic": "claude-opus-4-6",
     "azure": os.getenv("AZURE_OPENAI_DEPLOYMENT", ""),
+    "litellm": "qwen3.6-27b",
     "ollama": "gemma4:4b",
 }.get(_PROVIDER, "claude-opus-4-6")
 _MODEL = os.getenv("AGENT_MODEL", _DEFAULT_MODEL)
+
+
+def _openai_compat_config() -> tuple[str, str]:
+    """Return (base_url, api_key) for the OpenAI-compatible providers."""
+    if _PROVIDER == "litellm":
+        return os.environ["LITELLM_BASE_URL"], os.getenv("LITELLM_API_KEY", "sk-litellm")
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"), "ollama"
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -433,7 +444,7 @@ def run_agent(
     tool_index = {fn.__name__: fn for fn in tool_fns}
     if _PROVIDER == "anthropic":
         return _run_agent_anthropic(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
-    if _PROVIDER == "ollama":
+    if _PROVIDER in ("ollama", "litellm"):
         return _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
     return _run_agent_azure(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns)
 
@@ -469,10 +480,10 @@ def _run_agent_anthropic(system_prompt, tool_fns, tool_index, messages, context_
 
 
 def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns):
-    """Run agent against a local Ollama instance using the OpenAI-compatible API."""
+    """Run agent against an OpenAI-compatible endpoint (Ollama, LM Studio, or LiteLLM)."""
     from openai import OpenAI
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
-    client = OpenAI(base_url=base_url, api_key="ollama")  # key unused by Ollama
+    base_url, api_key = _openai_compat_config()
+    client = OpenAI(base_url=base_url, api_key=api_key)
     schemas = _build_openai_schemas(tool_fns)
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     final_text = ""
@@ -1269,10 +1280,13 @@ def _orchestrate() -> None:
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    if _PROVIDER == "ollama":
-        print(f"[Provider: Ollama / {_MODEL}]")
+    if _PROVIDER == "litellm" and not os.getenv("LITELLM_BASE_URL"):
+        print("Error: AGENT_PROVIDER=litellm requires LITELLM_BASE_URL in .env")
+        sys.exit(1)
+    if _PROVIDER in ("ollama", "litellm"):
+        print(f"[Provider: {_PROVIDER} / {_MODEL}]")
     elif not _HAS_ANTHROPIC and not _HAS_AZURE:
-        print("Error: set ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY, or AGENT_PROVIDER=ollama in .env")
+        print("Error: set ANTHROPIC_API_KEY, AZURE_OPENAI_API_KEY, or AGENT_PROVIDER=ollama|litellm in .env")
         sys.exit(1)
     _orchestrate()
 
