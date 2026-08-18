@@ -30,6 +30,8 @@ _PROVIDER_ENV = (
     "AZURE_OPENAI_API_KEY",
     "AZURE_OPENAI_ENDPOINT",
     "AZURE_OPENAI_DEPLOYMENT",
+    "LITELLM_BASE_URL",
+    "LITELLM_API_KEY",
     "OLLAMA_BASE_URL",
     "AGENT_MODEL",
 )
@@ -226,6 +228,37 @@ def test_anthropic_key_outranks_azure_key(monkeypatch):
 def test_falls_back_to_local_endpoint(monkeypatch):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://100.68.5.104:1234/v1")
     assert detect_provider() == "ollama"
+
+
+def test_falls_back_to_litellm_endpoint(monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.org/v1")
+    assert detect_provider() == "litellm"
+
+
+def test_litellm_endpoint_outranks_ollama_endpoint(monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.org/v1")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+    assert detect_provider() == "litellm"
+
+
+def test_litellm_client_uses_proxy_url_and_key(monkeypatch):
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.org/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "sk-team")
+    client, model = _build_openai_client("litellm")
+    assert str(client.base_url).startswith("https://litellm.example.org/v1")
+    assert client.api_key == "sk-team"
+    assert model == "qwen3.6-27b"
+
+
+def test_litellm_client_agent_model_override(monkeypatch):
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.org/v1")
+    monkeypatch.setenv("AGENT_MODEL", "qwen-next")
+    _client, model = _build_openai_client("litellm")
+    assert model == "qwen-next"
 
 
 def test_nothing_configured_defaults_to_anthropic():

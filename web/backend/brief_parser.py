@@ -135,6 +135,8 @@ def detect_provider() -> str:
         return "anthropic"
     if os.environ.get("AZURE_OPENAI_API_KEY"):
         return "azure"
+    if os.environ.get("LITELLM_BASE_URL"):
+        return "litellm"
     if os.environ.get("OLLAMA_BASE_URL"):
         return "ollama"
     return "anthropic"
@@ -252,6 +254,8 @@ def _build_openai_client(provider: str):
 
     ``ollama`` is the generic OpenAI-compatible path (it is what serves
     LM Studio over the Tailscale node), not Ollama specifically.
+    ``litellm`` is the same path pointed at the team's LiteLLM proxy,
+    which does validate its API key.
     """
     if provider == "azure":
         from openai import AzureOpenAI  # noqa: PLC0415
@@ -263,12 +267,16 @@ def _build_openai_client(provider: str):
         )
         return client, os.getenv("AZURE_OPENAI_DEPLOYMENT", "")
     from openai import OpenAI  # noqa: PLC0415
-    client = OpenAI(
-        base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1"),
-        api_key="ollama",  # key is unused by Ollama / LM Studio
-        timeout=TIMEOUT_SEC,
-    )
-    return client, os.getenv("AGENT_MODEL", "gemma4:4b")
+    if provider == "litellm":
+        base_url = os.environ["LITELLM_BASE_URL"]
+        api_key = os.getenv("LITELLM_API_KEY", "sk-litellm")
+        default_model = "qwen3.6-27b"
+    else:
+        base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        api_key = "ollama"  # key is unused by Ollama / LM Studio
+        default_model = "gemma4:4b"
+    client = OpenAI(base_url=base_url, api_key=api_key, timeout=TIMEOUT_SEC)
+    return client, os.getenv("AGENT_MODEL", default_model)
 
 
 #: The JSON payload itself is ~80 tokens, but a reasoning model spends its

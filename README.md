@@ -224,7 +224,7 @@ flowchart TD
 - **Session memory** — agents learn from past sessions: which tracks get swapped, what energy arcs rate highly
 - **Catalog management** — scan new WAVs, detect missing BPM/key fields, keep tracks.json in sync
 - **Live Mode** — Apollo DJs in real time: autonomous crossfade decisions, responds to `next`, `stay`, `more energetic`, `wind down` mid-set
-- **Multi-provider** — Claude (Anthropic), GPT-4o (OpenAI), or any local model via Ollama; auto-detected from `.env`
+- **Multi-provider** — Claude (Anthropic), GPT-4o (OpenAI), a LiteLLM proxy, or any local model via Ollama / LM Studio; auto-detected from `.env`
 - **1080p video output** — spectral waveform visualizer, beat-reactive particles, DALL-E 3 artwork, retro pixel titles
 - **YouTube Short** — auto-generated 20s teaser alongside the full mix
 - **Web UI (v2.6 *Ember*)** — flat-routed Next.js client: Brief → Curate → Editor → Render / Live. Single-viewport splash, animated waveform, transition-incoming countdown, OBS-friendly broadcast feed with one-click auth hand-off
@@ -272,6 +272,9 @@ python main.py --regenerate-beatgrid --force   # re-analyse everything
 | `AZURE_OPENAI_IMAGE_API_KEY` | Optional | Image resource key if different from chat; falls back to `AZURE_OPENAI_API_KEY` |
 | `AZURE_OPENAI_API_VERSION` | Optional | Chat API version (default `2024-10-21`) |
 | `AZURE_OPENAI_IMAGE_API_VERSION` | Optional | Image API version (default `2024-02-01`) |
+| `AGENT_PROVIDER=litellm` | One of these | Use a LiteLLM proxy (default model: `qwen3.6-27b`) |
+| `LITELLM_BASE_URL` | With LiteLLM | OpenAI-compatible endpoint, e.g. `https://litellm.cloudpunk.org/v1` |
+| `LITELLM_API_KEY` | With LiteLLM | LiteLLM virtual/master key |
 | `AGENT_PROVIDER=ollama` | One of these | Use a local Ollama model (default: `gemma4:4b`) |
 | `OLLAMA_BASE_URL` | Optional | Override the local OpenAI-compatible endpoint (default: `http://localhost:11434/v1`). Also the knob for LM Studio — point it at the server's IP, not `localhost`, when the backend runs in Docker or the server sits on another host |
 | `AGENT_MODEL` | Optional | Override the model for any provider |
@@ -320,6 +323,9 @@ uv run python agent/run.py
 
 # Local model via Ollama (no API key required)
 AGENT_PROVIDER=ollama uv run python agent/run.py
+
+# Shared LiteLLM proxy (model name as registered in the proxy)
+AGENT_PROVIDER=litellm AGENT_MODEL=qwen3.6-27b uv run python agent/run.py
 
 # Override model for any provider
 AGENT_MODEL=claude-haiku-4-5-20251001 uv run python agent/run.py
