@@ -35,6 +35,7 @@ from agent.run import (  # noqa: E402
     _run_tool,
     enforce_mentioned_genre,
     genre_guard_system,
+    ControlTokenFilter,
     parse_textual_tool_call,
 )
 
@@ -586,6 +587,10 @@ async def _run_openai_streaming(
 
     for turn in range(max_turns):
         full_text = ""
+        # Strip chat-template control tokens BEFORE they reach the overlay.
+        # gemma4:12b-it-qat leaks a bare ``<|tool_response>`` as its whole
+        # visible answer, and this text streams live to the on-stream chat.
+        ctl = ControlTokenFilter()
         tool_calls_acc: dict[int, dict] = {}
 
         stream = await client.chat.completions.create(
@@ -600,8 +605,10 @@ async def _run_openai_streaming(
             if not delta:
                 continue
             if delta.content:
-                full_text += delta.content
-                await emit({"type": "text_delta", "content": delta.content})
+                safe = ctl.feed(delta.content)
+                if safe:
+                    full_text += safe
+                    await emit({"type": "text_delta", "content": safe})
             if delta.tool_calls:
                 for tc in delta.tool_calls:
                     idx = tc.index
@@ -612,6 +619,11 @@ async def _run_openai_streaming(
                             tool_calls_acc[idx]["name"] += tc.function.name
                         if tc.function.arguments:
                             tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+        tail = ctl.flush()
+        if tail:
+            full_text += tail
+            await emit({"type": "text_delta", "content": tail})
 
         if tool_calls_acc:
             tc_list = [
