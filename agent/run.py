@@ -23,6 +23,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -495,7 +496,9 @@ def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_var
         response = client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
-        final_text = msg.content or ""
+        # Same leak as the streaming loop: a reasoning model can answer
+        # with nothing but a chat-template control token.
+        final_text = strip_control_tokens(msg.content)
 
         if not tool_calls:
             # v3.6.4 — textual-tool-call shim. Small local models often
@@ -667,6 +670,61 @@ def enforce_mentioned_genre(
         flush=True,
     )
     return corrected
+
+
+# Chat-template control tokens that some local models leak into their
+# visible answer. Observed live 2026-08-17 with gemma4:12b-it-qat on
+# Ollama: 6 of 7 non-empty DJ turns were the literal string
+# ``<|tool_response>`` and nothing else, which the live loop streams
+# straight to the on-stream chat overlay. The same family of leak is
+# noted for ``meta/muse-glimmer`` (``to=self<|message|>``).
+#
+# Matches both spellings — ``<|tool_response>`` and ``<|message|>`` —
+# without swallowing ordinary prose that merely contains ``<`` or ``>``.
+_CONTROL_TOKEN_RE = re.compile(r"<\|[^<>]*>")
+
+
+def strip_control_tokens(text: str | None) -> str:
+    """Remove chat-template control tokens from a model's visible text."""
+    if not text:
+        return ""
+    return _CONTROL_TOKEN_RE.sub("", text)
+
+
+class ControlTokenFilter:
+    """Streaming-safe version of :func:`strip_control_tokens`.
+
+    A control token can straddle two stream chunks (``<|tool`` + ``_response>``),
+    so stripping each delta in isolation would let the halves through. This
+    holds back a trailing fragment that could still grow into a token and
+    releases it on the next ``feed`` or on ``flush``.
+
+    Only a tail that is ``<`` or starts with ``<|`` is held, so prose like
+    ``a < b`` streams without delay.
+    """
+
+    def __init__(self) -> None:
+        self._pending = ""
+
+    def feed(self, chunk: str | None) -> str:
+        """Return the text from ``chunk`` that is safe to emit now."""
+        if not chunk:
+            return ""
+        cleaned = _CONTROL_TOKEN_RE.sub("", self._pending + chunk)
+        idx = cleaned.rfind("<")
+        if idx != -1:
+            tail = cleaned[idx:]
+            if ">" not in tail and (tail == "<" or tail.startswith("<|")):
+                self._pending = tail
+                return cleaned[:idx]
+        self._pending = ""
+        return cleaned
+
+    def flush(self) -> str:
+        """Release whatever was held back; it never became a token."""
+        out = _CONTROL_TOKEN_RE.sub("", self._pending)
+        self._pending = ""
+        return out
 
 
 def parse_textual_tool_call(
