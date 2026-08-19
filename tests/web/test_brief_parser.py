@@ -613,3 +613,45 @@ def test_openai_path_empty_reply_degrades_to_null(monkeypatch):
     captured: dict = {}
     _stub_openai(monkeypatch, "", captured)
     assert parse("60 minutes of healing music") == _empty()
+
+
+# ─── token budget and timeout, calibrated per model ──────────────────
+#
+# Two calibrations, two failures, same file:
+#   2026-08-17  gemma4:12b-it-qat needed 502-523 tokens; the ceiling was
+#               512, so the JSON came back truncated mid-key.
+#   2026-08-18  qwen3.6-27b behind LiteLLM needs ~2010 — four times that
+#               — and at 1536 returned finish_reason="length" with an
+#               EMPTY body, so there was not even a partial object to
+#               salvage. It also took 29.5 s against a 30 s timeout.
+#
+# Both failures are silent by design: parse() degrades to all-null and
+# the endpoint falls through to the genre guard. These tests are the only
+# thing that makes the budget visible.
+
+
+def test_token_budget_covers_the_measured_reasoning_preamble():
+    """3072 clears qwen3.6's ~2010 with headroom for a slower model."""
+    assert brief_parser._OPENAI_MAX_TOKENS >= 2560
+
+
+def test_timeout_clears_the_measured_worst_case():
+    """qwen3.6 measured 29.5s; a 30s bound made the parse a coin flip."""
+    assert brief_parser.TIMEOUT_SEC >= 40.0
+
+
+def test_timeout_stays_bounded():
+    """The call blocks a session POST — it must not become unbounded.
+
+    Past ~a minute the user is better served by the conversational genre
+    guard than by a spinner, so a model needing more is the wrong model
+    for this path rather than a reason to raise the bound again.
+    """
+    assert brief_parser.TIMEOUT_SEC <= 60.0
+
+
+def test_openai_path_uses_the_configured_budget(monkeypatch):
+    captured: dict = {}
+    _stub_openai(monkeypatch, '{"genre": "healing", "duration_min": 60}', captured)
+    parse("60 minutes of healing music")
+    assert captured["max_tokens"] == brief_parser._OPENAI_MAX_TOKENS

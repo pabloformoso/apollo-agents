@@ -31,6 +31,7 @@ tool-call test inside budget, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 import time
@@ -196,6 +197,16 @@ def main() -> int:
         help="OpenAI-compatible endpoint (LM Studio default port 1234).",
     )
     parser.add_argument(
+        "--api-key",
+        default=os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio",
+        help=(
+            "API key for the endpoint. Local servers ignore it; a LiteLLM "
+            "proxy rejects anything that is not its virtual key (401, "
+            "'expected to start with sk-'). Defaults to LITELLM_API_KEY, "
+            "then OPENAI_API_KEY, then the historical 'lm-studio' literal."
+        ),
+    )
+    parser.add_argument(
         "--models",
         nargs="*",
         default=None,
@@ -203,7 +214,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    client = OpenAI(base_url=args.base_url, api_key="lm-studio", timeout=120.0)
+    client = OpenAI(base_url=args.base_url, api_key=args.api_key, timeout=120.0)
 
     models = args.models
     if not models:

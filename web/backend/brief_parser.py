@@ -47,7 +47,15 @@ MODEL = "claude-haiku-4-5-20251001"
 # call blocks a session POST via ``asyncio.to_thread``, so it needs a
 # bound: past this the user is better served by the conversational
 # genre-guard than by a spinner.
-TIMEOUT_SEC = 30.0
+#
+# Raised 30 -> 45 on 2026-08-18. qwen3.6-27b behind the LiteLLM proxy
+# measured 29.5 s on this prompt — half a second under the old bound, so
+# the parse was a coin flip between a good answer and a timeout. This is
+# a deliberate UX trade: a longer spinner in exchange for a brief that
+# actually parses. If a model ever needs more than this, it is the wrong
+# model for a request-blocking path, not a reason to raise the bound
+# again.
+TIMEOUT_SEC = 45.0
 
 _VALID_ENERGY = {"plateau", "with peak", "building", "descending"}
 _VALID_VENUES = {
@@ -286,7 +294,12 @@ def _build_openai_client(provider: str):
 #: returned None — every free-text brief silently parsed to all-null. This is
 #: a ceiling, not a target: non-reasoning models still stop at ~80 tokens and
 #: pay nothing for the headroom.
-_OPENAI_MAX_TOKENS = 1536
+#:
+#: Raised 1536 -> 3072 on 2026-08-18: qwen3.6-27b (LiteLLM proxy) spends
+#: ~2010 tokens on this prompt, four times what gemma4 needed, and at 1536
+#: returned finish_reason="length" with an EMPTY body — not even a partial
+#: object to salvage.
+_OPENAI_MAX_TOKENS = 3072
 
 
 def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
