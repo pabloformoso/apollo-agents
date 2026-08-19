@@ -1282,7 +1282,12 @@ async def phase_live(
     # assignments — eventual consistency within a watchdog tick is fine.
     engine._endless_mode = bool(ctx.get("endless_mode", False))
 
-    engine.play(playlist)
+    # v3.7 — resume where the previous websocket left off. The engine is
+    # built per connection, so without this a browser reload restarts the
+    # whole set at track 0 (observed live 2026-08-17 at track 10). The WS
+    # handler keeps ``_live_idx`` current as track_started events fire;
+    # out-of-range values are clamped inside play().
+    engine.play(playlist, start_idx=int(ctx.get("_live_idx") or 0))
     try:
         await live_dj.run_live_session_async(
             playlist, ctx, engine, emit, inner_queue

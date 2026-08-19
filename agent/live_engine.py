@@ -1172,6 +1172,32 @@ class LiveEngineLocal:
 # LiveEngineBrowser — v2.5.1 web-mode implementation
 # ---------------------------------------------------------------------------
 
+def resolve_resume_index(
+    playlist_ids: list[str | None], resume_id: str | None
+) -> int:
+    """Position to resume a live set at, given the track it last played.
+
+    The live engine is constructed per websocket, so a browser reload has
+    to be told where the set was or it starts over (observed live
+    2026-08-17: a tab drop at track 10 restarted at track 0).
+
+    Resolution is by TRACK ID, never by a stored index. An index is only
+    meaningful against the exact playlist that produced it, and the
+    playlist can be reordered, edited or replaced between connections; a
+    stale index would resume on the wrong track without any signal. An id
+    either still exists in the current playlist or it does not.
+
+    Returns 0 when there is nothing to resume, when the id is unknown, or
+    when the playlist is empty — starting over is the honest fallback.
+    """
+    if not resume_id or not playlist_ids:
+        return 0
+    try:
+        return playlist_ids.index(resume_id)
+    except ValueError:
+        return 0
+
+
 class LiveEngineBrowser:
     """LiveEngine implementation where audio plays in the browser.
 
@@ -1281,23 +1307,37 @@ class LiveEngineBrowser:
     # Public API (matches LiveEngineProtocol)
     # ------------------------------------------------------------------
 
-    def play(self, playlist: list[dict] | None = None) -> None:
+    def play(
+        self, playlist: list[dict] | None = None, start_idx: int = 0
+    ) -> None:
         """Start the browser-driven playback session.
 
         Replaces any existing playlist with the new one. Emits
-        ``track_started`` for the first track and a ``cmd_load`` command so
-        the browser knows which track to load and play. If the playlist is
-        empty, emits ``session_ended`` and returns.
+        ``track_started`` for the track at ``start_idx`` and a ``cmd_load``
+        command so the browser knows which track to load and play. If the
+        playlist is empty, emits ``session_ended`` and returns.
+
+        ``start_idx`` exists because this engine is constructed PER
+        WEBSOCKET: a browser reload builds a new one and calls ``play()``
+        again. Starting unconditionally at 0 restarted the whole set on
+        every reconnect — observed live 2026-08-17, where a tab drop at
+        track 10 took the stream back to track 0. The caller passes the
+        last known position so a reconnect resumes instead.
+
+        Out-of-range values are clamped rather than raising: the stored
+        position can outlive an edit that shortened the playlist, and a
+        live set must not die because a resume hint went stale.
         """
         if playlist is not None:
             self.playlist = list(playlist)
         if not self.playlist:
             self._emit(SESSION_ENDED)
             return
+        start_idx = max(0, min(int(start_idx or 0), len(self.playlist) - 1))
 
         with self._lock:
             self._state = "playing"
-            self._idx = 0
+            self._idx = start_idx
             self._reported_pos_sec = 0.0
             self._approached = False
             self._cf_triggered = False
@@ -1315,7 +1355,7 @@ class LiveEngineBrowser:
             self._track_started_mono = time.monotonic()
             self._last_pos_change_mono = None
 
-        first = self.playlist[0]
+        first = self.playlist[start_idx]
         # v3.0 — build the phase-lock plan for the first → second
         # transition BEFORE we read cf_point_sec, otherwise the first
         # TRACK_STARTED event would carry the legacy fallback cut point.

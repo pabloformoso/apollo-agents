@@ -1135,7 +1135,41 @@ async def live_session_ws(
     # so the agent sees one ordered stream of events + user commands.
     command_queue: asyncio.Queue = asyncio.Queue()
 
+    # v3.7 — resume support. The engine is built PER WEBSOCKET, so a
+    # browser reload previously restarted the set at track 0 (observed
+    # live 2026-08-17: a tab drop at track 10 went back to track 0).
+    #
+    # We remember the TRACK ID rather than the index. The index is only
+    # meaningful against the exact playlist that produced it, and the
+    # playlist can be reordered, edited or replaced between connections —
+    # a stale index would then resume on the wrong track, silently. An id
+    # either resolves to a real position in the current playlist or it
+    # does not, in which case we start over honestly.
+    from agent.live_engine import resolve_resume_index  # noqa: PLC0415
+
+    _playlist_ids = [t.get("id") for t in playlist]
+    _resume_id = s.context_variables.get("_live_track_id")
+    s.context_variables["_live_idx"] = resolve_resume_index(
+        _playlist_ids, _resume_id
+    )
+    if s.context_variables["_live_idx"]:
+        print(
+            f"[live-ws {session_id}] resuming at #"
+            f"{s.context_variables['_live_idx'] + 1} ({_resume_id})",
+            flush=True,
+        )
+
     def engine_emitter(event: dict) -> None:
+        etype = event.get("type")
+        if etype == "track_started":
+            tid = (event.get("track") or {}).get("id")
+            if tid:
+                s.context_variables["_live_track_id"] = tid
+        elif etype == "session_ended":
+            # The set finished on its own terms; the next play() is a new
+            # set and must start at the top, not resume the old ending.
+            s.context_variables.pop("_live_track_id", None)
+            s.context_variables["_live_idx"] = 0
         # Push into both the WS (so the browser sees it) and the agent
         # queue (so the live_dj loop reacts). The browser engine emits
         # synchronously from this same loop thread (no background watchdog),
