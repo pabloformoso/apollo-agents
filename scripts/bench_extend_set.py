@@ -419,6 +419,15 @@ def main() -> int:
         default=["google/gemma-4-e4b", "prism-ml/bonsai-27b"],
         help="Model ids to bench.",
     )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio",
+        help=(
+            "API key for the endpoint. Local servers ignore it; a LiteLLM "
+            "proxy 401s on anything that is not its virtual key. Defaults to "
+            "LITELLM_API_KEY, then OPENAI_API_KEY, then 'lm-studio'."
+        ),
+    )
     parser.add_argument("--trials", type=int, default=10, help="Trials per model.")
     parser.add_argument("--genre", default="aural", help="Session genre to fence to.")
     parser.add_argument(
@@ -449,9 +458,9 @@ def main() -> int:
 
     from openai import OpenAI  # noqa: PLC0415 — keeps import cost off --help
 
-    client = OpenAI(base_url=args.base_url, api_key="lm-studio", timeout=180.0)
+    client = OpenAI(base_url=args.base_url, api_key=args.api_key, timeout=180.0)
 
-    probe = OpenAI(base_url=args.base_url, api_key="lm-studio", timeout=10.0)
+    probe = OpenAI(base_url=args.base_url, api_key=args.api_key, timeout=10.0)
     ok, why = check_endpoint(probe, args.models)
     if not ok:
         print(f"endpoint : {args.base_url}")
