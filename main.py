@@ -244,6 +244,15 @@ DEFAULT_THEME = {
     "waveform_color": list(SPECTRAL_PALETTE[0].astype(int)),
     "particle_color": list(PARTICLE_COLOR),
     "bg_darken": VIDEO_BG_DARKEN,
+    # Separate from bg_darken because the two backdrops need very
+    # different treatment: AI artwork is a dark, low-contrast still, while
+    # a video loop moves and can hold pure white highlights right behind
+    # the title. Measured on the first video render (2026-08-20): with the
+    # healing theme's artwork-tuned 0.85, stars behind the title peaked at
+    # luminance 254 against a title at 197 — brighter than the text meant
+    # to sit on top of them. A theme that does not set this inherits
+    # VIDEO_BG_DARKEN, which was always the video-appropriate value.
+    "video_bg_darken": VIDEO_BG_DARKEN,
     "artwork_style": "abstract",
 }
 
@@ -377,6 +386,11 @@ GENRE_THEMES = {
         "waveform_color": [159, 224, 208],
         "particle_color": [200, 240, 230],
         "bg_darken": 0.85,
+        # Brighter than the 0.35 default: the cosmic footage this genre
+        # uses is already dark outside its highlights, so 0.35 crushes it
+        # to mud. 0.45 keeps the nebula readable while pulling the star
+        # highlights below the title.
+        "video_bg_darken": 0.45,
         "title_font_size": 32,
     },
 }
@@ -3998,7 +4012,7 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
     if video_bg_list and session_dir:
         bg_cache_dir = os.path.join(os.path.dirname(output_path), "bg_cache")
         video_loops = _load_video_backgrounds(
-            video_bg_list, session_dir, darken=theme["bg_darken"],
+            video_bg_list, session_dir, darken=theme["video_bg_darken"],
             cache_dir=bg_cache_dir)
     else:
         # Generate and load artwork backgrounds (deduplicate by display name)
@@ -4024,7 +4038,7 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
             if loop_paths:
                 bg_cache_dir = os.path.join(os.path.dirname(output_path), "bg_cache")
                 video_loops = _load_video_backgrounds(
-                    loop_paths, ".", darken=theme["bg_darken"],
+                    loop_paths, ".", darken=theme["video_bg_darken"],
                     cache_dir=bg_cache_dir)
 
         if not video_loops:
