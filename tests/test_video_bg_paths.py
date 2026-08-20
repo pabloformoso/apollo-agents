@@ -20,10 +20,23 @@ import pytest
 import main
 
 
+def _ffmpeg_exe() -> str:
+    """Path to an ffmpeg binary that is guaranteed to exist.
+
+    CI runners have no system ffmpeg on PATH — they get the binary that
+    ships inside the ``imageio-ffmpeg`` wheel, which is also what moviepy
+    invokes. Calling a bare "ffmpeg" passes locally (the backend image
+    has one) and fails in CI with FileNotFoundError.
+    """
+    import imageio_ffmpeg
+
+    return imageio_ffmpeg.get_ffmpeg_exe()
+
+
 def _tiny_video(path, seconds=1, size=(64, 48), fps=8):
     """Render a throwaway clip so the loader has something real to open."""
     subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+        [_ffmpeg_exe(), "-y", "-v", "error", "-f", "lavfi",
          "-i", f"testsrc=size={size[0]}x{size[1]}:rate={fps}:duration={seconds}",
          "-pix_fmt", "yuv420p", str(path)],
         check=True,
