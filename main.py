@@ -188,6 +188,9 @@ ARTWORK_PROMPTS = {
 # Video backgrounds (looped clips instead of AI artwork)
 VIDEO_BG_LOOP_CROSSFADE = 1.0       # Seconds of crossfade for seamless loop
 VIDEO_BG_DARKEN = 0.35              # Brightness multiplier (darker = overlays more readable)
+# Frames processed per darkening pass. Bounds the float32 temporary to
+# ~250 MB no matter how long the clip is; see _predecode_video_loop.
+_DARKEN_CHUNK_FRAMES = 40
 
 # Beat-reactive particles
 PARTICLE_COUNT = 150
@@ -3422,6 +3425,32 @@ def _generate_video_loop_from_artwork(artwork_path, output_path, duration=10, fp
 
 # === Video background support ===
 
+def _darken_frames_inplace(frames, darken, chunk=None):
+    """Scale ``frames`` by ``darken`` in place, a chunk at a time.
+
+    This used to be a single expression::
+
+        frames = (frames.astype(np.float32) * darken).astype(np.uint8)
+
+    which materialises the WHOLE array as float32 (4x the bytes) plus
+    another full-size temporary for the product. On a 10 s 1080p clip
+    that is 1.25 GB -> 5.0 GB -> 5.0 GB, and the render was OOM-killed
+    with no traceback at all — the failure presented as a silent exit
+    with a zero status, not as a MemoryError, which is why it read like
+    the decode simply "did nothing".
+
+    Chunking bounds the temporary to a fixed slice regardless of clip
+    length. ``darken == 1.0`` is a no-op and skips the pass entirely.
+    """
+    if darken == 1.0:
+        return frames
+    step = chunk or _DARKEN_CHUNK_FRAMES
+    for i in range(0, len(frames), step):
+        view = frames[i:i + step]
+        view[:] = (view.astype(np.float32) * darken).astype(np.uint8)
+    return frames
+
+
 def _predecode_video_loop(path, crossfade_sec, target_size, fps, darken=VIDEO_BG_DARKEN):
     """Load a video clip, scale/crop to target_size, create a seamless loop.
 
@@ -3469,10 +3498,12 @@ def _predecode_video_loop(path, crossfade_sec, target_size, fps, darken=VIDEO_BG
     # Body: unmodified frames after the crossfade region
     loop_frames[n_xfade:] = all_frames[n_xfade:n_loop]
 
-    # Pre-apply darkening
-    loop_frames = (loop_frames.astype(np.float32) * darken).astype(np.uint8)
-
+    # Free the source BEFORE darkening — it is dead from here on, and
+    # holding 1.4 GB of it through the pass below is what tipped the
+    # process over on a 7.75 GB box.
     del all_frames
+
+    _darken_frames_inplace(loop_frames, darken)
     duration = n_loop / fps
     return loop_frames, duration
 
