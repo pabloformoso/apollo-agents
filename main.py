@@ -48,6 +48,18 @@ AUDIO_EXTENSIONS = (".mp3", ".wav", ".flac", ".m4a", ".ogg")
 CROSSFADE_SEC = 12          # Crossfade overlap duration
 TEMPO_RAMP_SEC = 16         # Gradual BPM adjustment after crossfade
 BPM_MATCH_THRESHOLD = 5     # BPM diff above which we meet in the middle
+
+# Above this BPM ratio a transition's time-stretch stops being
+# transparent. The mix meets in the middle, so a 1.12x gap moves each
+# side ~6%; rubberband hides that on percussive material and smears it
+# on sustained pads.
+#
+# Measured on healing 2026-08-20: 'Silver Bloom' sits at 52.1 BPM when
+# the next slowest track is 58.6 and the genre median is 65.4. It forced
+# 1.17x live, 1.23x on a 60-min render and 1.29x on a 25-min one — and
+# because the mix meets in the middle it drags its NEIGHBOUR off pitch
+# too, so one bad track spoils two transitions.
+MAX_STRETCH_RATIO = 1.12
 RAMP_STEPS = 24             # Granularity of tempo ramp (more = smoother)
 FADE_OUT_SEC = 5            # Fade-out at the very end of the mix
 
@@ -1910,6 +1922,47 @@ def fill_duration(ordered_tracks, duration_minutes):
     return playlist
 
 
+def enforce_stretch_cap(ordered_tracks, max_ratio=MAX_STRETCH_RATIO):
+    """Drop tracks that would force an audible time-stretch on a neighbour.
+
+    ``bpm_cluster`` groups against a median that MOVES as tracks join, so
+    a cluster's real span can far exceed its nominal +-10 BPM window — a
+    healing run reported "28 tracks, range 52-69 BPM". A lone slow
+    outlier therefore ends up adjacent to the fast end of the cluster and
+    the mix has to stretch across the whole gap.
+
+    Each candidate is compared against the last KEPT track rather than
+    the one before it in the list, so removing an outlier cannot cascade
+    into dropping the tracks that follow it.
+
+    Drops are printed, never silent: a shorter set with a reason beats a
+    full set that quietly sounds wrong.
+    """
+    kept = []
+    dropped = []
+    for track in ordered_tracks:
+        bpm = track.get("bpm") or 0
+        if not bpm:
+            kept.append(track)          # unknown BPM: not ours to judge
+            continue
+        if kept:
+            prev = kept[-1].get("bpm") or 0
+            if prev:
+                ratio = max(bpm, prev) / min(bpm, prev)
+                if ratio > max_ratio:
+                    dropped.append((track, prev, ratio))
+                    continue
+        kept.append(track)
+
+    for track, prev, ratio in dropped:
+        print(
+            f"  [stretch cap] dropped '{track['display_name']}' "
+            f"({track.get('bpm')} BPM): {ratio:.2f}x against "
+            f"{prev} BPM exceeds {max_ratio}x"
+        )
+    return kept
+
+
 def generate_session(name, genre, duration_minutes):
     """Select tracks for a session and return (session_config, track_entries).
 
@@ -1924,6 +1977,7 @@ def generate_session(name, genre, duration_minutes):
 
     cluster = bpm_cluster(catalog_tracks)
     ordered = harmonic_sort(cluster)
+    ordered = enforce_stretch_cap(ordered)
     playlist = fill_duration(ordered, duration_minutes)
 
     genre_theme = dict(GENRE_THEMES.get(genre.lower(), {}))
