@@ -3934,6 +3934,9 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
     envelope, env_sr, band_energies, beat_times = _precompute_audio_data(audio_path)
 
     # Determine background mode: video loops or static artwork
+    # Paths are relative to the project root, same convention as
+    # ``playlist[].file`` — e.g. "tracks/Healing/videos/drift.mp4".
+    # Absolute paths also work (os.path.join keeps them).
     video_bg_list = session_config.get("video_backgrounds") if session_config else None
     video_loops = None
     artwork_images = None
@@ -4188,7 +4191,7 @@ def main():
         genre = args.genre or session_config.get("genre", "")
         artwork_dir = get_artwork_dir(genre)
         generate_video(audio_path, transitions, video_path, artwork_dir=artwork_dir,
-                       session_config=session_config, session_dir=None)
+                       session_config=session_config, session_dir=_SCRIPT_DIR)
         generate_short(None, session_config, transitions, audio_path, artwork_dir, short_path)
         generate_youtube_md(session_name, genre, transitions, output_dir)
         return
@@ -4245,7 +4248,7 @@ def main():
         export_mix(mix, audio_path)
         validate_mix_file(audio_path, transitions)
         generate_video(audio_path, transitions, video_path, artwork_dir=artwork_dir,
-                       session_config=session_config, session_dir=None)
+                       session_config=session_config, session_dir=_SCRIPT_DIR)
         generate_short(None, session_config, transitions, audio_path, artwork_dir, short_path)
         generate_youtube_md(session_name, args.genre, transitions, output_dir, track_entries)
 
