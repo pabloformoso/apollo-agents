@@ -4046,10 +4046,23 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
             artwork_images = _load_artwork_images(
                 transitions, artwork_dir=artwork_dir, bg_color=theme["bg_color"])
 
-    # Initialize particle system
-    particles = _init_particles(PARTICLE_COUNT)
-    stamps = _precompute_particle_stamps(PARTICLE_MIN_RADIUS, PARTICLE_MAX_RADIUS)
-    scatter_table = _precompute_beat_scatter(beat_times, PARTICLE_COUNT)
+    # Particles exist to give a STATIC artwork backdrop some life. A video
+    # backdrop already moves, and over real footage the drifting dots read
+    # as dirt on the lens rather than atmosphere — so they default to OFF
+    # whenever video loops are in play. A theme can force either way with
+    # an explicit "particles": true / false.
+    particles_on = theme.get("particles")
+    if particles_on is None:
+        particles_on = video_loops is None
+    if not particles_on:
+        print("  Particles: off (video backdrop)" if video_loops is not None
+              else "  Particles: off (theme)")
+
+    particles = stamps = scatter_table = None
+    if particles_on:
+        particles = _init_particles(PARTICLE_COUNT)
+        stamps = _precompute_particle_stamps(PARTICLE_MIN_RADIUS, PARTICLE_MAX_RADIUS)
+        scatter_table = _precompute_beat_scatter(beat_times, PARTICLE_COUNT)
 
     # Build waveform palette from theme (monochromatic gradient from waveform_color)
     wf_color = np.array(theme["waveform_color"], dtype=np.float32)
@@ -4087,12 +4100,13 @@ def generate_video(audio_path, transitions, output_path, artwork_dir,
         else:
             _get_artwork_frame(t, transitions, artwork_images, frame_buf, blend_buf)
 
-        # 2. Particles (additive blend)
-        px, py, pradii, pbrightness = _compute_particles(
-            t, particles, beat_times, scatter_table
-        )
-        _draw_particles(frame_buf, px, py, pradii, pbrightness, stamps,
-                        particle_color=theme["particle_color"])
+        if particles_on:
+            # 2. Particles (additive blend)
+            px, py, pradii, pbrightness = _compute_particles(
+                t, particles, beat_times, scatter_table
+            )
+            _draw_particles(frame_buf, px, py, pradii, pbrightness, stamps,
+                            particle_color=theme["particle_color"])
 
         # 2.5 Waveform region gradient for readability
         _apply_waveform_gradient(frame_buf)
