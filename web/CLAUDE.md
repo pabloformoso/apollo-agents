@@ -27,6 +27,16 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 - **Server-side stall watchdog** (v3.6.3, `app.py` + engine
   `check_stall`): the browser engine is ping-driven, so a frozen tab
   wedges the set; the watchdog synthesises the missing `track_ended`.
+- **`[engine track_ended]` diagnostic** (v3.9.3): every `track_ended`
+  logs the reported position vs `duration_sec` plus a `src=` label
+  (`client` = browser message, `endgame` = last-2-s safeguard, `stall`
+  = watchdog). A `src=client` line marked `PREMATURE` is the signature
+  of a skip-on-load-failure. Before this the WS handler logged nothing,
+  so a browser-side skip and a track finishing were identical in the
+  backend log; don't reach for `[beatmatch]` or `[live_dj]` timestamps
+  to reconstruct on-air time — the first is emitted at plan time (late
+  whenever the endless queue is dry) and the second is gated by LLM
+  latency, so both drift by a minute or more.
 
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 

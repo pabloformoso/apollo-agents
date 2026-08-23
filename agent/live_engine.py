@@ -211,6 +211,18 @@ ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 LIVE_STALL_CHECK_SEC = _env_int("APOLLO_LIVE_STALL_CHECK_SEC", 15)
 LIVE_STALL_MARGIN_SEC = _env_int("APOLLO_LIVE_STALL_MARGIN_SEC", 45)
 
+# v3.9.3 — how close to the nominal end a reported position has to be for
+# a ``track_ended`` to count as a NATURAL end. The frontend also sends a
+# synthetic ``track_ended`` when a decode fails (skip-on-load-failure,
+# ``reportLoadFailure`` in web/frontend/lib/live.ts), and until v3.9.3 the
+# backend logged nothing for either — a browser-side skip was
+# indistinguishable from a track finishing, which made post-hoc log
+# analysis of "it jumped mid-song" impossible (2026-08-23). The margin is
+# generous: the browser pings position every 250 ms, so a genuine end
+# lands within a second or so of ``duration_sec``; real skips land at 0 s
+# or mid-track, nowhere near this threshold.
+LIVE_TRACK_END_MARGIN_SEC = _env_int("APOLLO_LIVE_TRACK_END_MARGIN_SEC", 5)
+
 # v3.6.1 — no-repeat window for the recycle path. Once endless mode has
 # exhausted the genre and starts recycling played tracks, skip anything
 # heard within the last N tracks (20 ≈ an hour of music at typical track
@@ -264,7 +276,9 @@ class LiveEngineProtocol(Protocol):
     # when the browser reports a natural end-of-track. ``LiveEngineLocal``
     # never needs this (its watchdog detects end-of-buffer directly), so the
     # implementation falls back to a no-op.
-    def report_track_ended(self, track_id: str) -> None: ...
+    def report_track_ended(
+        self, track_id: str, *, source: str = "client"
+    ) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +709,9 @@ class LiveEngineLocal:
             self._stream.close()
             self._stream = None
 
-    def report_track_ended(self, track_id: str) -> None:  # noqa: ARG002
+    def report_track_ended(  # noqa: ARG002
+        self, track_id: str, *, source: str = "client"
+    ) -> None:
         """Protocol no-op for the local engine.
 
         ``LiveEngineLocal`` detects end-of-track by reading the sounddevice
@@ -1540,9 +1556,13 @@ class LiveEngineBrowser:
             and duration > 0
             and self._reported_pos_sec >= max(0.0, duration - 2.0)
         ):
-            self.report_track_ended(track_id or current_track.get("id", ""))
+            self.report_track_ended(
+                track_id or current_track.get("id", ""), source="endgame"
+            )
 
-    def report_track_ended(self, track_id: str) -> None:
+    def report_track_ended(
+        self, track_id: str, *, source: str = "client"
+    ) -> None:
         """Advance the engine when the browser reports a natural ``ended``.
 
         v2.5.0.1 — the browser's ``<audio>`` element fires ``ended`` when
@@ -1554,6 +1574,14 @@ class LiveEngineBrowser:
         Idempotent: stale pings for a track that's no longer current
         (e.g. arriving right after a manual ``skip_track``) are ignored,
         same as ``report_playback_pos``.
+
+        ``source`` labels who asked for the advance, purely for the
+        v3.9.3 diagnostic line: ``"client"`` (the default) means the WS
+        handler forwarded a browser message, ``"endgame"`` is the
+        last-2-seconds safeguard in ``report_playback_pos``, ``"stall"``
+        is the watchdog on the final track. Only ``"client"`` can be a
+        skip-on-load-failure, so the label is what makes an audible
+        mid-song jump attributable after the fact.
         """
         with self._lock:
             if self._state == "idle" or self._idx >= len(self.playlist):
@@ -1571,10 +1599,12 @@ class LiveEngineBrowser:
             next_idx = idx + 1
             has_next = next_idx < len(self.playlist)
             next_track = self.playlist[next_idx] if has_next else None
+            reported_pos = self._reported_pos_sec
             # Mark the current track as already-handled so a late
             # ``playback_pos`` ping doesn't re-fire the safeguard.
             self._cf_triggered = True
 
+        self._log_track_ended_diag(current_track, reported_pos, source)
         self._emit(TRACK_ENDED, track=current_track)
         if has_next and next_track is not None:
             self._emit_next_track(next_track)
@@ -1592,6 +1622,48 @@ class LiveEngineBrowser:
                     new_track = None
             if new_track is not None:
                 self._emit_next_track(new_track)
+
+    def _log_track_ended_diag(
+        self, track: dict, reported_pos: float, source: str
+    ) -> None:
+        """Print one line per ``track_ended``, flagging premature ones.
+
+        v3.9.3 — the WS handler used to hand ``track_ended`` straight to
+        the engine without logging (web/backend/app.py), so the frontend's
+        skip-on-load-failure (``reportLoadFailure``) looked exactly like a
+        track finishing normally. An operator reporting "it jumped mid-song"
+        left no backend trace to confirm or refute, and the derived
+        signals are useless for this: ``[beatmatch]`` is emitted at plan
+        time (which lags whenever the endless queue runs dry) and the
+        ``[live_dj]`` turn lines are gated by LLM latency. This line is
+        the ground truth — where the deck actually was when it claimed to
+        be done.
+
+        Not debounced: one ``track_ended`` per track is already a low
+        rate (~20/h), and dropping any of them would reintroduce the very
+        gap this closes.
+        """
+        duration = float(track.get("duration_sec") or 0.0)
+        tid = str(track.get("id") or "")
+        name = (track.get("display_name") or "?")[:40]
+        if duration <= 0:
+            verdict = "duration unknown"
+            of = "?"
+            pct = "?"
+        else:
+            short_by = duration - reported_pos
+            of = f"{duration:.1f}s"
+            pct = f"{reported_pos / duration * 100:.0f}%"
+            verdict = (
+                f"PREMATURE, {short_by:.1f}s short"
+                if short_by > LIVE_TRACK_END_MARGIN_SEC
+                else "natural end"
+            )
+        print(
+            f"[engine track_ended] src={source} {tid!r} ({name!r}) — "
+            f"at {reported_pos:.1f}s of {of} ({pct}); {verdict}",
+            flush=True,
+        )
 
     def _emit_next_track(self, next_track: dict) -> None:
         """Advance the cursor and tell the browser to load the next track.
@@ -2105,7 +2177,7 @@ class LiveEngineBrowser:
         else:
             # Last track: go through report_track_ended so the endless
             # gate runs and appends a successor (or ends the session).
-            self.report_track_ended(tid)
+            self.report_track_ended(tid, source="stall")
         return tid
 
     def set_crossfade_point(self, position_sec: float) -> str:

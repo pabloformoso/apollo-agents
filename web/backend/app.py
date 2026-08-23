@@ -1382,8 +1382,16 @@ async def live_session_ws(
                 # The hook forwards that as a synthetic ``track_ended``
                 # message so the engine can advance even if the
                 # ``playback_pos`` watchdog never crossed the threshold.
+                # v3.9.3 — ``source="client"`` (the default, passed
+                # explicitly because this is the only caller that can be
+                # a skip) makes the engine's ``[engine track_ended]``
+                # diagnostic attribute the advance to the browser. The
+                # frontend also sends this message when a decode fails
+                # (``reportLoadFailure``), so a premature position here
+                # is the signature of a skip-on-load-failure rather than
+                # a track finishing.
                 tid = str(msg.get("track_id", ""))
-                engine.report_track_ended(tid)
+                engine.report_track_ended(tid, source="client")
             elif msg_type in {"user_msg", "command"}:
                 text = msg.get("text") or msg.get("content") or ""
                 await command_queue.put(
