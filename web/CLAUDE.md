@@ -49,6 +49,17 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
+- **A `playback_pos` ping's `track_id` and `currentTime` must come from
+  the same object** (v3.9.5): both are read off the active deck, never
+  the id from `currentTrackIdRef` and the clock from the deck. Those
+  refs flip at different moments during a crossfade, so the ping went
+  out with the INCOMING track's id and the OUTGOING deck's position;
+  the engine compared that near-end position against the new, shorter
+  track's duration and ended it on arrival, leaving both decks audible
+  (2026-08-23). The backend cannot defend against this — a
+  misattributed position is indistinguishable from a real one, and
+  every wall-clock heuristic breaks legitimate resumes where the deck
+  is legitimately far ahead of `_track_started_mono`.
 - AudioBufferSourceNode decks, PCM decoded via `BufferCache`.
 - **The cache is a working set, not an archive** (v3.9): after every
   successful schedule it is pruned to {current, preloaded-next}.
