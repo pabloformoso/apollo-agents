@@ -1516,6 +1516,26 @@ class LiveEngineBrowser:
                     seconds_remaining=round(max(0.0, secs_to_cf), 1),
                 )
 
+        # v3.9.4 — safety top-up. The in-flight extend below only runs
+        # once the LAST track is PAST its crossfade point (~17 s before
+        # the deck drains), so the whole earlier part of the track plays
+        # with an empty queue. ``check_stall`` then has no pre-loaded
+        # successor to ramp into and must hard-cut instead — which is
+        # what the listener hears as a jump. Observed live 2026-08-23 on
+        # session 4be54b5d: 'Quiet Ember' died 9 % in and 'Calm Bloom'
+        # never started, both forced a hard advance because the queue
+        # was empty.
+        #
+        # Running the same self-gating extend from every ping closes the
+        # window: it no-ops unless endless mode is on AND the queue is
+        # empty AND the LLM's grace has elapsed, and a healthy DJ keeps
+        # ``remaining >= 1`` (the low-water poke fires at <= 1), so this
+        # never fires while the agent is keeping up. It only engages in
+        # the failure case it exists for — and it lands well inside
+        # ``LIVE_STALL_MARGIN_SEC``, so the watchdog finds a successor.
+        if next_track is None:
+            self._try_endless_extend_inflight(current_track)
+
         if not cf_triggered and self._reported_pos_sec >= cf_sec:
             if next_track is not None:
                 self._begin_crossfade(current_track, next_track)
