@@ -1902,10 +1902,20 @@ export function useLiveSession(
   const tickPlaybackPos = useEffectEvent(() => {
     if (typeof WebSocket === "undefined") return;
     const ws = wsRef.current;
-    const tid = currentTrackIdRef.current;
     const which = activeDeckRef.current;
     const deck = which === "a" ? deckARef.current : deckBRef.current;
     if (!deck) return;
+    // v3.9.5 — the id MUST come from the same object as the position.
+    // Reading it from ``currentTrackIdRef`` (updated by engine events)
+    // while reading the clock from the deck let the two disagree during
+    // a crossfade: the ping went out carrying the INCOMING track's id
+    // with the OUTGOING deck's position. The engine compared that
+    // near-end position against the new, shorter track's duration and
+    // declared it finished on arrival — 2026-08-23, 'Gentle Drift'
+    // (208.6 s, cf point 191.6 s) into 'Warm Tide' (184.9 s), which left
+    // both decks audible. The deck owns the source it scheduled, so its
+    // own id and its own clock can never describe different tracks.
+    const tid = deck.getTrackId() ?? currentTrackIdRef.current;
     // v3.4 — position is derived from the audio-thread clock, so it's
     // accurate to within the render quantum (~2.7 ms @ 48 kHz). Both
     // the catalog-time-into-track for the backend protocol and the

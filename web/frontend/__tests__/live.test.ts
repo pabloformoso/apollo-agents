@@ -2687,3 +2687,90 @@ describe("useIsLiveActive", () => {
     expect(result.current).toBe(false);
   });
 });
+
+/**
+ * v3.9.5 — the ping's ``track_id`` and its ``currentTime`` must describe
+ * the SAME track.
+ *
+ * They used to come from two independent refs: the id from
+ * ``currentTrackIdRef`` (moved by engine events) and the clock from the
+ * active deck. During a crossfade those flip at different moments, so a
+ * ping went out carrying the INCOMING track's id with the OUTGOING
+ * deck's position. The engine compared that near-end position against
+ * the new, shorter track's duration and declared it finished on arrival
+ * — live on 2026-08-23, 'Gentle Drift' (208.6 s, crossfade point
+ * 191.6 s) into 'Warm Tide' (184.9 s), which left both decks audible.
+ */
+describe("playback_pos attribution", () => {
+  it("reads the ping's track_id off the deck, not the engine's cursor", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useLiveSession("sid-attr"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5);
+      });
+      const playlist = [
+        { id: "gentle_drift", display_name: "Gentle Drift" },
+        { id: "warm_tide", display_name: "Warm Tide" },
+      ];
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: "sid-attr",
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: playlist[1],
+              seconds_to_crossfade: 0,
+              playlist_remaining: 1,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+          cf_point_sec: 191.6,
+        });
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.currentTrack?.id).toBe("gentle_drift");
+
+      // The engine's cursor moves to Warm Tide, but no ``load`` has
+      // reached the browser yet — the deck still holds Gentle Drift.
+      // This is the window the stray ping was sent in.
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[1],
+          cf_point_sec: 168,
+        });
+      });
+      _NEXT_AUDIO_TIME.value = 191.65;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+
+      const pings = FakeWebSocket.lastInstance!.sent
+        .map((raw) => JSON.parse(raw))
+        .filter((m) => m.type === "playback_pos");
+      expect(pings.length).toBeGreaterThan(0);
+      const last = pings[pings.length - 1];
+      // The position is the deck's, so the id must be the deck's too.
+      // Reporting Gentle Drift's 191.6 s as Warm Tide's is what ended
+      // Warm Tide one second after it started.
+      expect(last.track_id).toBe("gentle_drift");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
