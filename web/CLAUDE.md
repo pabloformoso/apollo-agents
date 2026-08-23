@@ -27,6 +27,15 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 - **Server-side stall watchdog** (v3.6.3, `app.py` + engine
   `check_stall`): the browser engine is ping-driven, so a frozen tab
   wedges the set; the watchdog synthesises the missing `track_ended`.
+- **Endless safety top-up** (v3.9.4): `_try_endless_extend_inflight`
+  runs from every `playback_pos` ping, not just past the crossfade
+  point. The watchdog can only RAMP into a deck the browser already
+  pre-loaded, so a track playing with `remaining_after == 0` can only
+  ever be hard-cut. It self-gates (endless on + empty queue + grace
+  elapsed) and a healthy agent holds `remaining >= 1`, so it engages
+  only when the agent has stopped extending. Appending two tracks at
+  end-of-track does NOT substitute: that gate only runs at zero, and
+  the cursor advance puts the queue straight back to zero.
 - **`[engine track_ended]` diagnostic** (v3.9.3): every `track_ended`
   logs the reported position vs `duration_sec` plus a `src=` label
   (`client` = browser message, `endgame` = last-2-s safeguard, `stall`
