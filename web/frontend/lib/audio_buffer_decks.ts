@@ -348,6 +348,23 @@ export class BufferDeck {
   }
 
   /**
+   * v3.9.7 — the rate and offset ``position()`` extrapolates from.
+   *
+   * These are what the deck was SCHEDULED with, so reporting them
+   * alongside the position lets the backend check them against what the
+   * transition plan asked for. Without them a deck running at the wrong
+   * speed is undetectable from outside: the position is derived from the
+   * same rate, so the two always agree with each other.
+   */
+  getRateAtStart(): number {
+    return this.rateAtStart;
+  }
+
+  getOffsetAtStart(): number {
+    return this.offsetAtStart;
+  }
+
+  /**
    * Schedule a fresh source playing ``buffer`` from ``offsetSec``
    * within the buffer, at ``rate`` playback speed, starting at
    * AudioContext time ``whenSec``. Stops any prior source on this

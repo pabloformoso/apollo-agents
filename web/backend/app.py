@@ -1372,9 +1372,27 @@ async def live_session_ws(
                     current_time = float(msg.get("currentTime", 0.0))
                 except (TypeError, ValueError):
                     current_time = 0.0
+                # v3.9.7 — the deck's own rate/offset, when the frontend
+                # sends them. The engine cannot infer these: the reported
+                # position is DERIVED from them, so a deck at the wrong
+                # rate still reports a self-consistent position.
+                def _opt(name: str) -> float | None:
+                    raw = msg.get(name)
+                    if raw is None:
+                        return None
+                    try:
+                        return float(raw)
+                    except (TypeError, ValueError):
+                        return None
+
                 # report_playback_pos is sync but small (no I/O), so we can
                 # call it directly on the event loop without to_thread.
-                engine.report_playback_pos(tid, current_time)
+                engine.report_playback_pos(
+                    tid,
+                    current_time,
+                    deck_rate=_opt("deck_rate"),
+                    deck_offset=_opt("deck_offset"),
+                )
             elif msg_type == "track_ended":
                 # v2.5.0.1 — the browser fires ``ended`` on its <audio>
                 # element when natural playback finishes and the
