@@ -2774,3 +2774,71 @@ describe("playback_pos attribution", () => {
     }
   });
 });
+
+/**
+ * v3.9.7 — the ping carries the two terms ``position()`` is built from.
+ *
+ * ``position()`` is ``offsetAtStart + elapsed * rateAtStart`` — a model,
+ * not a measurement of the audio. A deck running at the wrong rate
+ * therefore reports a position derived from that same wrong rate, so the
+ * two always agree and nothing outside can tell. Live on 2026-08-24 two
+ * transitions back-solved to a deck rate of exactly 1.4995 where the plan
+ * had asked for ~0.98; the backend could only infer that from wall clock,
+ * and could not say why. Shipping the terms makes it directly checkable.
+ */
+describe("playback_pos deck terms", () => {
+  it("reports the deck's own rate and offset alongside the position", async () => {
+    vi.useFakeTimers();
+    try {
+      renderHook(() => useLiveSession("sid-deck-terms"));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5);
+      });
+      const playlist = [{ id: "A", display_name: "A" }];
+      act(() => {
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "live_state",
+          data: {
+            session_id: "sid-deck-terms",
+            playlist,
+            engine_state: {
+              state: "playing",
+              position_sec: 0,
+              current_track: playlist[0],
+              next_track: null,
+              seconds_to_crossfade: 0,
+              playlist_remaining: 0,
+            },
+          },
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "engine_command",
+          command: "load",
+          track: playlist[0],
+        });
+        FakeWebSocket.lastInstance!.pushServerEvent({
+          type: "track_started",
+          track: playlist[0],
+          cf_point_sec: 43,
+        });
+      });
+      _NEXT_AUDIO_TIME.value = 5.05;
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(260);
+      });
+
+      const pings = FakeWebSocket.lastInstance!.sent
+        .map((raw) => JSON.parse(raw))
+        .filter((m) => m.type === "playback_pos");
+      expect(pings.length).toBeGreaterThan(0);
+      const last = pings[pings.length - 1];
+      expect(typeof last.deck_rate).toBe("number");
+      expect(typeof last.deck_offset).toBe("number");
+      // The position must be reconstructible from the reported terms —
+      // that identity is the whole point of shipping them.
+      expect(last.currentTime).toBeGreaterThanOrEqual(last.deck_offset);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

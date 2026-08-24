@@ -1943,6 +1943,12 @@ export function useLiveSession(
           type: "playback_pos",
           track_id: tid,
           currentTime: ct,
+          // v3.9.7 — the terms ``position()`` is built from. The backend
+          // compares them against the rate the transition plan asked for;
+          // it cannot derive them, because the position it receives is
+          // computed FROM them and so always looks self-consistent.
+          deck_rate: deck.getRateAtStart(),
+          deck_offset: deck.getOffsetAtStart(),
         }),
       );
     } catch {

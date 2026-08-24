@@ -1306,6 +1306,15 @@ class LiveEngineBrowser:
         # position actually MOVED (not merely arrived — a stuck deck
         # pings a frozen position forever).
         self._track_started_mono: float | None = None
+        # v3.9.7 — what the browser deck says it is ACTUALLY doing, versus
+        # what the transition plan told it to do. ``position()`` in
+        # audio_buffer_decks.ts is a model (offsetAtStart + elapsed *
+        # rateAtStart), not a measurement, so a deck running at the wrong
+        # rate reports a position that looks perfectly self-consistent.
+        # Only the deck's own rate can expose that.
+        self._deck_rate: float | None = None
+        self._deck_offset: float | None = None
+        self._planned_incoming_rate: float | None = None
         self._last_pos_change_mono: float | None = None
         # v3.9.2 — the position that ``_last_pos_change_mono`` was stamped
         # at. Movement is measured against THIS, not against the previous
@@ -1406,7 +1415,14 @@ class LiveEngineBrowser:
             phase_lock=self._phase_lock_payload(),
         )
 
-    def report_playback_pos(self, track_id: str, current_time: float) -> None:
+    def report_playback_pos(
+        self,
+        track_id: str,
+        current_time: float,
+        *,
+        deck_rate: float | None = None,
+        deck_offset: float | None = None,
+    ) -> None:
         """Update playback position from a browser ping.
 
         Called by the WS handler whenever the browser sends a ``playback_pos``
@@ -1436,6 +1452,13 @@ class LiveEngineBrowser:
             if track_id and current_track.get("id") and track_id != current_track.get("id"):
                 return
             self._reported_pos_sec = float(current_time)
+            # v3.9.7 — record what the deck says about itself. Optional:
+            # an older frontend simply never sends them and the diagnostic
+            # reports "n/a" rather than inventing a number.
+            if deck_rate is not None:
+                self._deck_rate = float(deck_rate)
+            if deck_offset is not None:
+                self._deck_offset = float(deck_offset)
             # v3.6.3 — stall-watchdog signal: only count the position as
             # "alive" when it actually MOVES. A deck that failed to
             # decode keeps pinging a frozen ~0; a frozen tab pings
@@ -2273,6 +2296,9 @@ class LiveEngineBrowser:
         with self._lock:
             pos = self._reported_pos_sec
             started = self._track_started_mono
+            deck_rate = self._deck_rate
+            deck_offset = self._deck_offset
+            planned = self._planned_incoming_rate
         duration = float(from_track.get("duration_sec") or 0.0)
         cf_point = self._cf_point_seconds(from_track)
         pct = f"{pos / duration * 100:.0f}%" if duration > 0 else "?"
@@ -2282,11 +2308,23 @@ class LiveEngineBrowser:
             elapsed = time.monotonic() - started
             ratio = (pos / elapsed) if elapsed > 0.5 else float("nan")
             wall = f"wall {elapsed:.1f}s, pos_per_wall={ratio:.2f}"
+        # v3.9.7 — planned vs applied. ``pos_per_wall`` alone cannot tell a
+        # deck running at the wrong speed from an honest one, because the
+        # position is derived FROM the deck's own rate: both move together
+        # and stay self-consistent. The plan is the outside reference.
+        if deck_rate is None:
+            deck = "deck rate=n/a (frontend not reporting)"
+        else:
+            off = f"{deck_offset:.1f}s" if deck_offset is not None else "?"
+            plan = f"{planned:.3f}" if planned else "n/a"
+            deck = f"deck rate={deck_rate:.3f} (planned {plan}) offset={off}"
+            if planned and abs(deck_rate - planned) / planned > 0.05:
+                deck += "  <<< RATE MISMATCH"
         print(
             f"[engine crossfade] {(from_track.get('display_name') or '?')[:32]!r}"
             f" -> {(to_track.get('display_name') or '?')[:32]!r} | "
             f"fired at pos={pos:.1f}s of {duration:.1f}s ({pct}), "
-            f"cf_point={cf_point:.1f}s | {wall}",
+            f"cf_point={cf_point:.1f}s | {wall} | {deck}",
             flush=True,
         )
 
@@ -2331,6 +2369,19 @@ class LiveEngineBrowser:
             self._state = "playing"
             self._extend_attempted = False
             self._track_started_mono = time.monotonic()
+            # v3.9.7 — the incoming deck has not reported yet, and the rate
+            # we just asked it for becomes the expectation to check it
+            # against at the NEXT crossfade.
+            self._deck_rate = None
+            self._deck_offset = None
+            # Read it off the transition plan, not the phase-lock payload:
+            # the payload is empty for tracks without a v2 beatgrid, while
+            # ``incoming_rate`` is the static rate the browser applies
+            # either way (it is the ``static_rate`` in the beatmatch line).
+            plan = self._transition_plan
+            self._planned_incoming_rate = (
+                float(plan.incoming_rate) if plan is not None else None
+            )
             self._last_pos_change_mono = None
             self._last_pos_change_pos = None
         # Rebuild for the (to_track → after_to_track) pair so the next
