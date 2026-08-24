@@ -2250,6 +2250,46 @@ class LiveEngineBrowser:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _log_crossfade_fire(self, from_track: dict, to_track: dict) -> None:
+        """Print where a crossfade actually fired, in BOTH clocks.
+
+        v3.9.6 — every advance in a healthy endless set goes through this
+        method, and until now nothing recorded the numbers that decide
+        whether a transition was legitimate. The operator reports songs
+        cut mid-track (2026-08-24) while the log shows no stall, no
+        ``track_ended``, no ``skip_track`` and no critic warning; and the
+        on-air time cannot be derived after the fact, because
+        ``[beatmatch]`` is emitted at plan-build time and lags whenever
+        the queue is momentarily empty — which is why the same
+        (out → in) pair measured 86 % on one pass and 55 % on another.
+
+        The crossfade fires on ``reported_pos >= cf_point``, so a
+        mid-track cut means the POSITION jumped, not that the threshold
+        moved. Wall clock is the independent witness: the browser deck
+        runs at 1.0-1.25x, so ``pos_per_wall`` above roughly 1.3 is
+        physically impossible and convicts the ping. Around 1.0 exonerates
+        it and sends us looking at the frontend instead.
+        """
+        with self._lock:
+            pos = self._reported_pos_sec
+            started = self._track_started_mono
+        duration = float(from_track.get("duration_sec") or 0.0)
+        cf_point = self._cf_point_seconds(from_track)
+        pct = f"{pos / duration * 100:.0f}%" if duration > 0 else "?"
+        if started is None:
+            wall = "wall unknown (track never anchored)"
+        else:
+            elapsed = time.monotonic() - started
+            ratio = (pos / elapsed) if elapsed > 0.5 else float("nan")
+            wall = f"wall {elapsed:.1f}s, pos_per_wall={ratio:.2f}"
+        print(
+            f"[engine crossfade] {(from_track.get('display_name') or '?')[:32]!r}"
+            f" -> {(to_track.get('display_name') or '?')[:32]!r} | "
+            f"fired at pos={pos:.1f}s of {duration:.1f}s ({pct}), "
+            f"cf_point={cf_point:.1f}s | {wall}",
+            flush=True,
+        )
+
     def _begin_crossfade(self, from_track: dict, to_track: dict) -> None:
         """Transition from ``from_track`` to ``to_track``.
 
@@ -2271,6 +2311,7 @@ class LiveEngineBrowser:
         # the right downbeat (skipping any pickup) and (b) replace its
         # linear GainNode ramp with equal-power cos/sin curves.
         outgoing_phase_lock = self._phase_lock_payload()
+        self._log_crossfade_fire(from_track, to_track)
         # v3.7.0 — resolve the drift profile for THIS (from → to) pair while
         # the cursor still points at ``from_track``. Non-drift keeps the int
         # ``self.crossfade_sec`` (byte-identical payload); drift ships the
