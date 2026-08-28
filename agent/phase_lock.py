@@ -681,9 +681,11 @@ def compute_beat_rate_schedule(
     either grid is too loose (cv > ``max_cv``) or too short to form at
     least two overlap bars — the caller then falls back to the single
     static ``incoming_rate`` that already sounds smooth on those genres.
-    Per-bar rates are clamped to ``[rate_min, rate_max]`` and a single
-    outlier bar (a dropped/doubled madmom downbeat) is warped using the
-    median bar instead of its own length.
+    A single outlier bar (a dropped/doubled madmom downbeat) is warped
+    using the median bar instead of its own length. If, after that repair,
+    any bar ratio still falls outside ``[rate_min, rate_max]``, the whole
+    schedule is REJECTED (static) rather than clamped — see the note at
+    the ratio check for what clamping shipped to the speakers.
     """
     if len(outgoing_downbeats) < 2 or len(incoming_downbeats) < 2 or xfade_sec <= 0:
         return BeatRateSchedule(mode="static")
@@ -750,7 +752,28 @@ def compute_beat_rate_schedule(
         if median_in > 0 and abs(ib - median_in) / median_in > GRIDWARP_BAR_OUTLIER_FRAC:
             ib = median_in
         rate = ib / ob if ob > 0 else 1.0
-        rate = max(rate_min, min(rate_max, rate))
+        # v3.9.9 — a bar ratio outside the stretch bounds is not something to
+        # CLAMP, it is evidence the bar-length maths cannot be trusted here.
+        # Clamping silently shipped the bound itself as a real playback rate:
+        # the frontend starts the deck on ``rateSchedule[0].rate`` (see
+        # ``initialRate`` in web/frontend/lib/live.ts), so the whole track
+        # then played at STRETCH_RATIO_MAX or _MIN.
+        #
+        # Measured live: three anomalous transitions came in at exactly
+        # 1.4995, 1.4995 and 0.667 — i.e. 1.5 and 1/1.5, the bounds
+        # themselves, not computed ratios. At 1.5x a track is consumed in
+        # two thirds of its length (heard as "it cut mid-song"); at 0.667x
+        # it plays a third slow (heard as "it's dragging"). Both symptoms,
+        # one cause. The offenders were swung/jazz material whose bars are
+        # deliberately not equal — 'Muted Jazz Ambience' (bar cv 0.35) and
+        # 'Swung Ambience' (0.23) against a max_cv of 0.04 — which is why
+        # lofi trips this far more often than healing's steady pads.
+        #
+        # Dropping to static costs only the per-bar micro-lock; the plan's
+        # ``incoming_rate`` is still applied, and in every observed case it
+        # was the correct 1.000.
+        if not rate_min <= rate <= rate_max:
+            return BeatRateSchedule(mode="static")
         segments.append(RateSegment(at_sec=round(offset, 6), rate=round(rate, 6), ramp=False))
         last_rate = rate
 

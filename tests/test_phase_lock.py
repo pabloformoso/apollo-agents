@@ -808,6 +808,79 @@ class TestComputeBeatRateSchedule:
             out.append(round(out[-1] + step, 6))
         return out
 
+    # ── v3.9.9: an out-of-range bar ratio rejects, it does not clamp ────
+    #
+    # Live on 2026-08-28 three transitions started their deck at exactly
+    # 1.4995, 1.4995 and 0.667 — STRETCH_RATIO_MAX and 1/STRETCH_RATIO_MAX,
+    # the bounds themselves rather than any computed ratio. The frontend
+    # starts the incoming deck on ``rateSchedule[0].rate`` (``initialRate``
+    # in web/frontend/lib/live.ts), so a clamped bound became the playback
+    # rate for the whole track: 1.5x consumed it in two thirds of its
+    # length ("it cut mid-song"), 0.667x played it a third slow ("it's
+    # dragging"). Both symptoms, one cause.
+
+    def test_bar_ratio_above_the_ceiling_rejects_the_schedule(self):
+        """Incoming bars twice as long as outgoing: ratio 2.0 > 1.5."""
+        out = self._grid(1.0, 32)
+        inc = self._grid(2.0, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "static", "clamped to the bound instead of rejecting"
+        assert sched.segments == []
+
+    def test_bar_ratio_below_the_floor_rejects_the_schedule(self):
+        """Incoming bars half as long: ratio 0.5 < 0.667 — the slow-playback
+        case the operator heard as a dragging track."""
+        out = self._grid(2.0, 32)
+        inc = self._grid(1.0, 32)
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "static"
+        assert sched.segments == []
+
+    def test_no_segment_ever_carries_a_bound_value(self):
+        """The regression in one line: the bounds must never reach a deck."""
+        out = self._grid(1.0, 32)
+        inc = self._grid(1.4, 32)  # ratio 1.4 — inside, but close
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        if sched.mode == "grid_warp":
+            for seg in sched.segments:
+                assert seg.rate != STRETCH_RATIO_MAX
+                assert seg.rate != STRETCH_RATIO_MIN
+
+    def test_a_single_glitch_bar_is_still_repaired_not_rejected(self):
+        """The outlier repair runs BEFORE the range check, so one dropped
+        madmom downbeat must not cost the whole lock — that repair is the
+        v3.6 fix and this pins that the new gate did not swallow it."""
+        out = self._grid(2.0, 32)
+        inc = self._grid(2.0, 32)
+        # Double one interior bar: 4.0 s instead of 2.0 (ratio 2.0 raw).
+        inc = [v + (2.0 if i > 6 else 0.0) for i, v in enumerate(inc)]
+        sched = compute_beat_rate_schedule(
+            outgoing_downbeats=out,
+            incoming_downbeats=inc,
+            outgoing_anchor_sec=0.0,
+            incoming_anchor_sec=0.0,
+            xfade_sec=12.0,
+        )
+        assert sched.mode == "grid_warp", "one glitch bar killed the lock"
+
     def test_identical_grids_lock_at_rate_one(self):
         grid = self._grid(2.0, 32)
         sched = compute_beat_rate_schedule(
