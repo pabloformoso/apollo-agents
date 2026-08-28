@@ -181,6 +181,96 @@ describe("BufferDeck", () => {
     expect(deck.getTrackId()).toBe("t2");
   });
 
+  // ── v3.9.10: position() integrates the rate curve ──────────────────
+  //
+  // It used to extrapolate from rateAtStart forever. Under grid-warp the
+  // deck starts on the FIRST BAR's lock rate, steps per bar through the
+  // overlap, then ramps back to native — so holding that first value
+  // biased every reported position for the rest of the track. The backend
+  // uses that position to decide when to fire the next crossfade and
+  // whether a deck has stalled, so the bias was not cosmetic.
+
+  it("position follows a stepped schedule instead of holding rateAtStart", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 10.0;
+    audioCtx.currentTime = when;
+    deck.scheduleSource(buf, when, 0, 0.5, "t");
+    deck.applyRateSchedule(
+      [
+        { at_sec: 0, rate: 0.5, ramp: false },
+        { at_sec: 10, rate: 1.5, ramp: false },
+      ],
+      when,
+    );
+    // 10 s at 0.5 = 5 media-seconds, then 10 s at 1.5 = 15 more.
+    audioCtx.currentTime = when + 10;
+    expect(deck.position()).toBeCloseTo(5.0, 6);
+    audioCtx.currentTime = when + 20;
+    expect(deck.position()).toBeCloseTo(20.0, 6);
+  });
+
+  it("position averages a linear ramp rather than jumping at its end", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 4.0;
+    audioCtx.currentTime = when;
+    deck.scheduleSource(buf, when, 0, 1.0, "t");
+    // Glide 1.0 -> 2.0 across 10 s: mean 1.5, so 15 media-seconds.
+    deck.applyRateSchedule([{ at_sec: 10, rate: 2.0, ramp: true }], when);
+    audioCtx.currentTime = when + 10;
+    expect(deck.position()).toBeCloseTo(15.0, 6);
+    // Halfway in, the rate has only reached 1.5 — mean 1.25 over 5 s.
+    audioCtx.currentTime = when + 5;
+    expect(deck.position()).toBeCloseTo(6.25, 6);
+  });
+
+  it("position holds the last segment's rate past the end of the schedule", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 0.0;
+    audioCtx.currentTime = when;
+    deck.scheduleSource(buf, when, 0, 2.0, "t");
+    deck.applyRateSchedule([{ at_sec: 2, rate: 1.0, ramp: false }], when);
+    // 2 s at 2.0 = 4, then 8 s at 1.0 = 8.
+    audioCtx.currentTime = when + 10;
+    expect(deck.position()).toBeCloseTo(12.0, 6);
+  });
+
+  it("position respects the start offset when a schedule is present", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 1.0;
+    audioCtx.currentTime = when;
+    deck.scheduleSource(buf, when, 30.0, 1.0, "t");
+    deck.applyRateSchedule([{ at_sec: 5, rate: 1.0, ramp: false }], when);
+    audioCtx.currentTime = when + 10;
+    expect(deck.position()).toBeCloseTo(40.0, 6);
+  });
+
+  it("position keeps the plain rateAtStart path when no schedule was applied", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const when = 2.0;
+    audioCtx.currentTime = when;
+    deck.scheduleSource(buf, when, 1.875, 1.0667, "t");
+    audioCtx.currentTime = when + 10;
+    expect(deck.position()).toBeCloseTo(1.875 + 10 * 1.0667, 6);
+  });
+
+  it("a fresh source drops the previous source's schedule", () => {
+    const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
+    const buf1 = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    const buf2 = new FakeAudioBuffer(240) as unknown as AudioBuffer;
+    audioCtx.currentTime = 0;
+    deck.scheduleSource(buf1, 0, 0, 1.0, "t1");
+    deck.applyRateSchedule([{ at_sec: 1, rate: 0.5, ramp: false }], 0);
+    // New track on the same deck: back to the plain path at its own rate.
+    deck.scheduleSource(buf2, 0, 0, 1.0, "t2");
+    audioCtx.currentTime = 10;
+    expect(deck.position()).toBeCloseTo(10.0, 6);
+  });
+
   it("applyRateSchedule schedules stepped per-bar rates against the same when clock", () => {
     const deck = new BufferDeck(audioCtx as unknown as AudioContext, 0);
     const buf = new FakeAudioBuffer(240) as unknown as AudioBuffer;
