@@ -7,6 +7,16 @@
 - `quality_bench.py` + `extract_quality_references.py` — the
   bench-vs-own-catalog gate: the generative engine's autonomous
   definition-of-done is scoring against curated catalog references.
+  Two modes, mutually exclusive: the render mode (`--phrases/--seed/
+  --llm/--intent`) synthesizes what it scores, and `--wav PATH` scores
+  a render it did NOT make (the algorave/Strudel lane, `--genre` then
+  says which bands to use). `--wav` prints and only writes with `-o`;
+  it has no symbolic tier — novelty and note density need specs, and
+  an external WAV arrives without them. Bands come from
+  `--references` (default: the committed
+  `agent/generative/quality_references.json`), and the same generous
+  margins apply to both modes, so the gate still catches gross
+  wrongness rather than taste.
 - `smoke_local_llm.py` — **model-fitness gate for the live DJ's local
   LLM** (LM Studio, gemma). Run it before pointing a live session at a
   new/changed local model; a model that fails the smoke is not fit to
