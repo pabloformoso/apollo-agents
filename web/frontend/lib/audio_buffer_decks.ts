@@ -300,6 +300,15 @@ export class BufferDeck {
   private startedAt = 0;
   private offsetAtStart = 0;
   private rateAtStart = 1;
+  /**
+   * v3.9.10 — the rate curve currently riding this source, if any, in the
+   * same shape ``applyRateSchedule`` received it. ``position()`` has to
+   * integrate it: extrapolating from ``rateAtStart`` alone reports a
+   * media time the deck never reached once the grid-warp steps and the
+   * release ramp have moved the real rate.
+   */
+  private rateSchedule: { at_sec: number; rate: number; ramp?: boolean }[] | null =
+    null;
   private trackId: string | null = null;
 
   /**
@@ -420,6 +429,9 @@ export class BufferDeck {
     this.startedAt = whenSec;
     this.offsetAtStart = offsetSec;
     this.rateAtStart = rate;
+    // A fresh source starts with no curve; applyRateSchedule() adds one
+    // straight after when the transition carries a grid-warp plan.
+    this.rateSchedule = null;
     this.trackId = trackId;
     return whenSec;
   }
@@ -446,6 +458,9 @@ export class BufferDeck {
   ): void {
     const src = this.source;
     if (!src || !schedule || schedule.length === 0) return;
+    // Keep a copy for position(): the AudioParam owns the real curve but
+    // will not tell us what it is.
+    this.rateSchedule = [...schedule];
     const param = src.playbackRate;
     try {
       param.cancelScheduledValues(whenSec);
@@ -539,7 +554,51 @@ export class BufferDeck {
       0,
       this.audioCtx.currentTime - this.startedAt,
     );
-    return this.offsetAtStart + elapsed * this.rateAtStart;
+    if (!this.rateSchedule || this.rateSchedule.length === 0) {
+      return this.offsetAtStart + elapsed * this.rateAtStart;
+    }
+    // v3.9.10 — integrate the rate curve instead of extrapolating from
+    // rateAtStart. Under grid-warp the deck starts on the FIRST BAR's lock
+    // rate, steps per bar through the overlap, then ramps back to native.
+    // Holding rateAtStart for the whole track therefore biased every
+    // reported position by however far that first bar sat from 1.0 —
+    // which is what the backend uses to decide when to fire the next
+    // crossfade and whether a deck has stalled.
+    //
+    // Web Audio semantics, mirrored here: setValueAtTime(r, a) holds the
+    // PREVIOUS value across [t, a) and switches at a;
+    // linearRampToValueAtTime(r, a) glides from the previous value to r
+    // across [t, a], whose mean is the midpoint. Segment times are
+    // relative to the same ``whenSec`` the source was started at.
+    //
+    // nudgeRate()'s momentary bend is deliberately not modelled: it is a
+    // sub-second ±correction that returns to base, so integrating it
+    // would add noise for no accuracy.
+    let media = this.offsetAtStart;
+    let rate = this.rateAtStart;
+    let t = 0;
+    for (const seg of this.rateSchedule) {
+      const at = seg.at_sec;
+      if (at <= t) {
+        // Zero-length or out-of-order interval: adopt the value, no time.
+        rate = seg.rate;
+        continue;
+      }
+      if (at >= elapsed) {
+        const span = at - t;
+        if (seg.ramp) {
+          const endRate = rate + (seg.rate - rate) * ((elapsed - t) / span);
+          media += ((rate + endRate) / 2) * (elapsed - t);
+        } else {
+          media += rate * (elapsed - t);
+        }
+        return media;
+      }
+      media += (seg.ramp ? (rate + seg.rate) / 2 : rate) * (at - t);
+      rate = seg.rate;
+      t = at;
+    }
+    return media + rate * (elapsed - t);
   }
 
   /**
