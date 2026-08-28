@@ -34,6 +34,7 @@ _PROVIDER_ENV = (
     "LITELLM_API_KEY",
     "OLLAMA_BASE_URL",
     "AGENT_MODEL",
+    "BRIEF_MODEL",
 )
 
 
@@ -259,6 +260,48 @@ def test_litellm_client_agent_model_override(monkeypatch):
     monkeypatch.setenv("AGENT_MODEL", "qwen-next")
     _client, model = _build_openai_client("litellm")
     assert model == "qwen-next"
+
+
+def test_brief_model_overrides_agent_model(monkeypatch):
+    """The brief and the live DJ reward opposite things — see the note in
+    ``_build_openai_client``. A reasoner that is a fine DJ can spend its
+    whole budget thinking and return empty content here."""
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://tunel:1234/v1")
+    monkeypatch.setenv("AGENT_MODEL", "qwen/qwen3.5-9b")
+    monkeypatch.setenv("BRIEF_MODEL", "google/gemma-4-e4b")
+    _client, model = _build_openai_client("ollama")
+    assert model == "google/gemma-4-e4b"
+
+
+def test_brief_model_falls_back_to_agent_model(monkeypatch):
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://tunel:1234/v1")
+    monkeypatch.setenv("AGENT_MODEL", "qwen/qwen3.5-9b")
+    _client, model = _build_openai_client("ollama")
+    assert model == "qwen/qwen3.5-9b"
+
+
+def test_empty_brief_model_is_ignored(monkeypatch):
+    """An unset-but-present env var must not blank out the model."""
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://tunel:1234/v1")
+    monkeypatch.setenv("AGENT_MODEL", "qwen/qwen3.5-9b")
+    monkeypatch.setenv("BRIEF_MODEL", "")
+    _client, model = _build_openai_client("ollama")
+    assert model == "qwen/qwen3.5-9b"
+
+
+def test_brief_model_applies_to_litellm_too(monkeypatch):
+    from web.backend.brief_parser import _build_openai_client
+
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://litellm.example.org/v1")
+    monkeypatch.setenv("BRIEF_MODEL", "gemma-small")
+    _client, model = _build_openai_client("litellm")
+    assert model == "gemma-small"
 
 
 def test_nothing_configured_defaults_to_anthropic():
