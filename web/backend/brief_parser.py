@@ -284,7 +284,29 @@ def _build_openai_client(provider: str):
         api_key = "ollama"  # key is unused by Ollama / LM Studio
         default_model = "gemma4:4b"
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=TIMEOUT_SEC)
-    return client, os.getenv("AGENT_MODEL", default_model)
+    # v3.9.8 — BRIEF_MODEL lets the brief run on a different model from the
+    # live DJ, because the two jobs reward opposite things.
+    #
+    # Brief parsing is pure extraction: no tools, one small JSON object.
+    # The live DJ is the reverse — it lives or dies on ``extend_set``
+    # landing as a tool call, and cares much less about prose.
+    #
+    # Measured on the Tailscale LM Studio node, 2026-08-28, on the very
+    # brief that was failing in prod:
+    #   qwen/qwen3.5-9b   38.5s  finish_reason=length  content=''
+    #   google/gemma-4-e4b 5.6s  finish_reason=stop    valid JSON
+    # qwen burned all 3072 tokens on reasoning (reasoning_tokens=3071)
+    # and never emitted a content token, so ``extract_json_object`` had
+    # nothing to work with and session creation 500'd. Neither
+    # ``/no_think`` nor ``chat_template_kwargs.enable_thinking=false``
+    # suppressed it — LM Studio ignores both for that model.
+    #
+    # The same gemma is a poor DJ (30 % ``extend_set`` append rate on
+    # ``bench_extend_set`` vs bonsai-27b's 90 %), which is exactly why
+    # this is an override and not a change of ``AGENT_MODEL``.
+    return client, (
+        os.getenv("BRIEF_MODEL") or os.getenv("AGENT_MODEL", default_model)
+    )
 
 
 #: The JSON payload itself is ~80 tokens, but a reasoning model spends its
