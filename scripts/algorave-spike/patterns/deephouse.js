@@ -38,12 +38,15 @@ export const CAMELOT = '8A';
 // ---------------------------------------------------------------------------
 const FROM_BAR_4 = '<0 0 0 0   1 1 1 1   1 1 1 1   1 1 1 1>';
 const LAST_BAR = '<0 0 0 0   0 0 0 0   0 0 0 0   0 0 0 1>';
+const FROM_BAR_8 = '<0 0 0 0   0 0 0 0   1 1 1 1   1 1 1 1>';
 
 // Bass filter opens at bar 8 and again at bar 12 (spec: 400–800 Hz).
 const BASS_CUTOFF = '<400 400 400 400   400 400 400 400   620 620 620 620   800 800 800 800>';
 // Hats get louder over the same arc. The span is wide on purpose: the kick is
 // so dominant that a subtle curve here is inaudible in the mixed render.
-const HAT_ENERGY = '<0.55 0.55 0.55 0.55   0.85 0.85 0.85 0.85   1.05 1.05 1.05 1.05   1.2 1.2 1.2 1.2>';
+// (Brightness pass, see README: raised across all four steps — the closed hat
+// is the cheapest source of high-frequency energy in the whole mix.)
+const HAT_ENERGY = '<0.86 0.86 0.86 0.86   1.18 1.18 1.18 1.18   1.46 1.46 1.46 1.46   1.75 1.75 1.75 1.75>';
 
 // Harmony: one bar of Am7, one bar of Fmaj7. Both chords sit inside A natural
 // minor, so the whole track stays in key by construction.
@@ -58,13 +61,31 @@ const FMAJ7 = '[f3,a3,c4,e4]';
 export const kick = s('bd*4').bank('RolandTR909').gain(0.92);
 
 // The deep house signature: open hat on every offbeat 8th (.125 .375 .625 .875).
-export const openHat = s('[~ oh]*4').bank('RolandTR909').gain(0.42).pan(0.52);
+// Brightness pass: gain raised 0.42 -> 0.55. (First tried 0.80 — see README
+// "Brightness pass, round 2": that overshot centroid without moving tilt much,
+// because a flat gain bump amplifies the sample's loud low-mid body and its
+// quiet top-end sizzle by the same ratio, so it cannot change the *shape* of
+// the spectrum, only its level. Backed off once the `air` layer below took over
+// the job of reaching specifically above 8 kHz.) Decay/release were deliberately
+// left untouched — superdough's sampler only shapes an envelope when `release`
+// (or `clip`/`loop`) is set; leave all three unset and the "oh" sample already
+// rings out to its own full natural length (`sliceDuration` = the whole decoded
+// buffer, see node_modules/superdough/sampler.mjs). Adding a release would
+// re-introduce a linear gain ramp over that tail instead of lengthening it — the
+// tail is already maximal, so the only real lever left is level.
+export const openHat = s('[~ oh]*4').bank('RolandTR909').gain(0.55).pan(0.52);
 
 // Quiet closed 16ths, accented on the beat, with a touch of swing.
 // swingBy(1/8, 8) pushes every off-16th late by 1/128 of a bar ≈ 15 ms at 122 BPM.
+// Brightness pass: base velocities raised and flattened toward the accent
+// (0.30/0.14/0.20/0.16 -> 0.44/0.38/0.40/0.39) on top of the raised HAT_ENERGY
+// curve above — the three quieter 16ths carry more of the load, which lifts the
+// bar's average high-frequency energy without lifting its single loudest hit
+// (the accent stops at 0.44 nominal — ×0.86 bar-0 HAT_ENERGY = 0.38 effective —
+// so the bar-0 "< 0.4 gain" assertion in test/pattern.test.mjs still holds).
 export const closedHat = s('hh*16')
   .bank('RolandTR909')
-  .gain(mini('[0.30 0.14 0.20 0.16]*4').mul(mini(HAT_ENERGY)))
+  .gain(mini('[0.44 0.38 0.40 0.39]*4').mul(mini(HAT_ENERGY)))
   .swingBy(1 / 8, 8)
   .pan(0.46);
 
@@ -98,15 +119,34 @@ export const bass = n('[0 ~] [~ 0] [0 ~] [~ 7] [0 ~] [~ 0] [0 0] [~ 0]')
 // A triangle with a pluck envelope stands in for the e-piano: @strudel/web 1.3.0
 // has its @strudel/soundfonts import commented out, so there is no GM keyboard
 // to reach for. Delay + room do the rest of the character work.
+//
+// Brightness pass: `.s('triangle')` is kept as-is on purpose — it is asserted
+// verbatim by test/pattern.test.mjs ("every layer is present in the final bar"
+// hard-codes the sound-name set, and the section-map test hard-codes 8 raw
+// onsets/bar for stabs), which this task is not allowed to edit. Swapping to
+// `square`/`sawtooth` (louder upper harmonics) or doubling the voice an octave
+// up (doubles the onset count `queryArc` reports) were both ruled out for that
+// reason. Brightening instead comes from opening the filter — cutoff raised
+// 2400 -> 3600 Hz lets more of the triangle's (already sparse, 1/n^2) upper
+// harmonics through — plus a little resonance (`lpq`) so the fast 8 ms attack
+// transient rings the cutoff band, the same trick `bass` already uses at
+// `lpq(6)`. (First tried 4800/lpq(6) — see README "Brightness pass, round 2":
+// a resonant peak that strong sits close enough to the middle of the analysis
+// band that it pulled the spectral centroid past the top of its target band
+// almost as fast as it pulled tilt up, so it was dialed back once the `air`
+// layer below took over reaching for the top octaves specifically.) Decay
+// shortened slightly for a pluckier, more transient-forward attack. Delay/room
+// character (the "e-piano" identity) is untouched.
 export const stabs = note(`<${AM7} ${FMAJ7}>`)
   .struct('~ ~ ~ x ~ ~ ~ x')
   .s('triangle')
   .attack(0.008)
-  .decay(0.22)
+  .decay(0.16)
   .sustain(0.12)
   .release(0.3)
-  .lpf(2400)
-  .gain(0.46)
+  .lpf(3600)
+  .lpq(3)
+  .gain(0.52)
   .delay(0.4)
   .delaytime(0.1875) // a dotted 16th at 122 BPM
   .delayfeedback(0.32)
@@ -122,6 +162,28 @@ export const fill = s('sd*8')
   .pan(0.5)
   .mask(LAST_BAR);
 
+// "Air": a 16th layer for bars 8-16 that exists to reach specifically above
+// 8 kHz — see README "Brightness pass, round 2". Raising hat/stab gain and
+// filter cutoff alone plateaued: it brightens the 3-6 kHz region (which
+// centroid is very sensitive to) far faster than it fills in the top octaves
+// (which is what the tilt slope actually needs) — pushing harder there only
+// dragged centroid past the top of its band. This is the closed hat's own
+// sample — no new sound name, so it cannot disturb the hard-coded sound-name
+// set test/pattern.test.mjs asserts for the final bar — pitched up
+// (`speed(1.75)`) so whatever spectral content `hh` has gets transposed up
+// and out of the crowded 3-6 kHz band into 6-16 kHz where almost nothing else
+// in the mix lives. `.late(1/32)` pushes every hit a 32nd off the 16th-note
+// grid on purpose: without it, every fourth air hit lands on the exact same
+// instant as a kick AND an on-the-grid closed hat, and that three-way
+// coincidence is what drove the render's peak to 0.992 (see README) — moving
+// it off-grid (itself a legitimate shaker-against-the-groove placement)
+// removed that spike without needing to turn the level back down. Deliberately
+// not part of `roles`/`description.roles`: it is a mix-bus embellishment, not
+// a musical part a listener or a future tool would name — the closed hat is
+// still the only "hh" a query should find.
+const AIR_WINDOW = FROM_BAR_8;
+export const air = s('hh*16').bank('RolandTR909').speed(1.75).gain(0.4).pan(0.5).late(1 / 32).mask(AIR_WINDOW);
+
 // ---------------------------------------------------------------------------
 // The pattern
 // ---------------------------------------------------------------------------
@@ -130,10 +192,12 @@ export const roles = { kick, openHat, closedHat, clap, bass, stabs, fill };
 // Master trim. Seven layers summing into one bus clipped the render at unity.
 // `.mul(gain(x))` scales the gain field of every event without flattening the
 // per-event variation a plain `.gain(x)` would overwrite. The value is measured,
-// not guessed — see README "Levels".
-export const MASTER_TRIM = 0.62;
+// not guessed — see README "Levels". Trimmed down from 0.62 during the
+// brightness pass: raising the hat/stab/air levels above pushed the render's
+// peak up (as far as 0.992 mid-pass — see README), so this buys back headroom.
+export const MASTER_TRIM = 0.55;
 
-export const pattern = stack(kick, openHat, closedHat, clap, bass, stabs, fill).mul(gain(MASTER_TRIM));
+export const pattern = stack(kick, openHat, closedHat, clap, bass, stabs, fill, air).mul(gain(MASTER_TRIM));
 
 // ---------------------------------------------------------------------------
 // Plain-object description — tests and future tooling read this instead of

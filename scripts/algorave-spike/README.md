@@ -185,21 +185,204 @@ where the kick and bass are gone, and sees a clean +11 % step at bar 4.
 
 ## Measured output
 
-`node record.mjs`, route B:
+`node record.mjs`, route B, after the brightness pass below:
 
 ```
 duration      31.967 s      (16.25 bars — the extra quarter bar lets the fill
 sample rate   48000 Hz       and the delay/reverb tails ring into the loop point)
 channels      2 (true stereo)
 bit depth     16
-RMS           0.14419  (-16.82 dBFS)
-peak          0.88477  (-1.06 dBFS)
-quietest 5 s  0.14201
+RMS           0.13062  (-17.68 dBFS)
+peak          0.90256  (-0.89 dBFS)
+quietest 5 s  0.12795
 render time   ~11 s
 ```
 
-RMS and peak move by ~0.3 % between runs — see surprise 7. Route A
-(`--route a`) lands within 1 % of these: RMS 0.14441, peak 0.87402.
+RMS and peak move by ~0.3 % between runs — see surprise 7. The route
+A/route B and pre-brightness-pass numbers above (RMS 0.14419, peak 0.88477,
+route A within 1 %) predate this pass and were not re-verified against the
+brightened pattern — only route B was re-run, since that is what the
+brightness-pass measurement loop uses.
+
+## Brightness pass (deep-house quality-bench brightening)
+
+`agent/generative/quality.py`'s `analyze_wav` (the same function
+`scripts/quality_bench.py` runs against catalog references) scored this
+render as slightly dark against the deep-house references in
+`agent/generative/quality_references.json`: `centroid_hz` and
+`tilt_db_per_oct` both sat below the `deep` genre's band. This section is the
+record of closing that gap — every number below came from the same loop:
+`node record.mjs`, `docker cp` the WAV into the backend container (it has
+`agent/generative` and its deps; a worktree does not), run `analyze_wav`
+inside it.
+
+### Measurement-basis correction
+
+The first three iterations measured the render at its native 48 kHz. Partway
+through, it turned out the committed references were extracted at 44.1 kHz
+mono, and `centroid_hz`/`tilt_db_per_oct` are **not** sample-rate invariant in
+practice: `spectral_centroid_hz` sums over the *entire* rfft range up to
+Nyquist with no upper cutoff, so a 48 kHz render (Nyquist 24 kHz) and a
+44.1 kHz one (Nyquist 22.05 kHz) of the same musical content integrate a
+genuinely different slice of spectrum — 48 kHz native reads meaningfully
+*lower* on this render than the 44.1 kHz-resampled version of the exact same
+audio (`tilt_db_per_oct` is less affected, since that metric already masks
+its regression to ≤16 kHz internally, but still shifts a little under
+resampling). From iteration 3 onward every measurement was taken both ways;
+the trajectory table below reports both, and the pass/fail calls against the
+target bands use the 44.1 kHz **canonical** column, since that is the basis
+the bands themselves were computed on. Iterations 1-2 only have a native-48 k
+reading — reproducing the canonical one for them would have meant re-rendering
+configurations already superseded, which was not worth spending render budget
+on.
+
+### Round 1 — hats and the stab filter (iterations 1-3)
+
+The cheapest, safest energy to add was in the two roles that are already
+broadband/high-frequency by nature: `closedHat` (gain raised and the four-step
+velocity accent flattened upward) and `openHat` (flat gain raise only —
+see the code comment on why its decay/release were deliberately left alone:
+with none of `attack`/`decay`/`sustain`/`release` set, superdough's sampler
+already plays the "oh" sample to its full natural length, so there was no
+"longer tail" left to unlock). `stabs` kept its `triangle` oscillator (see
+below) but opened its `lpf` and added `lpq` resonance so the fast 8 ms attack
+transient rings the cutoff band, the same trick `bass` already used. Each
+step traded `MASTER_TRIM` down to hold peak under control. By iteration 3,
+`centroid_hz` had moved from the baseline's 4037.7 Hz to 5107.6 Hz
+(native) — comfortably past the target band — while `tilt_db_per_oct` had
+only crept from -5.03 to -4.16, still short of its band. Peak also touched
+0.951 mid-pass, over the 0.95 target.
+
+**Why `.s('triangle')` was never swapped for `square`/`sawtooth`, and why the
+stab voice was never doubled an octave up:** `test/pattern.test.mjs` (not
+this task's to edit) hard-codes the stabs' sound name in the final-bar
+sound-name-set assertion, and hard-codes 8 raw onsets/bar for stabs in two
+places (the role-level query and the same count filtered by `s === 'triangle'`
+at the pattern level). A different oscillator name or a second stacked voice
+at the same onset positions both fail one of those. Brightening the stab had
+to happen through parameters that don't change its identity or event count:
+filter cutoff, resonance, and decay.
+
+### Round 2 — rebalance + the `air` layer (iterations 4-5)
+
+The measurement-basis correction landed here too: on the canonical 44.1 kHz
+basis, iteration 3's already-rendered WAV actually measured centroid 4957.7 Hz
+(over the band) and tilt -4.47 (still under it) — confirming round 1's
+overshoot-without-proportionate-tilt-gain problem was real, not a rendering
+artifact.
+
+The diagnosis: every round-1 lever (hat gain, stab cutoff/resonance) adds
+energy mostly in the 3-6 kHz range, which `centroid_hz` (an energy-weighted
+*linear*-frequency mean) is very sensitive to, but which is only mildly above
+the log-frequency midpoint `tilt_db_per_oct`'s regression pivots on. Across
+iterations 1-3 the two metrics moved at a fairly consistent, unfavourable
+exchange rate: roughly 1100-1300 Hz of centroid per 1 dB/oct of tilt. Pushing
+that same lever mix further would only run centroid further past its ceiling
+for a shrinking tilt return.
+
+Round 2 first pulled back the two round-1 changes that read as the most
+centroid-expensive relative to their tilt contribution — `openHat` gain
+0.80 → 0.55, `stabs` cutoff 4800 → 3600 Hz and `lpq` 6 → 3 — which alone
+brought centroid back to 4535.0 Hz (canonical), comfortably mid-band. It then
+added a new layer, `air`: the closed-hat sample itself, pitched up
+(`speed()`) so its spectral content is transposed out of the crowded 3-6 kHz
+region into 6-16 kHz where almost nothing else in the mix has energy, gated
+to bars 8-16 (the `lift`/`peak` sections — chosen so it only *adds* to the
+`carries the arrangement` test's later-section margins rather than inflating
+the `intro`/`groove` baseline it's compared against), and deliberately kept
+out of `roles`/`description.roles` since it is a mix-bus embellishment, not a
+named musical part.
+
+The first `air` calibration (iteration 4: gain 0.16, `speed(1.6)`, no
+`.late()`, trim still 0.6) undershot on tilt — it landed at -4.69 (canonical),
+*worse* than iteration 3's -4.47: the two round-1 pull-backs (`openHat`,
+`stabs`) cost more tilt than this first, quiet `air` pass bought back. It also
+failed outright: peak came in at 0.992, over even the hard-tested 0.99
+ceiling, despite `air` being the quietest layer in the mix. The cause turned
+out not to be level: `air`'s un-swung 16ths share 8 of their 16 hits/bar with
+the exact instants `closedHat`'s own on-grid (unswung) hits land on, which are
+themselves the same instants `kick` fires on — a three-way coincidence, four
+times a bar, only in bars 8-15 where `air` is active.
+
+Iteration 5 (final) fixed and re-tuned `air` in one pass, since it was the
+last render in budget: `.late(1/32)` — a legitimate off-grid shaker
+placement, not just a technical patch — moves every hit off that shared
+instant, which alone dropped peak to 0.903 with no change in level. With the
+spike gone there was room to push `air` harder to chase tilt further: gain
+0.16 → 0.4, `speed(1.6)` → `speed(1.75)`. `MASTER_TRIM` also came down
+0.6 → 0.55 for extra margin. Net result: tilt recovered to -4.35 (canonical,
+better than iteration 3), but centroid — which the louder, more-transposed
+`air` also feeds — came back up to 4831.5 Hz, 57.7 Hz past the top of the
+band. Because the `.late()` fix and the `air` re-tune were not tested
+separately (one render, both changes), it is not possible to say from this
+data alone how much of the tilt recovery came from the louder `air` versus
+how much headroom the peak fix alone bought back.
+
+### Trajectory
+
+All `centroid_hz`/`tilt_db_per_oct` pass/fail calls are against the
+44.1 kHz canonical column. Target: centroid_hz [4336.9, 4773.8],
+tilt_db_per_oct [-3.89, -3.03], advisory lufs [-18.0, -16.9], peak < 0.95.
+
+| # | change | centroid (native 48 k) | centroid (canonical 44.1 k) | tilt (native) | tilt (canonical) | lufs | peak |
+|---|---|---|---|---|---|---|---|
+| 0 | baseline | 4037.7 | *n/m* | -5.03 | *n/m* | -18.03 | 0.885 |
+| 1 | closedHat/openHat gain up, stab `lpf`/decay | 4537.4 | *n/m* | -4.64 | *n/m* | -17.66 | 0.942 |
+| 2 | closedHat/openHat/stab pushed further | 4782.6 | *n/m* | -4.43 | *n/m* | -17.69 | 0.951 |
+| 3 | closedHat/openHat/stab pushed further again | 5107.6 | 4957.7 | -4.16 | -4.47 | -17.67 | 0.944 |
+| 4 | pulled openHat/stab back, `air` v1 (0.16 gain, speed 1.6) | *n/m* | 4535.0 | *n/m* | -4.69 | -17.86 | 0.992 (fail) |
+| 5 (final) | `air` v2 (0.4 gain, speed 1.75, `.late(1/32)`), trim 0.55 | 5037.95 | 4831.5 | -4.16 | -4.35 | -18.59 | 0.903 |
+
+*n/m = not measured on that basis at that iteration (see "Measurement-basis
+correction" above).*
+
+### Where this landed
+
+Final (iteration 5, canonical basis): `centroid_hz` 4831.5 — **57.7 Hz above**
+the band's top (4773.8). `tilt_db_per_oct` -4.35 — **0.46 short** of the
+band's floor (-3.89). Advisory `lufs` -18.59, 0.59 below its floor
+(report-only, not test-enforced — traded off deliberately, see below). Peak
+0.903, comfortably inside the 0.95 target and the hard-tested 0.99 ceiling.
+`npm test` is fully green (25/25); no `test/wav.test.mjs` threshold needed
+changing — every existing margin held on its own once the musical content
+moved.
+
+This is reported as the honest result of a 5-render budget, not a converged
+pass. Two things are worth saying plainly:
+
+- **Iteration 4 → 5 likely overshot.** Iteration 4 (centroid safely mid-band,
+  tilt short by 0.80) and iteration 5 (centroid over by 0.06, tilt short by
+  0.46) bracket a probably-better `air` calibration somewhere between gain
+  0.16-0.4 and speed 1.6-1.75 — interpolating the observed deltas linearly
+  suggests a setting that lands centroid exactly on the ceiling would still
+  leave tilt short by roughly 0.5, i.e. still not enough to clear both bands
+  at once with this lever alone. Worth a targeted follow-up iteration with a
+  fresh render budget rather than a guess spent here.
+- **The deeper constraint looks structural, not a tuning miss.** Every
+  available brightening lever in this pattern — sample gain, filter
+  cutoff/resonance, a pitched-up layer — draws on the same small set of
+  sources (TR909 `hh`/`oh` samples, a `triangle` synth), and all of them have
+  their own energy concentrated in roughly 3-8 kHz rather than genuinely in
+  8-16 kHz. `air` (pitching an existing sample up) was the closest tool
+  available to relocate energy into the top octave without synthesizing new
+  material, and it measurably improved the centroid-to-tilt exchange rate
+  (~870 Hz/dB vs. ~1100-1300 Hz/dB for the round-1 levers) but a quiet layer
+  covering half the track was not enough leverage over a whole-file average
+  dominated by 16 bars of kick, bass and the main hats. Closing the rest of
+  the gap likely needs either a genuinely bright new source (a real
+  shaker/ride/cymbal sample — not attempted here: `RolandTR909` has no ride,
+  and fetching an unverified sample name from the CDN bank risked a broken,
+  untested render with no iterations left to debug it) or superdough's
+  worklet-based `distort`/`shape` fx (also not attempted: these run through
+  an `AudioWorkletNode`, an untested code path in this project's specific
+  offline `OfflineAudioContext` render pipeline, and risking a full render
+  iteration on unverified infrastructure with the budget this tight was not
+  a good trade). Both are legitimate next steps, not ruled out — just not
+  attempted with the iterations available here.
+- **No metric was gamed.** Every change above is a real, audible, genre-typical
+  mixing/sound-design move (hotter hats, a resonant filter on a synth stab, a
+  pitched-up shaker layer, a trim pass) — nothing here is inaudible noise
+  added purely to move a number.
 
 ## Deviations from the plan
 
