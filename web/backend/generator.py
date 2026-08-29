@@ -1,23 +1,45 @@
-"""Apollo G0 — ACE-Step generator feature module (backend only, no UI yet).
+"""Apollo G0/G1 — ACE-Step generator feature module.
 
-Owns everything the session wizard's future "generate a track" step needs
-from the backend side. Follows the ``render.py`` precedent: an
-``APIRouter`` defined here, included from ``app.py`` with a single line,
-so the feature can grow (G1 submit/poll/audio-proxy, G2 publisher)
-without further surgery on ``app.py``.
+Owns everything the session wizard's "generate a track" step needs from
+the backend side. Follows the ``render.py`` precedent: an ``APIRouter``
+defined here, included from ``app.py`` with a single line, so the
+feature can grow (G2 publisher) without further surgery on ``app.py``.
 
 Plan: ``docs/acestep-wizard-plan.md``. API contract:
 ``docs/ACE-STEP-API-SPEC.md``. HTTP client: :mod:`acestep_client`.
 
-``GET /api/generator/health`` is the feature flag the wizard renders
-against: ``{available, blocked_by_live, stats}``. "Not available" is a
-normal answer — the ACE-Step box is off most of the time by design (the
-VRAM protocol below), so the UI must show "generator unavailable"
-instead of an error state.
+Endpoints
+---------
+
+``GET /api/generator/health`` (G0) is the feature flag the wizard
+renders against: ``{available, blocked_by_live, stats}``. "Not
+available" is a normal answer — the ACE-Step box is off most of the
+time by design (the VRAM protocol below), so the UI must show
+"generator unavailable" instead of an error state.
+
+``POST /api/generator/tasks`` (G1) releases one generation. This is the
+ONLY endpoint that touches the GPU, so it is the only one behind the
+VRAM guard (409). It also owns the catalog-safety defaults: WAV,
+``thinking``, and an explicit in-window ``bpm`` (spec §5.5 — poisoned
+BPMs have already caused live genre drift, so the value is pinned at
+release time rather than left to the LM).
+
+``GET /api/generator/tasks/{task_id}`` (G1) polls. Polling is allowed
+during a live set and is written to survive a flaky box: an ACE-Step
+blip degrades to ``{status: "pending", degraded: true}`` rather than
+5xx-ing the wizard's 3-second poll loop.
+
+``GET /api/generator/audio`` (G1) proxies take audio. The browser never
+talks to :8001 — auth and LAN isolation live here.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+import asyncio
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import acestep_client, auth
 from .ws_manager import ws_manager
@@ -26,6 +48,68 @@ from .ws_manager import ws_manager
 #: ``ws_manager`` channel the primary live WS registers under. Defined in
 #: ``app.live_session_ws`` (``ws_manager.connect(..., channel="live")``).
 LIVE_WS_CHANNEL = "live"
+
+#: Rendered VERBATIM by the wizard when a release is refused (the plan's
+#: G1 frontend contract) — so it speaks the wizard's language, which is
+#: English throughout (<html lang="en">, "Sequence the night"). It matches
+#: the voice of the frontend's own blocked_by_live tooltip.
+VRAM_CONFLICT_MESSAGE = (
+    "VRAM protocol: a set is on air. ACE-Step holds ~12.5 GB of the shared "
+    "16 GB GPU, so generating now would starve the live DJ's model. Try "
+    "again when the session ends."
+)
+
+#: ``ACESTEP_BASE_URL`` unset, or the box unreachable. Both mean the same
+#: thing to the wizard, and neither is an error worth a stack trace.
+UNAVAILABLE_MESSAGE = (
+    "The ACE-Step generator is not available "
+    f"({acestep_client.ENV_BASE_URL} unset or the box is off)."
+)
+
+# ── Release defaults (docs/acestep-wizard-plan.md, G1 contract) ───────
+
+DEFAULT_AUDIO_DURATION_SEC = 180.0
+MIN_AUDIO_DURATION_SEC = 120.0   # Apollo catalog floor (spec §5)
+MAX_AUDIO_DURATION_SEC = 600.0   # ACE-Step ceiling (spec §3.1)
+DEFAULT_BATCH_SIZE = 2
+MAX_BATCH_SIZE = 8
+DEFAULT_VOCAL_LANGUAGE = "en"
+MIN_BPM = 30
+MAX_BPM = 300
+
+#: The catalog contract is WAV (spec §5) — never let the UI pick mp3.
+CATALOG_AUDIO_FORMAT = "wav"
+
+#: Fields the server owns. The ``experimental`` passthrough may not
+#: shadow them (that is a 422, not a silent override) — otherwise an
+#: ``audio_format: "mp3"`` or a second ``duration`` sneaks past the
+#: catalog validations G2 depends on. Aliases the API accepts for the
+#: same slot (``caption``/``duration``, spec §3.1) are included.
+SERVER_OWNED_FIELDS = frozenset({
+    "audio_duration", "audio_format", "batch_size", "bpm", "caption",
+    "duration", "key_scale", "lyrics", "prompt", "thinking",
+    "vocal_language",
+})
+
+#: ``query_result`` status → the wizard's vocabulary (spec §4).
+TASK_STATUS_NAMES = {0: "pending", 1: "done", 2: "failed"}
+
+#: Poll failures that must NOT 5xx: a queue blip, a restarting box or a
+#: momentarily malformed batch are all "ask again in 3 s". An auth or
+#: bad-request failure is a misconfiguration and stays loud (502).
+_POLL_DEGRADE_ERRORS = (
+    acestep_client.AceStepUnavailable,
+    acestep_client.AceStepServerError,
+    acestep_client.AceStepQueueFull,
+    acestep_client.AceStepProtocolError,
+)
+
+#: Upstream headers worth mirroring on the audio proxy. ``content-type``
+#: is handled separately (Starlette owns it via ``media_type``).
+_PROXY_HEADERS = (
+    "content-length", "content-range", "accept-ranges", "etag",
+    "last-modified",
+)
 
 
 def live_session_active(session_id: str | None = None) -> bool:
@@ -75,6 +159,251 @@ def _client() -> acestep_client.AceStepClient:
     return acestep_client.AceStepClient()
 
 
+# ── Genre windows: where the bpm default comes from ──────────────────
+
+
+def _genre_bpm_windows() -> dict[str, tuple[int, int]]:
+    """The BPM window table used for the ``bpm`` default.
+
+    Bound to ``agent.tools._BPM_GENRE_RANGES``, **not** to the canonical
+    ``main.BPM_GENRE_RANGES``, on purpose: ``agent.tools`` is already a
+    backend dependency (``web.backend.pipeline`` imports it at module
+    scope), whereas importing ``main`` costs ~2.6 s and ~1800 modules
+    (librosa + numba + moviepy + pedalboard) — unacceptable inside a
+    request handler, and no backend module has ever imported it.
+
+    The known cost is drift: ``agent/tools.py`` keeps a partial copy
+    (CLAUDE.md, "Adding a new genre" step 5), so genres like
+    ``cocktail house`` and ``soul jazz`` are missing from it. That is
+    why this table is used ONLY to pick a default and never as the
+    genre allow-list (see :func:`_resolve_genre`): a genre with no
+    window still generates, it just goes out without a server-pinned
+    bpm and says so in the log.
+
+    Lazy import so this module stays importable on its own (the tests
+    import it directly) — the ``render.py`` precedent.
+    """
+    from agent.tools import _BPM_GENRE_RANGES  # noqa: PLC0415
+
+    return _BPM_GENRE_RANGES
+
+
+def _catalog_genres() -> set[str]:
+    """Lower-cased ``genre_folder`` set from tracks.json (empty on error).
+
+    Second half of the "genre_folder must exist" check. Never fatal: a
+    missing or unreadable catalog degrades to "no catalog opinion", so
+    generation still works from the window table alone (a worktree
+    without ``tracks/`` is a normal dev state).
+    """
+    from . import pipeline  # noqa: PLC0415 — heavy import chain
+
+    try:
+        _, genres = pipeline.load_catalog(None)
+    except Exception as exc:  # noqa: BLE001 — advisory lookup, never fatal
+        print(f"[generator] catalog genres unavailable: {exc}", flush=True)
+        return set()
+    return {g.strip().lower() for g in genres if g}
+
+
+def _default_bpm_for(genre_key: str) -> int | None:
+    """Centre of the genre's BPM window, or ``None`` when it has none.
+
+    Spec §5.5: pass an explicit bpm at the centre of the destination
+    genre's window so ``metas.bpm`` comes back in-window and the take is
+    ingestable without re-detection.
+    """
+    window = _genre_bpm_windows().get(genre_key)
+    if not window:
+        return None
+    lo, hi = window
+    return int(round((lo + hi) / 2))
+
+
+def _resolve_genre(genre_folder: str) -> str:
+    """Validate ``genre_folder`` and return its lower-cased key.
+
+    Known = in the BPM window table OR in the catalog (case-insensitive,
+    matching ``main``'s ``BPM_GENRE_RANGES.get(genre.lower())``). The
+    catalog is only consulted when the window table has no entry, so the
+    common path costs no I/O.
+    """
+    key = genre_folder.strip().lower()
+    if key in _genre_bpm_windows():
+        return key
+    if key in _catalog_genres():
+        return key
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"Unknown genre_folder '{genre_folder}'. It must exist in the "
+            "catalog (tracks/<genre>/) — a new genre is a coordinated "
+            "checklist, not something the wizard improvises."
+        ),
+    )
+
+
+# ── ETA ──────────────────────────────────────────────────────────────
+
+
+def _eta_seconds(stats: dict | None, queue_position: int | None) -> int | None:
+    """``avg_job_seconds × (queue_position + running)``, ``None`` without stats.
+
+    The contract's formula, with one floor: a job that is queued behind
+    nothing still takes about one job's worth of time, so the product is
+    clamped to at least one ``avg_job_seconds``. ``queue_position`` is
+    ``None`` on the poll path (``query_result`` does not re-report a
+    position), which reads as "unknown, assume the head of the queue".
+    """
+    if not isinstance(stats, dict):
+        return None
+    avg = stats.get("avg_job_seconds")
+    if isinstance(avg, bool) or not isinstance(avg, (int, float)) or avg <= 0:
+        return None
+
+    running = stats.get("running")
+    if isinstance(running, bool) or not isinstance(running, int) or running < 0:
+        running = 0
+    ahead = (queue_position or 0) + running
+    return int(round(avg * max(ahead, 1)))
+
+
+async def _stats_or_none(client: acestep_client.AceStepClient) -> dict | None:
+    """``/v1/stats`` for the ETA. Any failure means "no ETA", never a 5xx."""
+    try:
+        stats = await client.stats()
+    except acestep_client.AceStepError as exc:
+        print(f"[generator] /v1/stats unavailable, no ETA: {exc}", flush=True)
+        return None
+    return stats if isinstance(stats, dict) else None
+
+
+# ── Request body ─────────────────────────────────────────────────────
+
+
+class GenerationRequest(BaseModel):
+    """The wizard's "Suno mode" surface (API spec §3.1).
+
+    ``extra="forbid"``: the body IS this shape, and a silently ignored
+    typo would show up as a mysteriously ordinary take hours later.
+    Anything genuinely advanced goes through ``experimental``, which is
+    forwarded verbatim.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    lyrics: str = Field("", max_length=20000)
+    audio_duration: float = Field(
+        DEFAULT_AUDIO_DURATION_SEC,
+        ge=MIN_AUDIO_DURATION_SEC,
+        le=MAX_AUDIO_DURATION_SEC,
+    )
+    vocal_language: str = Field(DEFAULT_VOCAL_LANGUAGE, min_length=1, max_length=16)
+    genre_folder: str = Field(..., min_length=1)
+    bpm: int | None = Field(None, ge=MIN_BPM, le=MAX_BPM)
+    key_scale: str | None = Field(None, max_length=64)
+    batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=MAX_BATCH_SIZE)
+    experimental: dict[str, Any] | None = None
+
+    @field_validator("prompt", "genre_folder")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def _experimental_stays_out_of_server_fields(self) -> GenerationRequest:
+        if not self.experimental:
+            return self
+        clashes = sorted(
+            k for k in self.experimental if k.strip().lower() in SERVER_OWNED_FIELDS
+        )
+        if clashes:
+            raise ValueError(
+                "experimental may not override server-owned fields: "
+                + ", ".join(clashes)
+            )
+        return self
+
+
+def _release_payload(req: GenerationRequest, bpm: int | None) -> dict[str, Any]:
+    """Body for ``POST /release_task`` — the server's defaults applied.
+
+    ``audio_format`` and ``thinking`` are pinned here (catalog contract +
+    spec's quality advice); ``bpm`` is included only when known, so a
+    genre with no window falls back to the LM instead of being refused.
+    """
+    payload: dict[str, Any] = {
+        "prompt": req.prompt.strip(),
+        "lyrics": req.lyrics,
+        "audio_duration": req.audio_duration,
+        "vocal_language": req.vocal_language.strip(),
+        "batch_size": req.batch_size,
+        "audio_format": CATALOG_AUDIO_FORMAT,
+        "thinking": True,
+    }
+    if bpm is not None:
+        payload["bpm"] = bpm
+    if req.key_scale and req.key_scale.strip():
+        payload["key_scale"] = req.key_scale.strip()
+    if req.experimental:
+        payload.update(req.experimental)
+    return payload
+
+
+# ── Audio proxy helpers ──────────────────────────────────────────────
+
+
+def _authorize_audio(request: Request, token: str | None) -> dict:
+    """Bearer header OR ``?token=`` — an ``<audio>`` tag cannot set headers.
+
+    Same query-string escape hatch as ``stream_track`` /
+    ``download_asset``; the header path keeps ``fetch()`` callers working
+    with the wizard's normal auth.
+    """
+    header = request.headers.get("authorization") or ""
+    raw = header[7:].strip() if header[:7].lower() == "bearer " else (token or "").strip()
+    if not raw:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    user = auth.user_from_query_token(raw)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return user
+
+
+def _validate_proxy_path(path: str) -> str:
+    """Reject anything that is not a relative ACE-Step API path.
+
+    The value is a take's ``file`` field — ``/v1/audio?path=<encoded>``
+    — and stays OPAQUE here: the inner filesystem path is ACE-Step's
+    business, url-encoded inside the query string. What must not get
+    through is a host (``http://…``, ``//host/…``), which would turn the
+    proxy into an open redirector/SSRF hop, or a bare absolute path
+    (``/tmp/out/take0.wav``, ``C:\\…``), which is a filesystem location
+    rather than an endpoint.
+    """
+    raw = (path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="path is required")
+    lowered = raw.lower()
+    if "://" in lowered or raw.startswith("//"):
+        raise HTTPException(
+            status_code=400, detail="path must be relative to the ACE-Step base URL"
+        )
+    if "\\" in raw or (len(raw) > 1 and raw[1] == ":"):
+        raise HTTPException(status_code=400, detail="path must not be a local file path")
+    if raw.startswith("/") and not raw.startswith("/v1/"):
+        raise HTTPException(
+            status_code=400,
+            detail="path must be an ACE-Step API path (/v1/audio?path=...)",
+        )
+    if ".." in raw.split("?")[0].split("/"):
+        raise HTTPException(status_code=400, detail="path must not traverse directories")
+    return raw
+
+
 router = APIRouter()
 
 
@@ -112,3 +441,208 @@ async def generator_health(
         "blocked_by_live": live_session_active(),
         "stats": stats,
     }
+
+
+@router.post("/api/generator/tasks")
+async def create_generation_task(
+    req: GenerationRequest,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Release one generation to ACE-Step. **The only GPU-touching call.**
+
+    Refusal ladder (checked in this order, cheapest and most fundamental
+    first — note FastAPI runs body validation before the handler, so a
+    malformed body is a 422 even on a disabled generator):
+
+    * **503** — generator disabled (``ACESTEP_BASE_URL`` unset) or the
+      box unreachable. Both are normal states, not outages.
+    * **409** — a live set is on air (:func:`live_session_active`, the
+      G0 guard). Detail is :data:`VRAM_CONFLICT_MESSAGE`, which the
+      wizard renders verbatim.
+    * **422** — unknown ``genre_folder``, or a field outside its range.
+    * **429** — ACE-Step's queue is full (``ACESTEP_QUEUE_MAXSIZE``).
+      Backpressure the wizard can honour, not a failure.
+    * **502** — ACE-Step answered but rejected/broke (bad key, protocol).
+
+    Returns ``{task_id, queue_position, eta_seconds}``.
+    """
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+    if live_session_active():
+        raise HTTPException(status_code=409, detail=VRAM_CONFLICT_MESSAGE)
+
+    genre_key = await asyncio.to_thread(_resolve_genre, req.genre_folder)
+    bpm = req.bpm if req.bpm is not None else _default_bpm_for(genre_key)
+    if bpm is None:
+        # Visible, not silent: this genre has no window in the table this
+        # module binds to, so the LM picks the tempo and G2's in-window
+        # validation may reject the take.
+        print(
+            f"[generator] no BPM window for genre '{genre_key}' — "
+            "releasing without a server-pinned bpm",
+            flush=True,
+        )
+
+    payload = _release_payload(req, bpm)
+    try:
+        released = await client.release_task(payload)
+    except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except acestep_client.AceStepQueueFull as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="ACE-Step's queue is full — retry in a moment.",
+        ) from exc
+    except acestep_client.AceStepError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    stats = await _stats_or_none(client)
+    return {
+        "task_id": released.task_id,
+        "queue_position": released.queue_position,
+        "eta_seconds": _eta_seconds(stats, released.queue_position),
+    }
+
+
+@router.get("/api/generator/tasks/{task_id}")
+async def get_generation_task(
+    task_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Poll one task. Allowed during a live set — polling costs no VRAM.
+
+    Maps ``query_result``'s ``status`` 0/1/2 onto
+    ``pending``/``done``/``failed`` and flattens the batch into
+    ``takes``. Written to survive a flaky box: an ACE-Step blip (or a
+    task id it does not know yet) answers ``{status: "pending",
+    degraded: true}`` with HTTP 200, because a wizard polling every 3 s
+    must not fall over on one bad round trip. ``result_parse_error`` is
+    carried through rather than raised, for the same reason.
+
+    The keys are always present (``degraded`` and ``result_parse_error``
+    included) so the poll loop never has to feature-detect.
+    """
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+
+    try:
+        results = await client.query_result([task_id])
+    except acestep_client.AceStepDisabled as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except _POLL_DEGRADE_ERRORS as exc:
+        print(f"[generator] poll of {task_id} degraded: {exc}", flush=True)
+        return _degraded_poll(task_id)
+    except acestep_client.AceStepError as exc:
+        # Auth / bad request: a misconfiguration that retrying cannot fix.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    entry = next((r for r in results if r.task_id == task_id), None)
+    if entry is None and len(results) == 1 and not results[0].task_id:
+        entry = results[0]  # answered positionally, without echoing the id
+    if entry is None:
+        print(f"[generator] poll of {task_id}: no entry in the batch", flush=True)
+        return _degraded_poll(task_id)
+
+    status = TASK_STATUS_NAMES.get(entry.status, "pending")
+    eta = None
+    if status == "pending":
+        eta = _eta_seconds(await _stats_or_none(client), None)
+
+    return {
+        "task_id": task_id,
+        "status": status,
+        "takes": [
+            {
+                "index": index,
+                "file": take.file,
+                "prompt": take.prompt,
+                "lyrics": take.lyrics,
+                "metas": take.metas,
+                "seed_value": take.seed_value,
+            }
+            for index, take in enumerate(entry.takes)
+        ],
+        "eta_seconds": eta,
+        "degraded": False,
+        "result_parse_error": entry.result_parse_error,
+    }
+
+
+def _degraded_poll(task_id: str) -> dict:
+    """The "ask again in 3 s" answer — same shape, ``degraded: true``."""
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "takes": [],
+        "eta_seconds": None,
+        "degraded": True,
+        "result_parse_error": None,
+    }
+
+
+@router.get("/api/generator/audio")
+async def proxy_take_audio(
+    request: Request,
+    path: str = Query(..., min_length=1),
+    token: str | None = Query(None),
+):
+    """Stream a take's audio from ACE-Step. Allowed during a live set.
+
+    The browser never talks to :8001: auth (header or ``?token=``, since
+    ``<audio>`` cannot set headers) and LAN isolation live here.
+    ``path`` is the take's ``file`` field, forwarded opaque to
+    ``AceStepClient.audio_url``; :func:`_validate_proxy_path` refuses
+    anything carrying a host or naming a local file.
+
+    Range-friendly the cheap way: the client's ``Range`` header is
+    forwarded and upstream's status (206) plus its range headers are
+    mirrored back, so ``<audio>`` seeking works the way it does on
+    ``FileResponse`` elsewhere without buffering a 35 MB WAV in the
+    backend.
+    """
+    _authorize_audio(request, token)
+    safe_path = _validate_proxy_path(path)
+
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+
+    forwarded = {}
+    range_header = request.headers.get("range")
+    if range_header:
+        forwarded["range"] = range_header
+
+    stream = client.stream_audio(safe_path, headers=forwarded)
+    try:
+        upstream = await stream.__aenter__()
+    except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except acestep_client.AceStepError as exc:
+        status = 404 if exc.status_code == 404 else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except ValueError as exc:  # audio_url() rejected an empty path
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    headers = {
+        name: value
+        for name in _PROXY_HEADERS
+        if (value := upstream.headers.get(name))
+    }
+
+    async def body():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            # Closes the response AND the httpx client behind it, on a
+            # client disconnect as much as on a clean finish.
+            await stream.__aexit__(None, None, None)
+
+    return StreamingResponse(
+        body(),
+        status_code=upstream.status_code,
+        headers=headers,
+        media_type=upstream.headers.get("content-type") or "audio/wav",
+    )

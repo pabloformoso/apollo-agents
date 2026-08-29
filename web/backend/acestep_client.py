@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote
@@ -501,6 +503,57 @@ class AceStepClient:
                 )
             )
         return out
+
+    @asynccontextmanager
+    async def stream_audio(
+        self,
+        path: str,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> AsyncIterator[httpx.Response]:
+        """Open a streaming ``GET`` on a take's audio (G1's proxy).
+
+        Yields an **open** ``httpx.Response``; the caller iterates
+        ``aiter_bytes()`` and the context manager closes both the
+        response and the underlying client on exit. A 3-minute 48 kHz
+        WAV is ~35 MB, so the backend must never buffer it whole.
+
+        ``headers`` is merged over the client's own (that is how the
+        proxy forwards ``Range``). Error statuses are raised as the
+        usual typed errors — with the body drained first, since a
+        streaming response has not read one yet. No envelope unwrapping
+        happens here: the payload is audio, not JSON.
+
+        This exists because the proxy has to speak through the SAME
+        injected transport and auth headers as every other call
+        (:meth:`audio_url` alone would force the endpoint to open its
+        own socket, which the test suite must never do).
+        """
+        url = self.audio_url(path)
+        async with httpx.AsyncClient(
+            timeout=self._timeout,
+            transport=self._transport,
+            headers=self._headers(),
+        ) as client:
+            request = client.build_request("GET", url, headers=headers or None)
+            try:
+                response = await client.send(request, stream=True)
+            except httpx.HTTPError as exc:
+                raise AceStepUnavailable(
+                    f"ACE-Step unreachable at {url}: {type(exc).__name__}: {exc}"
+                ) from exc
+            try:
+                if response.status_code >= 400:
+                    await response.aread()
+                    detail = (response.text or "").strip()[:200] or response.reason_phrase
+                    raise _error_for_status(response.status_code)(
+                        f"ACE-Step returned HTTP {response.status_code} for "
+                        f"the take audio: {detail}",
+                        status_code=response.status_code,
+                    )
+                yield response
+            finally:
+                await response.aclose()
 
     def audio_url(self, path: str) -> str:
         """Absolute URL for a take's audio (G1 proxies this, G2 downloads it).

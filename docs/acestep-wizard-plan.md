@@ -61,6 +61,150 @@
 - Live guard: fake registry active/inactive → `blocked_by_live` flips.
 - The endpoint shape itself (FastAPI TestClient) incl. auth header pass-through.
 
+## G1 contract (2026-08-29) — the wizard "generate" step
+
+### Backend (`web/backend/generator.py` grows three endpoints, all authed)
+
+- **`POST /api/generator/tasks`** — body (Suno-mode surface):
+  `{prompt, lyrics?, audio_duration (120–600, default 180), vocal_language?
+  ("en"), genre_folder (must exist — drives the bpm default), bpm?,
+  key_scale?, batch_size? (1–8, default 2), experimental?: {inference_steps,
+  seed, time_signature, ...passthrough}}`.
+  Server fills: `audio_format: "wav"`, `thinking: true`, and — when `bpm`
+  is absent — the CENTER of the genre's `BPM_GENRE_RANGES` window (the
+  spec's §5.5 advice, enforced server-side so metas come back in-window).
+  Refusals: generator disabled → **503**; `live_session_active()` → **409**
+  with a message naming the VRAM protocol (THE G0 guard doing its job);
+  bad genre / out-of-range fields → 422. Success → `{task_id,
+  queue_position, eta_seconds}` (eta = stats `avg_job_seconds` ×
+  (queue_position + running), null when stats are unavailable).
+- **`GET /api/generator/tasks/{task_id}`** — maps `query_result` status
+  0/1/2 → `{status: "pending"|"done"|"failed", takes: [{index, file,
+  prompt, lyrics, metas{bpm,duration,genres,keyscale,timesignature},
+  seed_value}], eta_seconds}`. Poll-friendly: transport errors to ACE
+  surface as `{status: "pending", degraded: true}` (a poll must survive a
+  blip), and `result_parse_error` on a take is carried through, not fatal.
+  Polling/audio are allowed during a live session — only task RELEASE
+  touches the GPU.
+- **`GET /api/generator/audio?path=...`** — streaming proxy of ACE's
+  `/v1/audio` (the browser never talks to :8001 directly; auth + LAN
+  isolation live here). Path is passed opaque and url-encoded to the
+  client's `audio_url()`; refuse (400) obviously non-relative paths.
+
+### Frontend (the wizard)
+
+- Entry: a **"Generar (ACE)"** affordance in the wizard's track-selection
+  stage, feature-flagged by `/api/generator/health`: hidden when
+  `available` is false; visible-but-disabled with a "protocolo VRAM:
+  directo en el aire" tooltip when `blocked_by_live`.
+- Form = the Suno surface (§3.1 of the API spec): prompt, lyrics textarea
+  (placeholder hinting `[Verse]`/`[Chorus]`, empty = instrumental),
+  duration (120–300, default 180), language, genre (existing genres only —
+  drives the bpm default shown as helper text), takes (batch_size, default
+  2), and a **collapsed "Experimental"** panel (inference_steps, seed,
+  key_scale, time_signature). Submit → task card.
+- Task card: queue position + **ETA countdown** (from `eta_seconds`,
+  refreshed each poll), poll every 3 s (house fetch conventions), then the
+  takes: audio `<audio>` players via the backend proxy + metadata chips
+  (bpm · key · duration · seed). Errors human-readable; a 409 renders the
+  VRAM message verbatim. **No publish action this slice** — a disabled
+  "Publicar al catálogo (G2)" placeholder marks the seam.
+- Reuse the wizard's existing player/components and visual voice — explore
+  before inventing.
+
+### Tests
+
+- Backend (`tests/web/`): 409-when-live (fake registry), 503-when-disabled,
+  defaulting (bpm center, wav, thinking), 422s, status mapping incl.
+  degraded-poll and parse-error passthrough, proxy streaming + auth +
+  path validation. MockTransport only.
+- Frontend: vitest for the polling hook/state machine (pending→done,
+  degraded blip, failed) and the flag gating; Playwright E2E with stubbed
+  `/api/generator/*` walking form → task card → takes rendered (house
+  stub conventions from the existing E2E specs).
+
+## G2 contract (2026-08-29) — publisher to the catalog
+
+Split in two, collision-driven: **G2a (ingest machinery)** builds against
+origin/main in parallel with G1 (disjoint files); **G2b (publish endpoint +
+wizard button)** lands after G1 merges (both touch `generator.py` + the
+wizard).
+
+### G2a — `agent/keyscale.py` + `main.py --ingest`
+
+- **`agent/keyscale.py`**: `keyscale_to_camelot(keyscale: str) -> str` —
+  parses ACE's `metas.keyscale` forms ("A Minor", "C# Major", "Ab minor",
+  flats/sharps, tolerant of case/whitespace) into Camelot per the spec §5.3
+  table; `ValueError` naming the offending input when unparseable.
+  Consistency asserted against `agent/generative/scales.py` where the two
+  overlap.
+- **`main.py --ingest`** (the agreed ingest v2; sits beside
+  `--build-catalog`/`--fix-incomplete`):
+  `--ingest <wav> --genre <genre_folder> --display-name <name>
+  (--bpm N --keyscale "A Minor" | --sidecar meta.json) [--variant-of <id>]
+  [--lyrics <file>] [--dry-run]`.
+  Sidecar shape (v2): `{bpm, keyscale, display_name, variant_of?, lyrics?}`.
+  Pipeline: genre folder must exist → probe audio (soundfile): duration
+  ≥ 120 s or refuse → resample to 44.1 kHz/16-bit/stereo via an ffmpeg
+  subprocess ONLY when not already conformant → bpm inside the genre's
+  `BPM_GENRE_RANGES` window or refuse (naming the window) → WAV lands in
+  `tracks/<genre>/` → tracks.json entry `{id, display_name, file,
+  genre_folder, genre, camelot_key, bpm, variant_of}` following the SAME
+  id/display conventions `--build-catalog` uses (read and mirror them; no
+  id collisions) → **tracks.json backed up before writing** (house rule) →
+  optional `.lrc` sidecar next to the WAV. **No madmom anywhere in this
+  path** (beatgrid backfill stays `--fix-incomplete`'s job). `--dry-run`
+  prints the full plan and touches nothing.
+- Tests: the full §5.3 table (24 rows) + enharmonics + garbage; ingest
+  happy path into a tmp catalog fixture; every refusal (short, bad genre,
+  out-of-window bpm, unparseable keyscale); a REAL tiny-ffmpeg resample
+  (48 k in → 44.1/16 out, probed); conformant input NOT re-encoded;
+  variant_of passthrough; backup file created; dry-run leaves zero writes;
+  id-collision behavior.
+
+### G3 contract (draft 2026-08-29) — take editing before publishing
+
+- **Backend**: `POST /api/generator/tasks/{task_id}/edit` — body
+  `{take_index, mode: "repaint"|"cover"|"complete", prompt?,
+  repainting_start?, repainting_end?, audio_cover_strength?}` → re-releases
+  against ACE with `task_type` set and the SOURCE take referenced, returns a
+  new `task_id` served by the existing polling endpoint. Refusals mirror
+  `POST /tasks` (503 / 409-VRAM / 422 — an edit releases GPU work too).
+- **Source audio: CONFIRMED by the ACE session (verified in their server
+  code, 2026-08-29)** — the result's `file` is `/v1/audio?path=<server
+  path>`; the URL-DECODED path is directly reusable as `src_audio_path`
+  (their validator admits paths under the process tmpdir, where results
+  live). No multipart in the client. Same-server only.
+- **Persistence rule (applies to G1/G2b/G3 alike)**: ACE's job RECORDS
+  expire (in-memory store, 24 h max age, dies with the process — and the
+  VRAM protocol stops the server between batches); the result FILES are
+  never reaped and survive restarts. Therefore the PAGE persists each
+  take's decoded path + metas + prompt/lyrics the moment a poll returns
+  them, and every later flow (publish, edit) carries that data FROM THE
+  CLIENT — the backend never re-queries `query_result` for an old task.
+- Repaint: `repainting_start/end` in SECONDS of the source audio,
+  `end=-1` = to the end; `chunk_mask_mode: "explicit"` applies the range
+  as an exact mask; `thinking` is auto-ignored in repaint.
+- **Frontend**: per-take "Editar" → mode selector + a range control over
+  the take's duration for repaint (+ strength for cover); the edited result
+  renders as a CHAINED task card under its source (lineage visible — on
+  stream and in the wizard, "v2 of take 1" must read at a glance).
+- Tests both sides, house patterns (MockTransport / vitest + one E2E stub).
+
+### G2b — publish endpoint + wizard button (queued behind G1's merge)
+
+- `POST /api/generator/publish` — body `{file (the take's /v1/audio path
+  param, URL-decoded, AS PERSISTED BY THE PAGE per the G3 persistence
+  rule), metas{bpm, keyscale, duration}, prompt?, lyrics?, display_name,
+  genre_folder, variant_of?}`: downloads the audio via the client, runs
+  THE SAME ingest path (import it, don't reimplement), publishes into the
+  catalog. No task_id in the contract — the backend never re-queries an
+  old task (ACE's job store is mortal; the file is not). Refuses while
+  the builder is running.
+- Wizard: the G1 placeholder button comes alive; per-take publish with
+  genre + name prefilled from the form; first-batch validation handshake
+  with the Apollo session stays the agreed manual step.
+
 ## Ops notes
 
 - Port map: ACE API :8001 (LAN) — no conflict with 4010/4020 (prod),

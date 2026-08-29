@@ -17,17 +17,31 @@ import { streamUrl } from "./api";
  * is what makes playback survive client-side route changes.
  */
 
+/**
+ * A track the player can play. Catalog tracks resolve their audio from
+ * `streamUrl(id)`; anything that is not (yet) a catalog entry — G1's
+ * ACE-Step takes, served through `/api/generator/audio` — carries its own
+ * `stream_url` instead. `Track` is assignable to `Playable`, so every
+ * existing call site is unchanged.
+ */
+export type Playable = Track & { stream_url?: string };
+
+/** Where the audio for this item lives. */
+function srcFor(track: Playable): string {
+  return track.stream_url ?? streamUrl(track.id);
+}
+
 export interface PlayerState {
-  currentTrack: Track | null;
+  currentTrack: Playable | null;
   isPlaying: boolean;
   progressSec: number;
   durationSec: number;
   volume: number;
-  queue: Track[];
+  queue: Playable[];
 }
 
 export interface PlayerApi extends PlayerState {
-  play: (track: Track, queue?: Track[]) => void;
+  play: (track: Playable, queue?: Playable[]) => void;
   pause: () => void;
   resume: () => void;
   toggle: () => void;
@@ -50,8 +64,8 @@ export function usePlayer(): PlayerApi {
 
 export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
-  const [queue, setQueue] = useState<Track[]>([]);
+  const [currentTrack, setCurrentTrack] = useState<Playable | null>(null);
+  const [queue, setQueue] = useState<Playable[]>([]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [progressSec, setProgressSec] = useState(0);
   const [durationSec, setDurationSec] = useState(0);
@@ -86,7 +100,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
         const nxt = queue[idx + 1];
         setCurrentTrack(nxt);
         if (audioRef.current) {
-          audioRef.current.src = streamUrl(nxt.id);
+          audioRef.current.src = srcFor(nxt);
           audioRef.current.play().catch(() => {});
         }
       }
@@ -106,12 +120,12 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     };
   }, [currentTrack, queue]);
 
-  const play = useCallback((track: Track, list?: Track[]) => {
+  const play = useCallback((track: Playable, list?: Playable[]) => {
     const el = audioRef.current;
     if (!el) return;
     setCurrentTrack(track);
     setQueue(list && list.length > 0 ? list : [track]);
-    el.src = streamUrl(track.id);
+    el.src = srcFor(track);
     el.currentTime = 0;
     el.play().catch(() => {
       // Swallow autoplay rejections — UI reflects state via `play`/`pause` events.

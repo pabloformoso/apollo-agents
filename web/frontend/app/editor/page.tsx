@@ -50,6 +50,8 @@ import {
 } from "@/components/ember/primitives";
 import { Spinner, toast } from "@/components/ember/feedback";
 import { TrackPicker } from "@/components/ember/TrackPicker";
+import { GenerateTrackTile } from "@/components/ember/GenerateTrackTile";
+import { GeneratorDialog } from "@/components/ember/GeneratorDialog";
 
 import { playlistRowKey, playlistRowIds } from "@/lib/playlistKeys";
 // Same coefficients as `web/backend/arc.py`. Pure UI fallback for legacy
@@ -162,6 +164,9 @@ export default function EditorPage() {
   const [events, setEvents] = useState<EditorEvent[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
+  // G1 — ACE-Step generation. The tile hides itself when the generator is
+  // unavailable, so the dialog is only ever reachable when it can answer.
+  const [genOpen, setGenOpen] = useState(false);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -415,6 +420,7 @@ export default function EditorPage() {
                   <Plus />
                   <span className="text-xs">Add a track</span>
                 </button>
+                <GenerateTrackTile onClick={() => setGenOpen(true)} />
               </div>
             </SortableContext>
           </DndContext>
@@ -589,6 +595,12 @@ export default function EditorPage() {
         genre={session.genre ?? null}
         existingIds={tracks.map((t) => t.id)}
         onSelect={onInsertTrack}
+      />
+
+      <GeneratorDialog
+        open={genOpen}
+        onClose={() => setGenOpen(false)}
+        defaultGenre={session.genre ?? null}
       />
     </Shell>
   );
