@@ -94,9 +94,12 @@ def _camelot_step_distance(key_a: str, key_b: str) -> int:
 
 _BPM_GENRE_RANGES = {
     "lofi - ambient": (60, 110),
+    "lofi": (60, 110),
     "techno": (120, 160),
     "cyberpunk": (120, 160),
     "deep house": (115, 135),
+    "cocktail house": (102, 126),
+    "soul jazz": (75, 140),
     # Keep in sync with ``BPM_GENRE_RANGES`` in main.py. Only used here to
     # scale the energy curve, so a missing genre degrades to the (60, 200)
     # fallback rather than crashing — but for a 50-100 BPM genre that

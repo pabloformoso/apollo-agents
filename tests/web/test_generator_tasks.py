@@ -1000,7 +1000,20 @@ def test_the_bound_bpm_table_agrees_with_main_where_both_define_a_genre():
 
 
 def test_every_bound_window_yields_an_integer_centre():
+    """``_default_bpm_for`` must round to a usable int, not just average.
+
+    The exact-equality form of this assertion (``centre == (lo + hi) / 2``)
+    only ever held by accident: every genre bound at the time had an even
+    ``lo + hi``, so the unrounded midpoint was already a whole number. Sync
+    with main.py's ``BPM_GENRE_RANGES`` (2026-08-29) added "soul jazz"
+    (75, 140), whose midpoint is 107.5 — no int can equal that, so the old
+    assertion was mathematically unsatisfiable for this window regardless
+    of what ``_default_bpm_for`` returns. Assert what the test's name
+    actually promises: an int, within rounding distance of the true
+    midpoint.
+    """
     for genre, (lo, hi) in generator._genre_bpm_windows().items():
         centre = generator._default_bpm_for(genre)
-        assert centre == (lo + hi) / 2, genre
+        assert isinstance(centre, int), genre
+        assert abs(centre - (lo + hi) / 2) <= 0.5, genre
         assert generator.MIN_BPM <= centre <= generator.MAX_BPM, genre
