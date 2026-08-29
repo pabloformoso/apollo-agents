@@ -24,8 +24,11 @@ import pytest
 from agent.generative import strudel_mind
 from agent.generative.strudel_mind import (
     B2B_USER_LINE,
+    DRUM_SOUNDS,
     FEW_SHOT_DEEPHOUSE,
     PALETTE,
+    PALETTE_REGISTRY,
+    SYNTH_SOUNDS,
     SYSTEM_PROMPT,
     StrudelCode,
     StrudelMind,
@@ -34,6 +37,8 @@ from agent.generative.strudel_mind import (
     _leading_reason,
     _resolve_model,
     build_system_prompt,
+    genre_palette,
+    palette_block,
 )
 
 VALID_CODE = 'stack(s("bd*4"), s("[~ oh]*4"))'
@@ -156,8 +161,6 @@ def test_system_prompt_states_the_output_contract():
     assert "// reason:" in SYSTEM_PROMPT
     assert "setcps" in SYSTEM_PROMPT           # tempo is the harness's
     assert "import" in SYSTEM_PROMPT           # token screen announced up front
-    for sound in PALETTE:
-        assert sound in SYSTEM_PROMPT
 
 
 def test_deep_genre_prompt_carries_brief_key_and_few_shot():
@@ -166,6 +169,20 @@ def test_deep_genre_prompt_carries_brief_key_and_few_shot():
     assert "GENRE: deep house" in prompt
     assert 'scale("A:minor")' in prompt
     assert FEW_SHOT_DEEPHOUSE in prompt
+
+
+def test_deep_prompt_teaches_the_genre_palette_and_its_bank_matrix():
+    """Every sound and every bank the deep entry allows is in the prompt, each
+    bank with its own sound list — the pairing is what prevents silent layers,
+    so it is taught, not implied."""
+    prompt = build_system_prompt("deep")
+    pal = genre_palette("deep")
+    for sound in pal["drums"] + pal["synths"]:
+        assert sound in prompt
+    for bank, roles in pal["banks"].items():
+        assert f"{bank}: {', '.join(roles)}" in prompt
+    assert "SILENCE" in prompt                 # the warning is load-bearing
+    assert "Never put .bank() on a synth voice" in prompt
 
 
 def test_unknown_genre_keeps_the_dialect_lesson():
@@ -203,6 +220,91 @@ def test_current_code_turns_the_call_into_a_mutation(validator):
     assert "say what you changed" in user
     # Shown once, as code — not a second time inside the state JSON blob.
     assert user.count('s("bd*4")') == 1
+
+
+# ─── the palette registry (plan §10: pack = data, not code) ────────────
+
+def test_module_constants_are_derived_from_the_registry():
+    assert PALETTE == DRUM_SOUNDS + SYNTH_SOUNDS
+    assert "bd" in DRUM_SOUNDS
+    assert "sh" in DRUM_SOUNDS               # the widened kit is really in
+    assert "sawtooth" in SYNTH_SOUNDS
+    assert set(DRUM_SOUNDS) == set(PALETTE_REGISTRY["drums"])
+
+
+def test_genre_palette_narrows_to_the_deep_entry():
+    pal = genre_palette("deep")
+    entry = PALETTE_REGISTRY["genres"]["deep"]
+    assert list(pal["drums"]) == entry["drums"]
+    assert list(pal["banks"]) == entry["banks"]
+    # Each bank resolves to its matrix row, not to an empty guess.
+    for bank, roles in pal["banks"].items():
+        assert list(roles) == PALETTE_REGISTRY["banks"][bank]
+
+
+def test_genre_palette_falls_back_whole_for_an_unknown_genre():
+    pal = genre_palette("gabber")
+    assert set(pal["drums"]) == set(PALETTE_REGISTRY["drums"])
+    assert set(pal["banks"]) == set(PALETTE_REGISTRY["banks"])
+
+
+def test_genre_palette_normalizes_spelling_like_genre_brief():
+    assert genre_palette("  Deep ") == genre_palette("deep")
+    assert genre_palette(None) == genre_palette("unknown-anything")
+
+
+def test_palette_block_without_a_genre_covers_the_whole_vocabulary():
+    block = palette_block(None)
+    for sound in PALETTE:
+        assert sound in block
+    for bank in PALETTE_REGISTRY["banks"]:
+        assert bank in block
+
+
+def test_registry_is_self_consistent():
+    """The GENRE_THEMES lesson, CI-enforced: the spike's vitest also asserts
+    this, but vitest does not run in backend CI — pytest is the fence that is
+    always up. Every genre reference must resolve, every matrix role must be
+    lane vocabulary, and the genre the playground page ships must exist."""
+    drums = set(PALETTE_REGISTRY["drums"])
+    synths = set(PALETTE_REGISTRY["synths"])
+    banks = PALETTE_REGISTRY["banks"]
+    for genre, entry in PALETTE_REGISTRY["genres"].items():
+        for d in entry["drums"]:
+            assert d in drums, f"{genre}: drum {d} not in registry drums"
+        for s in entry["synths"]:
+            assert s in synths, f"{genre}: synth {s} not in registry synths"
+        for b in entry["banks"]:
+            assert b in banks, f"{genre}: bank {b} has no matrix row"
+    for bank, roles in banks.items():
+        assert roles, f"bank {bank} has an empty matrix row"
+        for role in roles:
+            assert role in drums, f"{bank}: role {role} not in registry drums"
+    assert "deep" in PALETTE_REGISTRY["genres"]  # the page ships GENRE='deep'
+    for src in PALETTE_REGISTRY["sources"]:
+        assert src.get("json") and src.get("base"), "source needs json+base URLs"
+
+
+def test_a_missing_registry_file_raises_with_the_fix(tmp_path, monkeypatch):
+    monkeypatch.setattr(strudel_mind, "PALETTE_FILE", tmp_path / "palette.json")
+    with pytest.raises(RuntimeError, match="restore it from git"):
+        strudel_mind._load_palette_registry()
+
+
+def test_a_corrupt_registry_file_raises_naming_the_file(tmp_path, monkeypatch):
+    bad = tmp_path / "palette.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(strudel_mind, "PALETTE_FILE", bad)
+    with pytest.raises(RuntimeError, match="not valid JSON"):
+        strudel_mind._load_palette_registry()
+
+
+def test_a_registry_missing_a_field_raises_naming_it(tmp_path, monkeypatch):
+    partial = tmp_path / "palette.json"
+    partial.write_text(json.dumps({"sources": [], "drums": [], "synths": []}), encoding="utf-8")
+    monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
+    with pytest.raises(RuntimeError, match="'banks'"):
+        strudel_mind._load_palette_registry()
 
 
 # ─── B2B: the one duet line (§9.2) ─────────────────────────────────────
@@ -324,8 +426,27 @@ def test_validator_is_invoked_as_node_validate_mjs_in_the_spike_dir(validator):
     assert cmd[:2] == ["node", "validate.mjs"]
     assert "--cycles" in cmd and "8" in cmd
     assert "--key" in cmd and "F:minor" in cmd
+    assert "--genre" in cmd and "deep" in cmd  # the mind's genre fences the validator too
     assert kwargs["cwd"] == str(strudel_mind.SPIKE_DIR)
     assert kwargs["capture_output"] is True and kwargs["text"] is True
+
+
+def test_validate_code_omits_genre_when_none(validator):
+    """A genre-less call enforces the registry-wide vocabulary — no flag at all,
+    so a hand run and the mind's run stay the same CLI."""
+    run = validator(_verdict())
+    strudel_mind.validate_code(VALID_CODE, genre=None)
+    cmd, _ = run.calls[0]
+    assert "--genre" not in cmd
+
+
+def test_validate_code_normalizes_the_genre_spelling(validator):
+    """' Deep ' and 'deep' must reach the validator as the same key — the
+    registry and GENRE_BRIEFS share one spelling rule."""
+    run = validator(_verdict())
+    strudel_mind.validate_code(VALID_CODE, genre="  Deep ")
+    cmd, _ = run.calls[0]
+    assert cmd[cmd.index("--genre") + 1] == "deep"
 
 
 def test_verdict_is_read_past_node_noise(validator):

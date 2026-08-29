@@ -45,6 +45,9 @@ const MIME = {
 export function resolvePath(urlPath) {
   const clean = decodeURIComponent(urlPath.split('?')[0]);
   if (clean === '/' || clean === '/index.html') return join(ROOT, 'index.html');
+  // The sound registry (plan §10) lives at the spike root next to its main
+  // consumer, validate.mjs; the pages fetch it to register sample sources.
+  if (clean === '/palette.json') return join(ROOT, 'palette.json');
   for (const [prefix, dir] of MOUNTS) {
     if (!clean.startsWith(prefix)) continue;
     const rel = normalize(clean.slice(prefix.length)).replace(/^([/\\]|\.\.[/\\])+/, '');

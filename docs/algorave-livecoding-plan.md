@@ -180,9 +180,14 @@ reject-and-hold; one retry carrying the validator's error.
   "kick_four_on_floor": bool, "out_of_key": [str]}}`. Exit 0 whenever a
   verdict was computed — valid OR invalid; nonzero only on harness breakage.
 - **Validity:** evaluates without throwing; `queryArc(0, cycles)` yields ≥ 1
-  event; every event's `s` ∈ the palette {bd, sd, hh, oh, cp, rim, triangle,
-  sawtooth, square, sine} (`bank()` free-form). `out_of_key` (vs `--key`) is
-  reported, NOT gating in v1 — Tidal idiom leans on `.scale()`.
+  event; every event's `s` ∈ the registry vocabulary (`palette.json`, per
+  genre with `--genre`, registry-wide otherwise) and every `.bank()` must
+  exist in the registry AND carry that sound — a pair the matrix lacks
+  resolves to no sample and plays silence live. A bank on a synth voice is
+  rejected for the same reason. (Supersedes v1's {bd, sd, hh, oh, cp, rim,
+  triangle, sawtooth, square, sine} + free-form `bank()` — the §10 registry
+  shipped 2026-08-29.) `out_of_key` (vs `--key`) is reported, NOT gating in
+  v1 — Tidal idiom leans on `.scale()`.
 - vitest tests: valid stack, syntax error, zero events, palette violation,
   token screen, reason extraction, `--cycles`.
 
@@ -342,10 +347,22 @@ IS §9.1's mind-holds-the-pen; the human's turn IS human-holds-the-pen.
 
 ## 10. Pattern packs — collections of banks / roles / sections
 
-Today the vocabulary is hardcoded in two places (the §8.1 palette in the
-validator, `strudel_mind.PALETTE` + the genre brief in Python). To scale to
-collections, ONE registry both sides read — the `genres.py`/`patches.py`
-precedent, now for the Strudel lane:
+**Shipped 2026-08-29 (the registry core):** `scripts/algorave-spike/
+palette.json` — sample `sources`, the drum-role and synth vocabularies, a
+bank→sounds matrix (extracted from the registered tidal-drum-machines map:
+TR909/TR808/TR707/TR727/LinnDrum/EmuSP12), and per-genre entries (`deep`:
+15 roles, no misc/fx). Read by all three sides: `validate.mjs` gates sounds
+AND (sound, bank) pairs per `--genre`; `strudel_mind.py` builds the palette
+prompt (with the matrix — silence pairs are taught, not just rejected) and
+passes `--genre`; both pages register `sources` at boot with the b-cdn URL
+as fallback. Still §10 backlog: roles with voice+register, gain lanes,
+section templates, seed-per-pack, the Camelot bridge, pitch-mapped
+collections. The original sketch:
+
+Before the registry the vocabulary was hardcoded in two places (the §8.1
+palette in the validator, `strudel_mind.PALETTE` + the genre brief in
+Python). To scale to collections, ONE registry both sides read — the
+`genres.py`/`patches.py` precedent, now for the Strudel lane:
 
 - **Pack = data, not code**: per genre — allowed drum **banks** (which
   machines fit: 909/707 for deep, 808 for lofi…), **roles** with synth voice
