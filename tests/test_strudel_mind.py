@@ -23,6 +23,7 @@ import pytest
 
 from agent.generative import strudel_mind
 from agent.generative.strudel_mind import (
+    B2B_USER_LINE,
     FEW_SHOT_DEEPHOUSE,
     PALETTE,
     SYSTEM_PROMPT,
@@ -202,6 +203,83 @@ def test_current_code_turns_the_call_into_a_mutation(validator):
     assert "say what you changed" in user
     # Shown once, as code — not a second time inside the state JSON blob.
     assert user.count('s("bd*4")') == 1
+
+
+# ─── B2B: the one duet line (§9.2) ─────────────────────────────────────
+#
+# The contract is deliberately narrow — ONE line, in the USER message, present
+# exactly when the state says the pen is alternating — because the system prompt
+# is what `scripts/bench_strudel_mind.py` scores a model against. A duet that
+# quietly reworded the system prompt would make every B2B session incomparable
+# to the bench that qualified the model for it.
+
+def _prompts_for(validator, state, intent="darker"):
+    """The (system, user) pair a single next_code call actually sent."""
+    validator(_verdict())
+    llm = _replying(VALID_CODE)
+    StrudelMind(llm=llm).next_code(state, intent)
+    return llm.prompts[0]
+
+
+def test_b2b_state_appends_the_duet_line_to_the_user_message(validator):
+    _, user = _prompts_for(validator, {**_state(current_code=VALID_CODE), "b2b": True})
+    assert B2B_USER_LINE in user
+    assert user.count(B2B_USER_LINE) == 1
+
+
+def test_the_duet_line_is_the_contract_wording_verbatim():
+    """§9.2 pins the sentence, not a paraphrase: it names recent_reasons as the
+    partner's channel and forbids undoing their move. Reword it and the mind is
+    answering a different brief from the one the plan describes."""
+    assert B2B_USER_LINE == (
+        "You are in a back-to-back set. recent_reasons carries your partner's "
+        "moves — acknowledge the LAST one and answer it; never undo it."
+    )
+
+
+def test_without_b2b_the_user_message_has_no_duet_line(validator):
+    _, solo = _prompts_for(validator, _state(current_code=VALID_CODE))
+    assert B2B_USER_LINE not in solo
+    assert "back-to-back" not in solo
+
+
+def test_b2b_false_is_solo_not_a_duet(validator):
+    """The page omits the key in free mode, but an explicit false must not be
+    read as truthy — `state.get("b2b")` is the whole gate."""
+    _, user = _prompts_for(validator, {**_state(current_code=VALID_CODE), "b2b": False})
+    assert B2B_USER_LINE not in user
+
+
+def test_the_duet_prompt_is_the_solo_prompt_plus_exactly_that_one_line(validator):
+    """"Appends ONE line" taken literally — the only difference between the two
+    user messages is the line itself, appended at the end. The flag is kept out
+    of the serialized state so it is not also said a second time as JSON."""
+    state = _state(current_code=FEW_SHOT_DEEPHOUSE)
+    _, solo = _prompts_for(validator, state)
+    _, duet = _prompts_for(validator, {**state, "b2b": True})
+
+    assert duet == f"{solo}\n\n{B2B_USER_LINE}"
+    assert '"b2b"' not in duet  # said once, as a sentence — not twice
+    assert duet.rstrip().endswith("never undo it.")
+
+
+def test_the_duet_line_survives_the_opening_pattern_case(validator):
+    """An empty buffer is still a turn: the mind may be handed the pen first."""
+    _, user = _prompts_for(validator, {**_state(), "b2b": True})
+    assert "Nothing is playing yet" in user
+    assert B2B_USER_LINE in user
+
+
+def test_the_system_prompt_is_byte_identical_with_and_without_b2b(validator):
+    """The bench comparability guarantee, asserted rather than asserted-to."""
+    state = _state(current_code=VALID_CODE)
+    solo_system, _ = _prompts_for(validator, state)
+    duet_system, _ = _prompts_for(validator, {**state, "b2b": True})
+
+    assert duet_system == solo_system
+    assert duet_system == build_system_prompt("deep", "A:minor")
+    assert B2B_USER_LINE not in duet_system
+    assert "back-to-back" not in duet_system
 
 
 # ─── next_code: happy path ─────────────────────────────────────────────

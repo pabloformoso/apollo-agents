@@ -98,9 +98,22 @@
         color: var(--pen);
       }
       #pen .holds { font-size: 13px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dim); }
+      /* §9.2's countdown, sitting inside the indicator rather than in the
+         controls: on a crop, "MIND holds the pen · ✍ flips in 3 bars" reads as
+         one sentence, and the turn changing is the only thing an audience
+         cannot work out for itself. Amber, because it is neither holder. */
+      #pen .flip {
+        font-size: 16px;
+        letter-spacing: 0.06em;
+        color: var(--warn);
+        white-space: nowrap;
+      }
+      #pen .flip[hidden] { display: none; }
       #pen .side { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
       #pen-sub { font-size: 12px; color: var(--dim); }
       #pen-toggle { background: var(--pen); text-align: center; }
+      #b2b-toggle { text-align: center; }
+      #b2b-toggle.on { background: var(--warn); color: var(--bg); }
       main { flex: 1; display: flex; min-height: 0; }
       .pane {
         flex: 1;
@@ -266,16 +279,19 @@
     </header>
 
     <!-- §9.1: the pen holder, displayed LARGE. This strip is the stream
-         overlay — "the human grabs the code" is the content. -->
+         overlay — "the human grabs the code" is the content. §9.2 adds the
+         countdown to the next turn and the toggle that arms the alternation. -->
     <section id="pen" class="human">
       <div class="who">
         <span class="mark" id="pen-mark">✍</span>
         <span class="name" id="pen-name">HUMAN</span>
         <span class="holds">holds the pen</span>
+        <span class="flip" id="b2b-count" hidden></span>
       </div>
       <div class="side">
         <span id="pen-sub">the mind is watching</span>
         <button id="pen-toggle">✦ hand the pen to the mind</button>
+        <button id="b2b-toggle" class="secondary">⇄ start b2b</button>
       </div>
     </section>
 
@@ -308,6 +324,9 @@
         <label for="phrase">phrase — bars between the mind's mutations</label>
         <input id="phrase" type="number" min="2" step="1" value="8" autocomplete="off" />
 
+        <label for="b2bbars">b2b — bars per turn before the pen flips</label>
+        <input id="b2bbars" type="number" min="4" step="1" value="16" autocomplete="off" />
+
         <div id="stats"></div>
         <div id="state">— <b id="s-play">stopped</b> · last evaluate <b id="s-eval">never</b></div>
         <div id="status"></div>
@@ -320,18 +339,26 @@
       // without a browser — test/pen.test.mjs drives the same functions this
       // page wires to a real clock. Same file, two consumers.
       import {
+        DEFAULT_B2B_BARS,
         DEFAULT_PHRASE_BARS,
+        INITIAL_MODE,
         INITIAL_PEN,
         PEN_MIND,
         WHY,
+        b2bDecide,
         barsElapsed,
+        barsUntilFlip,
         decide,
         diffLines,
         mindRequest,
+        modeIsB2b,
         nextBoundaryBar,
+        nextFlipBar,
+        normalizeB2bBars,
         normalizePhraseBars,
         pushReason,
         summarizeHumanEdit,
+        toggleMode,
         togglePen,
       } from './pen.js';
 
@@ -365,10 +392,11 @@
 
       // ---------------------------------------------------------------------
       // Persistence: a reload (F5, a crash, someone else driving the tab) must
-      // not eat the jam. Buffer + intent + phrase survive in localStorage; the
-      // PEN does not — a freshly loaded page never fires LLM calls by itself
-      // (§9.1), so it always wakes up HUMAN. Guarded: storage can be absent or
-      // throwing (private window), and the page must work without it.
+      // not eat the jam. Buffer + intent + phrase + b2bBars survive in
+      // localStorage; the PEN and the MODE do not — a freshly loaded page never
+      // fires LLM calls by itself (§9.1) and never wakes up alternating (§9.2),
+      // so it is always HUMAN and always FREE. Guarded: storage can be absent
+      // or throwing (private window), and the page must work without it.
       const STORE_KEY = 'apollo-playground-v1';
       const store = {
         read() {
@@ -381,6 +409,7 @@
               buffer: editor.value,
               intent: $('intent').value,
               phrase: $('phrase').value,
+              b2bBars: $('b2bbars').value,
             }));
           } catch { /* storage unavailable — the jam just doesn't persist */ }
         },
@@ -390,6 +419,7 @@
       editor.addEventListener('input', storeSoon);
       $('intent').addEventListener('input', storeSoon);
       $('phrase').addEventListener('input', storeSoon);
+      $('b2bbars').addEventListener('input', storeSoon);
       window.addEventListener('beforeunload', () => store.write());
       const statusEl = $('status');
 
@@ -408,9 +438,12 @@
       // follows reads one of these.
       // ---------------------------------------------------------------------
       let pen = INITIAL_PEN;              // starts human: a loaded page calls nobody
+      let mode = INITIAL_MODE;            // starts free: nothing flips until someone arms it
       let phraseBars = DEFAULT_PHRASE_BARS;
+      let b2bBars = DEFAULT_B2B_BARS;
       let playStartedAt = null;           // performance.now() at the stopped -> playing edge
       let lastBoundaryBar = null;         // the last boundary FIRED OR SKIPPED
+      let lastFlipBar = null;             // the last b2b boundary HANDLED (§9.2)
       let inFlight = false;               // one /mind request at a time, page-wide
       let recentReasons = [];             // the ring — mind reasons and human: summaries
       let lastEvaluated = null;           // the buffer as it was at the last evaluate
@@ -418,6 +451,17 @@
       /** Bars since play started — the audio clock, not a counter (§9.1). */
       const currentBars = () =>
         playStartedAt == null ? 0 : barsElapsed((performance.now() - playStartedAt) / 1000, CPS);
+
+      /** Read both bar controls into the variables the schedulers use, echoing
+       *  back what was actually accepted. One function because a restored value
+       *  fires no 'change' event: without this the box could read 16 while the
+       *  scheduler still used the default 8. */
+      const applyBarControls = () => {
+        phraseBars = normalizePhraseBars($('phrase').value);
+        $('phrase').value = phraseBars;
+        b2bBars = normalizeB2bBars($('b2bbars').value);
+        $('b2bbars').value = b2bBars;
+      };
 
       $('m-bpm').textContent = BPM;
       $('m-key').textContent = KEY;
@@ -440,6 +484,8 @@
             editor.value = saved.buffer;
             if (typeof saved.intent === 'string') $('intent').value = saved.intent;
             if (saved.phrase) $('phrase').value = saved.phrase;
+            if (saved.b2bBars) $('b2bbars').value = saved.b2bBars;
+            applyBarControls(); // a restore fires no 'change' — apply, don't just display
             // The restored buffer was what the room last heard — evaluating it
             // unchanged must not report a phantom human edit.
             lastEvaluated = editor.value;
@@ -491,6 +537,10 @@
         if (isPlaying && !playing) {
           playStartedAt = performance.now();
           lastBoundaryBar = null;
+          // The bar clock restarts here, so a flip bar from the previous run is
+          // a number about a clock that no longer exists — and keeping it would
+          // let bar 16 of the new set count as "already handled".
+          lastFlipBar = null;
         }
         if (!isPlaying) playStartedAt = null;
         playing = isPlaying;
@@ -623,12 +673,16 @@
           key: KEY,
           barsElapsed: currentBars(),
           recentReasons,
+          // §9.2: in a duet the mind is told it is answering a partner. The
+          // manual button carries it too — while B2B is armed, every call is
+          // part of the alternation, whoever asked for it.
+          b2b: modeIsB2b(mode),
         });
         // The carried state is logged, not just sent: "the mind was told the
         // human just did X" is otherwise invisible until the mutation answers
         // it, and by then you cannot tell whether it was told at all.
         if (payload.recent_reasons.length) {
-          log(`→ mind · bar ${payload.bars_elapsed} · carrying ${payload.recent_reasons.length} recent, last: ${payload.recent_reasons.at(-1)}`);
+          log(`→ mind · bar ${payload.bars_elapsed}${payload.b2b ? ' · b2b' : ''} · carrying ${payload.recent_reasons.length} recent, last: ${payload.recent_reasons.at(-1)}`);
         }
 
         let response;
@@ -766,6 +820,20 @@
           : (playing
               ? `bar ${bars} · the mind is watching — every evaluate becomes state`
               : 'the mind is watching');
+
+        // §9.2's countdown names who is NEXT, not who is holding: the strip
+        // already shouts the holder, and the useful unknown is when it changes.
+        const b2b = modeIsB2b(mode);
+        const count = $('b2b-count');
+        $('b2b-toggle').textContent = b2b ? `⇄ b2b · ${b2bBars} bars` : '⇄ start b2b';
+        $('b2b-toggle').className = b2b ? 'on' : 'secondary';
+        count.hidden = !b2b;
+        if (b2b) {
+          const left = barsUntilFlip(bars, b2bBars);
+          count.textContent = playing
+            ? `· ${mind ? '✍' : '✦'} pen flips in ${left} ${left === 1 ? 'bar' : 'bars'}`
+            : `· ${mind ? '✍' : '✦'} pen flips every ${b2bBars} bars — press Play`;
+        }
       };
 
       /** One scheduled mutation: ask, auto-apply, evaluate. A failure is a
@@ -784,7 +852,56 @@
         }
       }
 
+      /**
+       * The ONE place the pen changes hands — §9.1's button and §9.2's flip.
+       *
+       * A flip IS a handoff, so it goes through this rather than beside it: the
+       * state change, the repaint and the bar-consume below are identical, and
+       * a second copy of them would drift the day one of them changed. `at` is
+       * the flip's bar when the B2B scheduler drove it, and it only changes
+       * what is logged.
+       */
+      const handOverThePen = ({ at = null } = {}) => {
+        pen = togglePen(pen);
+        // Handing over ON a boundary bar would otherwise fire inside that same
+        // bar — harmless musically (§9.1 wants no better than ±1 bar) but it
+        // makes the announcement below a lie, and it robs the handoff of its
+        // beat. Consuming the current bar means the mind always comes in at
+        // the top of the NEXT phrase, which is also where an ear expects it.
+        // In B2B this line is load-bearing twice over: it is exactly what stops
+        // a flip and a phrase boundary on the SAME bar from double-acting.
+        if (pen === PEN_MIND) lastBoundaryBar = currentBars();
+        paintPen();
+        if (at != null) {
+          log(
+            pen === PEN_MIND
+              ? `b2b · bar ${at} · the pen flips to the MIND — first mutation at bar ${nextBoundaryBar(currentBars(), phraseBars)}, back to you at bar ${nextFlipBar(at, b2bBars)}`
+              : `b2b · bar ${at} · the pen flips to the HUMAN — your turn; the mind returns at bar ${nextFlipBar(at, b2bBars)}`,
+            'ok',
+          );
+          return;
+        }
+        log(
+          pen === PEN_MIND
+            ? `the pen is the MIND's — first mutation at bar ${nextBoundaryBar(currentBars(), phraseBars)}, every ${phraseBars} bars after`
+            : 'the HUMAN took the pen — the scheduler is silent; the mind still watches every evaluate',
+          'ok',
+        );
+      };
+
       setInterval(() => {
+        const bars = currentBars();
+
+        // §9.2: the FLIP decision runs BEFORE the phrase decision, and that
+        // order is the whole no-double-act rule. On a bar that is both a flip
+        // boundary and a phrase boundary, flipping first means the phrase
+        // scheduler looks at a pen that has already changed hands — and, if it
+        // landed on the mind, at a bar the handoff just consumed. The flip
+        // wins; the mind's first fire is its next boundary.
+        const flip = b2bDecide({ barsNow: bars, lastFlipBar, b2bBars, mode, playing, pen });
+        if (flip.consume) lastFlipBar = flip.at;
+        if (flip.flip) handOverThePen({ at: flip.at });
+
         paintPen();
         const decision = decide({
           barsNow: currentBars(),
@@ -801,30 +918,38 @@
         if (decision.fire) scheduledCall(decision.at);
       }, TICK_MS);
 
-      $('pen-toggle').onclick = () => {
-        pen = togglePen(pen);
-        // Handing over ON a boundary bar would otherwise fire inside that same
-        // bar — harmless musically (§9.1 wants no better than ±1 bar) but it
-        // makes the announcement below a lie, and it robs the handoff of its
-        // beat. Consuming the current bar means the mind always comes in at
-        // the top of the NEXT phrase, which is also where an ear expects it.
-        if (pen === PEN_MIND) lastBoundaryBar = currentBars();
+      $('pen-toggle').onclick = () => handOverThePen();
+
+      $('b2b-toggle').onclick = () => {
+        mode = toggleMode(mode);
+        // Same rule as the handoff, for the same reason: arming ON a flip
+        // boundary would flip inside the bar you clicked in, contradicting the
+        // countdown this very click puts on screen. Consume the current bar and
+        // the first turn is a whole one.
+        if (modeIsB2b(mode)) lastFlipBar = currentBars();
         paintPen();
         log(
-          pen === PEN_MIND
-            ? `the pen is the MIND's — first mutation at bar ${nextBoundaryBar(currentBars(), phraseBars)}, every ${phraseBars} bars after`
-            : 'the HUMAN took the pen — the scheduler is silent; the mind still watches every evaluate',
+          modeIsB2b(mode)
+            ? `B2B armed · ${b2bBars}-bar turns · ${pen === PEN_MIND ? 'the MIND' : 'the HUMAN'} finishes this one — the pen flips at bar ${nextFlipBar(currentBars(), b2bBars)}`
+            : 'B2B off — free: the pen only moves when someone moves it',
           'ok',
         );
       };
 
       $('phrase').addEventListener('change', () => {
-        phraseBars = normalizePhraseBars($('phrase').value);
-        $('phrase').value = phraseBars; // show what was actually accepted
+        applyBarControls(); // shows what was actually accepted
         paintPen();
         log(`phrase length: ${phraseBars} bars`);
       });
 
+      $('b2bbars').addEventListener('change', () => {
+        applyBarControls();
+        paintPen();
+        log(`b2b turn length: ${b2bBars} bars`
+          + (modeIsB2b(mode) && playing ? ` · next flip at bar ${nextFlipBar(currentBars(), b2bBars)}` : ''));
+      });
+
+      applyBarControls(); // the markup's values are the defaults — say so out loud
       paintPen();
       log(`page loaded · mind endpoint ${MIND_URL}`);
     </script>

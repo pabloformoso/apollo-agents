@@ -36,7 +36,7 @@ Usage:
 
 Endpoint:
     POST /mind  {"code": str, "intent": str, "genre"?: str, "key"?: str,
-                 "bars_elapsed"?: int, "recent_reasons"?: [str]}
+                 "bars_elapsed"?: int, "recent_reasons"?: [str], "b2b"?: bool}
       200 {"code", "reason", "stats"}      a validated pattern
       400 {"error", "detail"}              malformed request
       502 {"error", "detail"}              StrudelMindError — detail carries
@@ -148,6 +148,14 @@ def parse_request(
     if not isinstance(reasons, list) or any(not isinstance(r, str) for r in reasons):
         raise BadRequest("'recent_reasons' must be a list of strings")
 
+    # §9.2: the page sends `b2b: true` while the pen is alternating. Optional
+    # (a free-mode body is iteration 2's, unchanged) and strictly boolean — a
+    # truthy "yes" or 1 here would be the page telling the mind it is in a duet
+    # by accident, which is a prompt change, so it is a 400 rather than a coerce.
+    b2b = payload.get("b2b", False)
+    if not isinstance(b2b, bool):
+        raise BadRequest(f"'b2b' must be a boolean, got {type(b2b).__name__}")
+
     return {
         "code": code,
         "intent": intent,
@@ -155,6 +163,7 @@ def parse_request(
         "key": key,
         "bars_elapsed": bars,
         "recent_reasons": reasons,
+        "b2b": b2b,
     }
 
 
@@ -163,12 +172,20 @@ def state_for(request: dict) -> dict:
 
     A non-empty `current_code` is what turns the call into a MUTATION of the
     code on screen instead of a fresh pattern — the whole point of a playground.
+
+    `b2b` is forwarded ONLY when true. `strudel_mind` reads it as truthy, and a
+    state carrying `b2b: false` would put the flag in the serialized state of
+    every free-mode call — a different prompt for a request that is not a duet,
+    for no gain. Absent means free, which is what free-mode pages already send.
     """
-    return {
+    state = {
         "current_code": request["code"],
         "bars_elapsed": request["bars_elapsed"],
         "recent_reasons": request["recent_reasons"],
     }
+    if request.get("b2b"):
+        state["b2b"] = True
+    return state
 
 
 # ---------------------------------------------------------------------------

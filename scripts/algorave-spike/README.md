@@ -700,3 +700,61 @@ Browser-verified 2026-08-29 against `--mock` on a spare port: consecutive
 automatic apply cycles at the announced bars, the scheduler going silent the
 moment the pen is taken back mid-run, and a `human:` summary from a real
 keyboard edit showing up in the very next scheduled call's payload.
+
+## B2B — the pen on a timer (§9.2)
+
+Iteration 3 automates the toggle and nothing else. A back-to-back set is two
+turns of §9.1 alternating: **the mind's turn IS mind-holds-the-pen, the human's
+turn IS human-holds-the-pen**, so there is no second scheduler, no second
+prompt, no second code path — one more decision function and one more line in
+the user message.
+
+- **Mode toggle** in the pen strip: `mode ∈ {free, b2b}`, starting at `free`.
+  Like the pen itself it is **never persisted** — a reloaded page wakes up free
+  and HUMAN, because a tab that starts handing your editor to an LLM on a timer
+  nobody armed is not a feature. The **turn length** (`b2bBars`, default 16,
+  floor 4) sits in the sidebar next to `phrase` and *is* persisted.
+- **The countdown** — `✍/✦ pen flips in N bars` — rides inside the holder
+  strip, next to the big name, and names **who is next** rather than who is
+  holding: the strip already shouts the holder, and the turn changing is the
+  one thing an audience cannot work out for itself. Hidden entirely in free
+  mode, where there is no next turn.
+- **Flips go through the pen toggle**, not around it. `handOverThePen()` is the
+  single place the pen changes hands; the button calls it and so does the
+  scheduler. That is not tidiness — see the next bullet.
+- **`b2b: true` rides on the POST** while alternating (both the scheduler's
+  calls and the manual button's), the server forwards it as `state["b2b"]`, and
+  `strudel_mind` appends ONE line to the **user** message: *"You are in a
+  back-to-back set. recent_reasons carries your partner's moves — acknowledge
+  the LAST one and answer it; never undo it."* The system prompt is untouched
+  and byte-identical with and without, so a B2B session stays comparable to the
+  bench that qualified the model. In free mode the body has no `b2b` key at all
+  and the state is iteration 2's, byte for byte.
+- **Silence is a move.** A human turn with no edits hands the mind a ring with
+  no new `human:` entry. No special case, by design.
+
+**The one real hazard, and why there is no code for it.** With `phrase 2` and
+`b2b 4`, *every* flip bar is also a phrase boundary. §9.2 says the flip wins and
+the mind's first mutation is its NEXT boundary — and that falls out of two
+things already written: the tick runs `b2bDecide()` **before** `decide()`, and
+§9.1's handoff already consumes the current bar whenever the pen lands on the
+mind. Flip at bar 12 → bar 12 is consumed → the mind fires at 14. The proof is
+in `test/b2b.test.mjs`, which composes both functions the way the page does and
+includes the negative control: delete the handoff's consume line and the same
+timeline fires on bar 12, which is the double-act the contract forbids.
+
+`b2bDecide({barsNow, lastFlipBar, b2bBars, mode, playing, pen}) → {flip, to, at,
+why, consume}` — the same modulo arithmetic, the same "a boundary that passed
+while the gate was shut is NOT consumed" rule, and the same
+`{fire→flip, at, why, consume}` shape as `decide()`, so the page's tick handles
+both identically. `pen` is not a gate (a flip is a flip whoever holds it); it is
+only what `to` is computed from.
+
+Browser-verified 2026-08-29 against `--mock` on a spare port (4033), `b2bBars 4`
+/ `phraseBars 2` — the worst case above — for ~15 consecutive turns: flips at
+bars 4, 8, 12 … 60 with no exceptions, the mind firing only at 6, 14, 22, 30,
+38, 46, 54 (flip bar + 2, never the flip bar itself), not one scheduler line
+during any human turn, and a real editor edit made during the human turn 48-52
+arriving as `human: ±0 lines — "…gain(0.33),"` in the payload of the mind's
+first call of its next turn (bar 54), with `b2b: true` on it. Turning B2B off
+put the body back to the six iteration-2 keys with no `b2b`.

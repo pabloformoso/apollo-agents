@@ -305,6 +305,41 @@ already sufficient (it accepts `bars_elapsed` and `recent_reasons`).
 - **Non-goals (iteration 2)**: the B2B alternation scheduler (stage 3), /live
   integration, chat intake, any server change.
 
+### 9.2 B2B — contract (iteration 3, 2026-08-29)
+
+B2B automates the toggle; everything else is §9.1 unchanged. The mind's turn
+IS §9.1's mind-holds-the-pen; the human's turn IS human-holds-the-pen.
+
+- **Mode**: `mode ∈ {free, b2b}`, starts at `free`; never persisted (a page
+  wakes up free/HUMAN, same principle as the pen). One toggle + a
+  `b2bBars` control (default 16, min 4, persisted like `phrase`).
+- **The flip**: while `mode === b2b` AND playing, the pen flips every
+  `b2bBars` bars. Pure decision in `pen.js`
+  (`b2bDecide({barsNow, lastFlipBar, b2bBars, mode, playing}) → {flip, to}`),
+  same consume-the-boundary semantics as `decide()` — a flip and a phrase
+  fire on the same bar must not double-act: the flip wins, the mind's first
+  fire is its next boundary (the §9.1 handoff rule already guarantees this).
+- **Countdown on screen**: "✍/✦ pen flips in N bars" near the pen indicator —
+  stream content, updated per bar.
+- **The mind knows it is a duet**: the page sends `b2b: true` while in B2B;
+  the server forwards it into `state["b2b"]`; `strudel_mind.py` appends ONE
+  line to the USER message (system prompt untouched — the bench stays
+  comparable): "You are in a back-to-back set. recent_reasons carries your
+  partner's moves — acknowledge the LAST one and answer it; never undo it."
+- **Human turn ending**: the mind reads the buffer AS-IS at its first
+  boundary — unevaluated human edits are carried into the mutation (nothing
+  is lost) but only *evaluated* edits produce a `human:` reason. Contract
+  note for the performer: evaluate before your turn ends if the room should
+  hear your move first.
+- **Silence is a move**: a human turn with no edits simply hands the mind a
+  ring with no new `human:` entry — no special casing.
+- **Tests**: `b2bDecide` (flip cadence, consume semantics, flip-vs-fire same
+  bar, mode/playing gates) in the spike's vitest; the `b2b` passthrough in
+  `tests/test_algorave_playground.py`; the user-message line (present with
+  `state["b2b"]`, absent without) in `tests/test_strudel_mind.py`.
+- **Non-goals (iteration 3)**: /live integration, chat intake, per-turn
+  time-based (non-bar) clocks, more than two performers.
+
 ## 10. Pattern packs — collections of banks / roles / sections
 
 Today the vocabulary is hardcoded in two places (the §8.1 palette in the

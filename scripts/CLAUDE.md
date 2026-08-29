@@ -114,6 +114,21 @@
     already on 4032, start a second server on another port and point
     `MIND_URL` at it — then put it back, the page must ship pointing at
     4032.
+  - **B2B** (§9.2, iteration 3) is the pen on a timer: `mode ∈ {free,
+    b2b}` (starts free, **never persisted**, unlike the `b2bBars` turn
+    length, default 16 / floor 4, which is persisted like `phrase`),
+    and `b2bDecide()` in the same `pen.js`, tested in `test/b2b.test.mjs`.
+    Two things carry the whole contract: flips call the page's ONE
+    `handOverThePen()` rather than duplicating it, and the tick runs the
+    flip decision BEFORE the phrase decision — together with §9.1's
+    "a handoff consumes the current bar" that is what stops a flip and a
+    phrase boundary landing on the same bar from double-acting (the flip
+    wins; the mind fires at its next boundary). The only server change
+    in the whole iteration is one optional boolean: `b2b` in the POST
+    (non-bool → 400), forwarded as `state["b2b"]` **only when true**, on
+    which `strudel_mind` appends ONE line to the USER message. The
+    system prompt is deliberately untouched, so a B2B session stays
+    comparable to `bench_strudel_mind.py`.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
 
 Convention: scripts are operator-facing and safe to run against the

@@ -211,6 +211,56 @@ def test_an_absurd_body_is_refused_before_it_is_parsed():
         playground.parse_request(b"x" * (playground.MAX_BODY_BYTES + 1))
 
 
+# ─── the b2b passthrough (§9.2) ────────────────────────────────────────
+#
+# The server's whole job here is to not lose the flag and not invent it. Four
+# cases, because each is a different bug: true (a duet the mind must be told
+# about), false and absent (a solo, which must reach the mind as the iteration-2
+# state byte for byte), and a non-bool (a page bug, refused rather than coerced —
+# a truthy "yes" would silently change the prompt).
+
+def test_b2b_true_is_accepted_and_normalised():
+    assert playground.parse_request(_body(intent="d", b2b=True))["b2b"] is True
+
+
+def test_b2b_false_and_absent_both_mean_solo():
+    assert playground.parse_request(_body(intent="d", b2b=False))["b2b"] is False
+    assert playground.parse_request(_body(intent="d"))["b2b"] is False
+
+
+@pytest.mark.parametrize("payload", [
+    b'{"intent":"d","b2b":"true"}',
+    b'{"intent":"d","b2b":1}',
+    b'{"intent":"d","b2b":0}',
+    b'{"intent":"d","b2b":null}',
+    b'{"intent":"d","b2b":[]}',
+    b'{"intent":"d","b2b":{}}',
+])
+def test_a_non_boolean_b2b_is_a_400_rather_than_a_coercion(payload):
+    with pytest.raises(playground.BadRequest, match="b2b"):
+        playground.parse_request(payload)
+
+
+def test_b2b_reaches_the_state_the_mind_reads():
+    state = playground.state_for(
+        playground.parse_request(_body(code="stack()", intent="d", b2b=True))
+    )
+    assert state["b2b"] is True
+
+
+@pytest.mark.parametrize("body", [
+    _body(code="stack()", intent="d"),
+    _body(code="stack()", intent="d", b2b=False),
+])
+def test_a_solo_state_carries_no_b2b_key_at_all(body):
+    """Absent, not false: `strudel_mind` serializes whatever state it is handed,
+    so a `b2b: false` in there would change the free-mode prompt for no reason.
+    """
+    state = playground.state_for(playground.parse_request(body))
+    assert "b2b" not in state
+    assert set(state) == {"current_code", "bars_elapsed", "recent_reasons"}
+
+
 def test_state_for_carries_the_editor_code_as_current_code():
     """Non-empty current_code is what makes the call a MUTATION (§8.2)."""
     state = playground.state_for(playground.parse_request(
@@ -320,6 +370,48 @@ def test_the_editor_buffer_reaches_the_mind_as_current_code(serve, validator_ok)
         "recent_reasons": ["opened the filter"],
     }]
     assert factory.mind.intents == ["more swing"]
+
+
+def test_a_b2b_post_reaches_the_mind_as_state_b2b(serve, validator_ok):
+    """The §9.2 wire claim, end to end: the page says `b2b: true`, the mind's
+    state says `b2b: True`, and nothing else about the request moved."""
+    factory = _factory(StrudelCode(code="stack()"))
+    url = serve(factory)
+    status, _, _ = post(url, {"code": 'stack(s("bd*4"))', "intent": "answer them",
+                              "bars_elapsed": 16, "recent_reasons": ["human: +1 line"],
+                              "b2b": True})
+
+    assert status == 200
+    assert factory.mind.states == [{
+        "current_code": 'stack(s("bd*4"))',
+        "bars_elapsed": 16,
+        "recent_reasons": ["human: +1 line"],
+        "b2b": True,
+    }]
+
+
+@pytest.mark.parametrize("payload", [
+    {"code": "stack()", "intent": "d"},
+    {"code": "stack()", "intent": "d", "b2b": False},
+])
+def test_a_free_mode_post_hands_the_mind_the_iteration_2_state(serve, validator_ok, payload):
+    factory = _factory(StrudelCode(code="stack()"))
+    url = serve(factory)
+    post(url, payload)
+    assert factory.mind.states == [{
+        "current_code": "stack()", "bars_elapsed": 0, "recent_reasons": [],
+    }]
+
+
+def test_a_non_boolean_b2b_on_the_wire_is_400_and_never_reaches_the_mind(serve, validator_ok):
+    factory = _factory(StrudelCode(code="stack()"))
+    url = serve(factory)
+    status, body, headers = post(url, {"code": "stack()", "intent": "d", "b2b": "yes"})
+
+    assert status == 400
+    assert "b2b" in body["detail"] and "boolean" in body["detail"]
+    assert factory.calls == []
+    assert headers["Access-Control-Allow-Origin"] == ORIGIN  # the page must read it
 
 
 def test_genre_and_key_from_the_request_reach_the_factory(serve, validator_ok):
