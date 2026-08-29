@@ -5,8 +5,16 @@
  * the dev pair (see CLAUDE.md "Deploy & operations"). Nothing here may collide
  * with a live session.
  *
- *   node serve.mjs            -> http://127.0.0.1:4031
+ *   node serve.mjs                      -> http://127.0.0.1:4031
  *   PORT=4032 node serve.mjs
+ *   HOST=100.68.5.104 node serve.mjs    -> served on the tailnet (bind the
+ *                                          tailscale IP, NOT 0.0.0.0 — only
+ *                                          the tailnet should reach a jam)
+ *
+ * When served from a non-local HOST, the playground page follows along by
+ * itself (MIND_URL is built from location.hostname) — but the mind server on
+ * 4032 must then be started with the matching --host AND an --allow-origin
+ * for this page's origin, or the browser will refuse to read its responses.
  */
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -83,14 +91,19 @@ export function createSpikeServer() {
   });
 }
 
-/** Starts the server and resolves with { server, port, url }. */
-export function startSpikeServer(port = Number(process.env.PORT) || DEFAULT_PORT) {
+/** Starts the server and resolves with { server, port, url }. `host` defaults
+ * to loopback; HOST in the env overrides it (see the module header) so serving
+ * a jam over the tailnet is a launch-time decision, never a code edit. */
+export function startSpikeServer(
+  port = Number(process.env.PORT) || DEFAULT_PORT,
+  host = process.env.HOST || '127.0.0.1',
+) {
   return new Promise((resolve, reject) => {
     const server = createSpikeServer();
     server.once('error', reject);
-    server.listen(port, '127.0.0.1', () => {
+    server.listen(port, host, () => {
       const actual = server.address().port;
-      resolve({ server, port: actual, url: `http://127.0.0.1:${actual}/` });
+      resolve({ server, port: actual, url: `http://${host}:${actual}/` });
     });
   });
 }

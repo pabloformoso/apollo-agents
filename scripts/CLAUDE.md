@@ -105,6 +105,12 @@
   - **`--mock` builds no LLM client** — a canned deterministic mutation
     through the REAL validator, so the whole path is demoable with no
     tunnel. Use it before blaming the model for a page bug.
+  - **Serving the jam from tunel** (or any tailnet box): `HOST=<tailscale
+    ip> node serve.mjs` (bind the IP, not 0.0.0.0) and the mind with
+    `--host <ip> --allow-origin http://<ip>:4031` (repeatable flag; the
+    defaults stay allowed). The page follows by itself — `MIND_URL` is
+    built from `location.hostname`. On tunel the mind's `--base-url` is
+    `http://127.0.0.1:1234/v1` (LM Studio is local there).
   - The four failure codes are deliberately distinct: 400 malformed,
     502 the mind failed twice (detail carries BOTH validator errors,
     caller holds), 503 the validator is missing (`npm install`), 500

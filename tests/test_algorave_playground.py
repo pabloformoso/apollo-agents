@@ -291,6 +291,53 @@ def test_any_other_origin_gets_no_allow_origin_header(origin):
     assert headers["Vary"] == "Origin"
 
 
+# ─── --allow-origin: serving the jam over the tailnet ──────────────────
+
+def test_resolve_allowed_origins_defaults_to_the_spike_origins():
+    assert playground.resolve_allowed_origins([]) == playground.SPIKE_ORIGINS
+    assert playground.resolve_allowed_origins(None) == playground.SPIKE_ORIGINS
+
+
+def test_resolve_allowed_origins_appends_normalized_and_deduped():
+    allowed = playground.resolve_allowed_origins([
+        "http://100.68.5.104:4031/",   # trailing slash — browsers never send it
+        " http://100.68.5.104:4031 ",  # whitespace + duplicate collapses
+        "",                            # empty is ignored, not an origin
+        "http://127.0.0.1:4031",       # already a default — not doubled
+    ])
+    assert allowed == playground.SPIKE_ORIGINS + ("http://100.68.5.104:4031",)
+
+
+def test_build_parser_collects_repeated_allow_origin_flags():
+    args = playground.build_parser().parse_args([
+        "--mock",
+        "--allow-origin", "http://100.68.5.104:4031",
+        "--allow-origin", "http://jam.example:4031",
+    ])
+    assert args.allow_origin == ["http://100.68.5.104:4031", "http://jam.example:4031"]
+
+
+def test_an_extra_origin_is_readable_once_allowed(serve, validator_ok):
+    """End to end: a server built with the tailnet origin answers it with CORS
+    headers, the local defaults keep working beside it, and everything else
+    still gets refused — extending the list must never mean opening it."""
+    tailnet = "http://100.68.5.104:4031"
+    url = serve(
+        _factory(StrudelCode(code="stack()", reason="r", stats={})),
+        allowed_origins=playground.resolve_allowed_origins([tailnet]),
+    )
+
+    status, _, headers = post(url, {"code": "", "intent": "x"}, origin=tailnet)
+    assert status == 200
+    assert headers.get("Access-Control-Allow-Origin") == tailnet
+
+    _, _, headers = post(url, {"code": "", "intent": "x"}, origin=ORIGIN)
+    assert headers.get("Access-Control-Allow-Origin") == ORIGIN
+
+    _, _, headers = post(url, {"code": "", "intent": "x"}, origin=OTHER_ORIGIN)
+    assert "Access-Control-Allow-Origin" not in headers
+
+
 # ─── the mock mutation ─────────────────────────────────────────────────
 
 def test_the_mock_pulls_the_first_numeric_gain_down():

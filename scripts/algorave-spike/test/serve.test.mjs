@@ -42,6 +42,21 @@ describe('resolvePath', () => {
   });
 });
 
+describe('startSpikeServer host binding', () => {
+  it('binds the host it is given and reports it in the url', async () => {
+    // The tailnet case is machine-specific; loopback passed EXPLICITLY proves
+    // the parameter reaches listen() and the reported url matches the bind.
+    const { server, url } = await startSpikeServer(0, '127.0.0.1');
+    try {
+      expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/$/);
+      const res = await fetch(new URL('/palette.json', url));
+      expect(res.status).toBe(200);
+    } finally {
+      server.close();
+    }
+  });
+});
+
 describe('GET /palette.json (real server, ephemeral port)', () => {
   it('returns the committed registry as JSON with the fields the pages read', async () => {
     const { server, url } = await startSpikeServer(0);
