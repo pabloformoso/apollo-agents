@@ -25,7 +25,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_CYCLES, keyPitchClasses, notePitchClass, pcName } from '../validate.mjs';
+import {
+  DEFAULT_CYCLES,
+  keyPitchClasses,
+  loadPaletteRegistry,
+  notePitchClass,
+  paletteFor,
+  pcName,
+} from '../validate.mjs';
 
 const SPIKE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -109,11 +116,6 @@ describe('validate.mjs CLI — §8.1 verdicts', () => {
     // Stats still report what was actually seen, even though the gate failed.
     expect(verdict.stats.events).toBeGreaterThan(0);
     expect(verdict.stats.sounds).toEqual(['gm_epiano1']);
-
-    // bank() is free-form on top of the palette (§8.1) — it must never be
-    // mistaken for the sound name itself.
-    const withBank = runValidator('s("bd*4").bank("made-up-machine-9000")', []);
-    expect(withBank.valid).toBe(true);
   });
 
   it('5. the token screen rejects import/require/fetch/eval/process -> valid:false + error', () => {
@@ -128,12 +130,19 @@ describe('validate.mjs CLI — §8.1 verdicts', () => {
     expect(multi.error).toBe('code contains disallowed token(s): eval, fetch, process');
 
     // Word-boundary, not substring: text that merely CONTAINS a banned word
-    // must not trip the screen. bank() is free-form (§8.1), so this is also
-    // otherwise-valid code — the assertion can be the strong one, valid:true,
-    // not just "rejected for some other reason".
+    // must not trip the screen. "preprocessedKit" is an unknown bank under
+    // the registry, so the rejection it gets must be the PALETTE's, never the
+    // token screen's — that difference is exactly the word-boundary proof.
     const notBanned = runValidator('s("bd*4").bank("preprocessedKit")', []);
-    expect(notBanned.valid).toBe(true);
-    expect(notBanned.error).toBeNull();
+    expect(notBanned.valid).toBe(false);
+    expect(notBanned.error).not.toMatch(/disallowed token/);
+    expect(notBanned.error).toMatch(/unknown bank 'preprocessedKit'/);
+
+    // And a registered bank in otherwise-clean code sails through, proving
+    // the screen has no substring false positives on real input either.
+    const clean = runValidator('s("bd*4").bank("RolandTR909")', []);
+    expect(clean.valid).toBe(true);
+    expect(clean.error).toBeNull();
   });
 
   it('6. // reason: is extracted, and its prose is exempt from the token screen', () => {
@@ -251,6 +260,128 @@ describe('validate.mjs CLI — §8.1 verdicts', () => {
         encoding: 'utf8',
       });
     expect(run()).toBe(run());
+  });
+});
+
+describe('the palette registry (palette.json) — banks by data, silence gate', () => {
+  it('a (sound, bank) pair the matrix lacks is rejected, and the error coaches', () => {
+    // The TR909 sample set has no shaker — live, this layer would be SILENT.
+    const verdict = runValidator('s("sh*8").bank("RolandTR909")', []);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toMatch(/palette violation/);
+    expect(verdict.error).toContain("'sh' is not in bank RolandTR909");
+    // Coaching, not a bare no: the banks that DO carry a shaker are named.
+    expect(verdict.error).toContain('RolandTR808');
+    expect(verdict.error).toContain('RolandTR727');
+
+    // The same sound through a bank that has it is simply valid.
+    const ok = runValidator('s("sh*8").bank("RolandTR808")', []);
+    expect(ok.valid).toBe(true);
+  });
+
+  it('an unknown bank is rejected, naming the banks that exist', () => {
+    const verdict = runValidator('s("bd*4").bank("RolandTR0909")', []); // typo'd
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toContain("unknown bank 'RolandTR0909'");
+    expect(verdict.error).toContain('RolandTR909');
+  });
+
+  it('.bank() on a synth voice is rejected — it resolves to no sample', () => {
+    const verdict = runValidator('note("a3 c4").s("sawtooth").bank("RolandTR909")', []);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toMatch(/synth voice 'sawtooth' plays silence/);
+  });
+
+  it('a patterned bank is checked per event, not per layer', () => {
+    // TR727 is Latin percussion only — it has no bd, so alternating the kick
+    // into it every other bar is a silent bar 2, and must be caught.
+    const bad = runValidator('s("bd*4").bank("<RolandTR909 RolandTR727>")', []);
+    expect(bad.valid).toBe(false);
+    expect(bad.error).toContain("'bd' is not in bank RolandTR727");
+
+    const good = runValidator('s("bd*4").bank("<RolandTR909 RolandTR808>")', []);
+    expect(good.valid).toBe(true);
+  });
+
+  it('--genre narrows the vocabulary to that genre; unknown genre falls back whole', () => {
+    // "misc" is registry vocabulary but fenced out of the deep entry.
+    const bare = runValidator('s("misc*4").bank("EmuSP12")', []);
+    expect(bare.valid).toBe(true);
+
+    const fenced = runValidator('s("misc*4").bank("EmuSP12")', ['--genre', 'deep']);
+    expect(fenced.valid).toBe(false);
+    expect(fenced.error).toContain('misc');
+
+    // An unknown genre degrades like a malformed --key: full vocabulary, no crash.
+    const unknown = runValidator(VALID_STACK, ['--genre', 'gabber']);
+    expect(unknown.valid).toBe(true);
+  });
+
+  it('the widened kit actually plays: toms, ride, shaker and perc in one stack', () => {
+    const code = [
+      'stack(',
+      '  s("bd*4").bank("RolandTR909"),',
+      '  s("[~ oh]*4").bank("RolandTR909"),',
+      '  s("sh*16").bank("RolandTR727").gain(0.3),',
+      '  s("~ ~ ~ [ht mt lt]").bank("RolandTR909").gain(0.5),',
+      '  s("rd*4").bank("LinnDrum").gain(0.35),',
+      '  s("~ perc ~ ~").bank("RolandTR808").gain(0.4)',
+      ')',
+    ].join('\n');
+    const verdict = runValidator(code, ['--genre', 'deep', '--key', 'A:minor']);
+    expect(verdict.valid).toBe(true);
+    expect(verdict.stats.sounds).toEqual(['bd', 'ht', 'lt', 'mt', 'oh', 'perc', 'rd', 'sh']);
+  });
+});
+
+describe('registry file + paletteFor (in-process, no subprocess)', () => {
+  const registry = loadPaletteRegistry();
+
+  it('loadPaletteRegistry returns the committed registry with every field', () => {
+    for (const field of ['sources', 'drums', 'synths', 'banks', 'genres']) {
+      expect(registry).toHaveProperty(field);
+    }
+    expect(registry.sources.length).toBeGreaterThan(0);
+    for (const src of registry.sources) {
+      expect(typeof src.json).toBe('string');
+      expect(typeof src.base).toBe('string');
+    }
+  });
+
+  it('the registry is self-consistent — every genre reference resolves', () => {
+    // The GENRE_THEMES lesson (tests/test_genre_healing.py): an entry that
+    // points at nothing degrades silently in prod, so the pointing is a test.
+    const drums = new Set(registry.drums);
+    const synths = new Set(registry.synths);
+    const bankNames = new Set(Object.keys(registry.banks));
+    for (const [genre, entry] of Object.entries(registry.genres)) {
+      for (const d of entry.drums) expect(drums.has(d), `${genre}: drum ${d}`).toBe(true);
+      for (const s of entry.synths) expect(synths.has(s), `${genre}: synth ${s}`).toBe(true);
+      for (const b of entry.banks) expect(bankNames.has(b), `${genre}: bank ${b}`).toBe(true);
+    }
+    // And every matrix role is lane vocabulary — a row can't smuggle a sound in.
+    for (const [bank, roles] of Object.entries(registry.banks)) {
+      for (const r of roles) expect(drums.has(r), `${bank}: role ${r}`).toBe(true);
+    }
+    // The genre the playground page ships with must exist by this exact name.
+    expect(registry.genres).toHaveProperty('deep');
+  });
+
+  it('paletteFor narrows to a known genre and falls back whole otherwise', () => {
+    const deep = paletteFor(registry, 'deep');
+    expect(deep.genre).toBe('deep');
+    expect(deep.sounds.has('bd')).toBe(true);
+    expect(deep.sounds.has('misc')).toBe(false); // fenced out of deep
+    expect([...deep.banks.keys()]).toEqual(registry.genres.deep.banks);
+
+    const fallback = paletteFor(registry, 'gabber');
+    expect(fallback.genre).toBeNull();
+    expect(fallback.sounds.has('misc')).toBe(true);
+    expect(fallback.banks.size).toBe(Object.keys(registry.banks).length);
+
+    const none = paletteFor(registry, null);
+    expect(none.genre).toBeNull();
+    expect(none.sounds.has('bd')).toBe(true);
   });
 });
 

@@ -192,14 +192,32 @@
       // ---------------------------------------------------------------------
       // Sample banks. @strudel/web's defaultPrebake only registers the built-in
       // synth waveforms — the drum machines are NOT bundled, so bank('RolandTR909')
-      // resolves to nothing unless we register the map ourselves. These are the
-      // URLs the strudel.cc REPL itself prebakes (website/src/repl/prebake.mjs).
-      // Network is required at play/record time; self-hosting is an integration-slice
-      // job, per the plan's §7 risk list.
+      // resolves to nothing unless we register the map ourselves. WHICH maps to
+      // register comes from the palette registry (/palette.json, plan §10) so
+      // sources are data — self-hosting later = edit `sources` there, no code.
+      // The built-in source below is only the fallback for a broken fetch:
+      // network trouble must degrade the palette, never ground the page.
       // ---------------------------------------------------------------------
       const CDN = 'https://strudel.b-cdn.net';
-      const DRUM_MACHINES = `${CDN}/tidal-drum-machines.json`;
-      const DRUM_MACHINES_BASE = `${CDN}/tidal-drum-machines/machines/`;
+      const FALLBACK_SOURCES = [{
+        json: `${CDN}/tidal-drum-machines.json`,
+        base: `${CDN}/tidal-drum-machines/machines/`,
+        tag: 'drum-machines',
+      }];
+      const paletteSources = async () => {
+        try {
+          const r = await fetch('/palette.json');
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const registry = await r.json();
+          if (!Array.isArray(registry.sources) || registry.sources.length === 0) {
+            throw new Error('registry has no sources');
+          }
+          return registry.sources;
+        } catch (e) {
+          log(`palette.json unavailable (${e.message}) — using the built-in drum-machines source`, 'err');
+          return FALLBACK_SOURCES;
+        }
+      };
 
       const statusEl = document.getElementById('status');
       const log = (msg, cls = '') => {
@@ -251,10 +269,13 @@
       let ready = null;
       const boot = () => {
         if (!ready) {
-          log('initStrudel + registering RolandTR909 bank…');
+          log('initStrudel + registering the palette sample sources…');
           ready = initStrudel({
-            prebake: () =>
-              samples(DRUM_MACHINES, DRUM_MACHINES_BASE, { prebake: true, tag: 'drum-machines' }),
+            prebake: async () => {
+              const sources = await paletteSources();
+              await Promise.all(sources.map((src) =>
+                samples(src.json, src.base, { prebake: true, tag: src.tag ?? 'palette' })));
+            },
           }).then((repl) => {
             repl.setCps(description.cps);
             log(`ready · cps ${description.cps.toFixed(5)} (${description.bpm} BPM)`, 'ok');

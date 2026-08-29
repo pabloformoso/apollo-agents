@@ -126,7 +126,12 @@ was found by reading the installed packages, not the docs.
    upstream. `bank('RolandTR909')` resolves to nothing unless you register the
    map yourself. The URLs the strudel.cc REPL prebakes are on
    `https://strudel.b-cdn.net` (`tidal-drum-machines.json` +
-   `tidal-drum-machines/machines/`), and that is what `index.html` uses.
+   `tidal-drum-machines/machines/`). WHICH maps the pages register comes from
+   **`palette.json`** (plan §10): the ONE registry of sample `sources`, sound
+   roles, and per-bank sound matrices that `validate.mjs` gates against,
+   `agent/generative/strudel_mind.py` prompts from, and both pages fetch at
+   boot (with the b-cdn source as fallback). Add sounds/banks there, never in
+   code — and self-hosting samples later is editing `sources`, nothing else.
 
 4. **`maxPolyphony` is a hard global cap in an offline render, and its default of
    128 silently guts anything longer than a few bars.** `renderPatternAudio`

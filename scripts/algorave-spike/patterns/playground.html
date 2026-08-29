@@ -383,9 +383,32 @@
       // StrudelMind would otherwise be told, which is not an instruction.
       const STANDING_INTENT = 'keep the groove moving — one clear change';
 
+      // Sample sources come from the palette registry (/palette.json, plan
+      // §10) — the same file validate.mjs gates against and strudel_mind.py
+      // prompts from, so what the page can PLAY and what the mind may WRITE
+      // stay one vocabulary. The built-in source below is only the fallback
+      // for a broken fetch: network trouble must degrade the palette, never
+      // ground the jam.
       const CDN = 'https://strudel.b-cdn.net';
-      const DRUM_MACHINES = `${CDN}/tidal-drum-machines.json`;
-      const DRUM_MACHINES_BASE = `${CDN}/tidal-drum-machines/machines/`;
+      const FALLBACK_SOURCES = [{
+        json: `${CDN}/tidal-drum-machines.json`,
+        base: `${CDN}/tidal-drum-machines/machines/`,
+        tag: 'drum-machines',
+      }];
+      const paletteSources = async () => {
+        try {
+          const r = await fetch('/palette.json');
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          const registry = await r.json();
+          if (!Array.isArray(registry.sources) || registry.sources.length === 0) {
+            throw new Error('registry has no sources');
+          }
+          return registry.sources;
+        } catch (e) {
+          log(`palette.json unavailable (${e.message}) — using the built-in drum-machines source`, 'err');
+          return FALLBACK_SOURCES;
+        }
+      };
 
       const $ = (id) => document.getElementById(id);
       const editor = $('editor');
@@ -515,10 +538,13 @@
       let ready = null;
       const boot = () => {
         if (!ready) {
-          log('initStrudel + registering the RolandTR909 bank…');
+          log('initStrudel + registering the palette sample sources…');
           ready = initStrudel({
-            prebake: () =>
-              samples(DRUM_MACHINES, DRUM_MACHINES_BASE, { prebake: true, tag: 'drum-machines' }),
+            prebake: async () => {
+              const sources = await paletteSources();
+              await Promise.all(sources.map((src) =>
+                samples(src.json, src.base, { prebake: true, tag: src.tag ?? 'palette' })));
+            },
           }).then((repl) => {
             repl.setCps(CPS);
             log(`ready · cps ${CPS.toFixed(5)} (${BPM} BPM)`, 'ok');

@@ -2,7 +2,7 @@
 /*
  * ApolloAgents — algorave lane, iteration 1 (S2). docs/algorave-livecoding-plan.md §8.1.
  *
- *   node validate.mjs [--cycles N] [--key "A:minor"]
+ *   node validate.mjs [--cycles N] [--key "A:minor"] [--genre deep]
  *
  * Reads Strudel REPL-dialect code on stdin, evaluates it against a Node-only
  * scope (@strudel/core + mini + tonal — NO webaudio, no network, no audio),
@@ -43,6 +43,7 @@
  * ---------------------------------------------------------------------------
  */
 
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -57,10 +58,13 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 // human running this by hand should get a sensible default too.
 export const DEFAULT_CYCLES = 4;
 
-// §8.1's palette. `bank()` is free-form on top of these — it never touches `s`.
-export const PALETTE = new Set([
-  'bd', 'sd', 'hh', 'oh', 'cp', 'rim', 'triangle', 'sawtooth', 'square', 'sine',
-]);
+// The sound vocabulary comes from palette.json — ONE registry (plan §10) that
+// this validator, agent/generative/strudel_mind.py and the spike pages all
+// read, so sounds and banks are enabled by DATA, never by code. v1's
+// "`bank()` is free-form" rule died with the registry: the registered sample
+// map is machine-prefixed (`RolandTR909_bd`), so a bank the registry does not
+// know — or a (sound, bank) pair its matrix lacks — resolves to no sample and
+// plays SILENCE live, which is exactly the failure this gate exists to catch.
 
 // Word-boundary match, not an AST walk — deliberately blunt (see §8.1: "hygiene
 // against a confused model, not a security boundary against attackers"). This
@@ -98,18 +102,22 @@ const MAJOR_STEPS = [0, 2, 4, 5, 7, 9, 11];
 const REQUIRED_KICK_PHASES = [0, 0.25, 0.5, 0.75];
 
 // ---------------------------------------------------------------------------
-// Pure helpers — no @strudel import, no I/O. Safe to `import` from a test file
-// without triggering the CLI (see `isMain()` at the bottom): none of this runs
-// Strudel, reads stdin, or touches console.log/process.exitCode.
+// Helpers — no @strudel import, no I/O on import. Safe to `import` from a test
+// file without triggering the CLI (see `isMain()` at the bottom): none of this
+// runs Strudel, reads stdin, or touches console.log/process.exitCode at import
+// time. The one function that touches the filesystem, `loadPaletteRegistry`,
+// only does so when called.
 // ---------------------------------------------------------------------------
 
-/** `["--cycles", "8", "--key", "A:minor"]` -> `{cycles: 8, key: "A:minor"}`.
+/** `["--cycles", "8", "--key", "A:minor", "--genre", "deep"]` ->
+ * `{cycles: 8, key: "A:minor", genre: "deep"}`.
  * Unrecognised or unparsable flag values fall back to a safe default rather
  * than crashing the process — CLI-usage mistakes are not the kind of failure
  * this tool's exit-code contract is about (see the module header). */
 export function parseArgs(argv) {
   let cycles = DEFAULT_CYCLES;
   let key = null;
+  let genre = null;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--cycles') {
@@ -124,9 +132,46 @@ export function parseArgs(argv) {
       }
     } else if (arg === '--key') {
       key = argv[++i] ?? null;
+    } else if (arg === '--genre') {
+      genre = argv[++i] ?? null;
     }
   }
-  return { cycles, key };
+  return { cycles, key, genre };
+}
+
+/** Reads and shape-checks `palette.json` (next to this file). Throws on a
+ * missing or malformed registry — that is HARNESS breakage (a committed file
+ * is gone or corrupt), never a verdict about the model's code, so `main()`
+ * routes it to stderr + exit 1 exactly like a broken Strudel install. */
+export function loadPaletteRegistry() {
+  const file = fileURLToPath(new URL('./palette.json', import.meta.url));
+  const registry = JSON.parse(readFileSync(file, 'utf8'));
+  for (const field of ['sources', 'drums', 'synths', 'banks', 'genres']) {
+    if (!(field in registry)) {
+      throw new Error(`palette.json is missing the "${field}" field`);
+    }
+  }
+  return registry;
+}
+
+/** The enforcement sets for one run: the genre's entry when the registry has
+ * it, the registry-wide vocabulary otherwise (an unknown genre narrows
+ * nothing — same degrade rule as a malformed --key). `genre` in the result is
+ * the entry actually used, or null when it fell back. */
+export function paletteFor(registry, genre) {
+  const entry =
+    genre && registry.genres && Object.prototype.hasOwnProperty.call(registry.genres, genre)
+      ? registry.genres[genre]
+      : null;
+  const drums = entry ? entry.drums : registry.drums;
+  const synths = entry ? entry.synths : registry.synths;
+  const bankNames = entry ? entry.banks : Object.keys(registry.banks);
+  return {
+    sounds: new Set([...drums, ...synths]),
+    synths: new Set(synths),
+    banks: new Map(bankNames.map((name) => [name, new Set(registry.banks[name] ?? [])])),
+    genre: entry ? genre : null,
+  };
 }
 
 /** Splits the optional `// reason: ...` first line out of raw code.
@@ -198,18 +243,23 @@ export function keyPitchClasses(key) {
 const roundPhase = (x) => Math.round(x * 1e6) / 1e6;
 
 /** One pass over `pattern.queryArc(0, cycles)`'s onset events -> every §8.1
- * stat plus an internal `violations` list (sounds outside PALETTE — including
- * events with no sound at all, which cannot reach superdough either). Callers
- * decide what a non-empty `violations` means for `valid`; this function only
- * observes. Does not import or know about @strudel — `pattern` just needs a
- * `queryArc(from, to)` returning hits with `.hasOnset()`/`.whole.begin`/`.value`,
- * so this stays testable against a fake in principle even though the real
- * caller always passes a live Strudel Pattern. */
-export function computeStats(pattern, cycles, keyPcs) {
+ * stat plus two internal violation lists: `violations` (sounds outside the
+ * palette — including events with no sound at all, which cannot reach
+ * superdough either) and `bankViolations` (a `.bank()` the registry does not
+ * know, a (sound, bank) pair the bank's matrix row lacks, or a bank on a
+ * synth voice — each of which resolves to no sample and plays silence).
+ * Callers decide what non-empty lists mean for `valid`; this function only
+ * observes. `palette` is a `paletteFor()` result. Does not import or know
+ * about @strudel — `pattern` just needs a `queryArc(from, to)` returning hits
+ * with `.hasOnset()`/`.whole.begin`/`.value`, so this stays testable against
+ * a fake in principle even though the real caller always passes a live
+ * Strudel Pattern. */
+export function computeStats(pattern, cycles, keyPcs, palette) {
   const haps = pattern.queryArc(0, cycles).filter((h) => h.hasOnset());
 
   const sounds = new Set();
   const violations = new Set();
+  const bankViolations = new Set();
   const outOfKey = new Set();
   const kickPhasesByCycle = Array.from({ length: cycles }, () => new Set());
 
@@ -219,8 +269,35 @@ export function computeStats(pattern, cycles, keyPcs) {
     const soundName = isObj ? value.s : undefined;
 
     if (typeof soundName === 'string') sounds.add(soundName);
-    if (!PALETTE.has(soundName)) {
+    if (!palette.sounds.has(soundName)) {
       violations.add(typeof soundName === 'string' ? soundName : '(missing sound)');
+    }
+
+    const bank = isObj ? value.bank : undefined;
+    if (typeof bank === 'string' && bank.length > 0) {
+      if (palette.synths.has(soundName)) {
+        bankViolations.add(
+          `.bank("${bank}") on synth voice '${soundName}' plays silence — synth layers take no bank`,
+        );
+      } else if (!palette.banks.has(bank)) {
+        bankViolations.add(
+          `unknown bank '${bank}' — the banks that exist: ${[...palette.banks.keys()].sort().join(', ')}`,
+        );
+      } else if (
+        typeof soundName === 'string' &&
+        palette.sounds.has(soundName) &&
+        !palette.banks.get(bank).has(soundName)
+      ) {
+        const carriers = [...palette.banks.entries()]
+          .filter(([, roles]) => roles.has(soundName))
+          .map(([name]) => name)
+          .sort();
+        bankViolations.add(
+          carriers.length > 0
+            ? `'${soundName}' is not in bank ${bank} — banks that have it: ${carriers.join(', ')}`
+            : `'${soundName}' is not in bank ${bank}`,
+        );
+      }
     }
 
     if (soundName === 'bd') {
@@ -247,6 +324,7 @@ export function computeStats(pattern, cycles, keyPcs) {
     kickFourOnFloor,
     outOfKey: [...outOfKey].sort(),
     violations: [...violations].sort(),
+    bankViolations: [...bankViolations].sort(),
   };
 }
 
@@ -344,6 +422,25 @@ async function main() {
     return;
   }
 
+  // A missing/corrupt registry is harness breakage (a committed file is gone),
+  // not a verdict — same exit-1 path as a broken Strudel install.
+  let palette;
+  try {
+    palette = paletteFor(loadPaletteRegistry(), args.genre);
+  } catch (e) {
+    process.stderr.write(
+      'validate.mjs: failed to load palette.json (the sound registry next to this file). ' +
+        `Restore it from git and try again.\nOriginal error: ${e && e.message ? e.message : e}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (args.genre && !palette.genre) {
+    process.stderr.write(
+      `validate.mjs: unknown genre ${JSON.stringify(args.genre)} — enforcing the full registry vocabulary\n`,
+    );
+  }
+
   let keyPcs = null;
   if (args.key) {
     keyPcs = keyPitchClasses(args.key);
@@ -396,7 +493,7 @@ async function main() {
 
   let stats;
   try {
-    stats = { ...computeStats(pattern, args.cycles, keyPcs), cyclesChecked: args.cycles };
+    stats = { ...computeStats(pattern, args.cycles, keyPcs, palette), cyclesChecked: args.cycles };
   } catch (e) {
     emit(
       makeVerdict(
@@ -414,15 +511,16 @@ async function main() {
     return;
   }
 
-  if (stats.violations.length > 0) {
-    emit(
-      makeVerdict(
-        false,
-        `palette violation: sound(s) not in the palette — ${stats.violations.join(', ')}`,
-        reason,
-        stats,
-      ),
-    );
+  if (stats.violations.length > 0 || stats.bankViolations.length > 0) {
+    // One error string, "palette violation:" first so the bench keeps
+    // bucketing every vocabulary rejection as PALETTE. Sound names lead,
+    // bank diagnoses follow — each one coaches (names what DOES exist).
+    const parts = [];
+    if (stats.violations.length > 0) {
+      parts.push(`sound(s) not in the palette — ${stats.violations.join(', ')}`);
+    }
+    parts.push(...stats.bankViolations);
+    emit(makeVerdict(false, `palette violation: ${parts.join('; ')}`, reason, stats));
     return;
   }
 

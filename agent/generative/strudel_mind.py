@@ -53,9 +53,68 @@ VALIDATE_TIMEOUT_SEC = 30.0
 
 DEFAULT_KEY = "A:minor"
 
-# §8.1's palette — the only sound names the validator accepts. `bank()` is
-# free-form on top of these.
-PALETTE = ("bd", "sd", "hh", "oh", "cp", "rim", "triangle", "sawtooth", "square", "sine")
+# ---------------------------------------------------------------------------
+# The palette registry — ONE committed file (plan §10) that this module,
+# validate.mjs and the spike pages all read, so sounds and banks are enabled
+# by DATA, never by code. v1's "`bank()` is free-form" rule died with it: the
+# registered sample map is machine-prefixed (RolandTR909_bd), so a bank the
+# registry does not know — or a (sound, bank) pair its matrix lacks — resolves
+# to no sample and plays SILENCE live.
+# ---------------------------------------------------------------------------
+PALETTE_FILE = SPIKE_DIR / "palette.json"
+
+
+def _load_palette_registry() -> dict:
+    """Parse and shape-check the committed registry — loud on failure.
+
+    Loud on purpose (the GENRE_THEMES lesson): a registry that silently
+    degraded to a hardcoded fallback would drift from what the validator
+    enforces, and the drift would surface as live 502s, not here.
+    """
+    try:
+        registry = json.loads(PALETTE_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"palette registry not found at {PALETTE_FILE} — it is a committed "
+            "file (the validator, this prompt and the spike pages all read it); "
+            "restore it from git."
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"palette registry {PALETTE_FILE} is not valid JSON: {exc}") from exc
+    for field in ("sources", "drums", "synths", "banks", "genres"):
+        if field not in registry:
+            raise RuntimeError(f"palette registry {PALETTE_FILE} is missing {field!r}")
+    return registry
+
+
+PALETTE_REGISTRY = _load_palette_registry()
+DRUM_SOUNDS = tuple(PALETTE_REGISTRY["drums"])
+SYNTH_SOUNDS = tuple(PALETTE_REGISTRY["synths"])
+# The flat registry-wide vocabulary — what a genre-less validator run accepts.
+PALETTE = DRUM_SOUNDS + SYNTH_SOUNDS
+
+
+def _normalize_genre(genre: str | None) -> str:
+    """The one spelling rule for genre keys, shared by brief/palette/validator."""
+    return (genre or "").strip().lower()
+
+
+def genre_palette(genre: str | None) -> dict:
+    """`genre` -> {"drums": tuple, "synths": tuple, "banks": {name: roles}}.
+
+    Mirrors validate.mjs's `paletteFor()`: a genre the registry knows narrows
+    the vocabulary to its entry; an unknown one gets the registry-wide sets —
+    not fatal, the `genre_brief` precedent.
+    """
+    entry = PALETTE_REGISTRY["genres"].get(_normalize_genre(genre))
+    drums = entry["drums"] if entry else PALETTE_REGISTRY["drums"]
+    synths = entry["synths"] if entry else PALETTE_REGISTRY["synths"]
+    bank_names = entry["banks"] if entry else list(PALETTE_REGISTRY["banks"])
+    return {
+        "drums": tuple(drums),
+        "synths": tuple(synths),
+        "banks": {name: tuple(PALETTE_REGISTRY["banks"].get(name, ())) for name in bank_names},
+    }
 
 
 class StrudelMindError(RuntimeError):
@@ -118,12 +177,6 @@ OUTPUT CONTRACT — obey it exactly:
 - Express key musically with `.scale("{DEFAULT_KEY}")` (add an octave digit to the
   root — `.scale("A1:minor")` — to place the register) instead of hand-picking notes.
 
-PALETTE — the only sound names that exist:
-  drums (via s()):   {", ".join(PALETTE[:6])}
-  synth voices (via .s() on a note()/n() pattern): {", ".join(PALETTE[6:])}
-`.bank("RolandTR909")` chooses the drum machine and is free-form. Any other sound
-name is rejected — do not invent sample names.
-
 Idiom you can rely on: stack, s, n, note, gain; mini-notation ("bd*4", "[~ oh]*4",
 "~ cp ~ cp", "<0 5>", "[a3,c4,e4]"); .struct, .add, .scale, .gain, .pan, .speed,
 .late, .lpf/.lpq/.hpf, .attack/.decay/.sustain/.release, .room/.roomsize,
@@ -143,6 +196,31 @@ HOW TO EVOLVE:
 """
 
 
+def palette_block(genre: str | None = "deep") -> str:
+    """The per-genre PALETTE section of the prompt, straight from the registry.
+
+    Lists each allowed bank WITH the sounds its sample set actually has: a
+    (sound, bank) pair the matrix lacks resolves to no sample and plays
+    silence live — so the prompt teaches the pairing and the validator gates
+    it (the same registry on both ends, by construction).
+    """
+    pal = genre_palette(genre)
+    lines = [
+        "PALETTE — the only sound names that exist:",
+        f"  drums (via s()):   {', '.join(pal['drums'])}",
+        f"  synth voices (via .s() on a note()/n() pattern): {', '.join(pal['synths'])}",
+        "`.bank(...)` picks the drum machine. The banks for this set, each with the",
+        "sounds it actually has — a pair outside this table plays SILENCE, so never",
+        "pair a sound with a bank that lacks it:",
+    ]
+    lines += [f"  {name}: {', '.join(roles)}" for name, roles in pal["banks"].items()]
+    lines.append(
+        "Never put .bank() on a synth voice. Any sound or bank not listed above is "
+        "rejected — do not invent names."
+    )
+    return "\n".join(lines)
+
+
 GENRE_BRIEFS: dict[str, str] = {
     "deep": """GENRE: deep house.
 - ~122 BPM feel, one cycle = one bar of 4/4. Kick on every beat, s("bd*4"), 909 family.
@@ -153,6 +231,10 @@ GENRE_BRIEFS: dict[str, str] = {
   .s("sawtooth"), lowpassed at 400-800 Hz with a little .lpq — rolling, never busy.
 - Chords: minor-7th / maj7 stabs on offbeats, .s("triangle") with a pluck envelope,
   .delay + .room doing the character work.
+- Color, sparingly: a quiet 16th shaker (sh — TR727/TR808) makes the groove breathe;
+  at a peak the ride (rd — 909/LinnDrum) can replace the offbeat oh; toms (ht/mt/lt)
+  are a one-bar fill into a phrase change, never a running pattern; cb/tb/perc are
+  single accents, low in the mix.
 - Groove is king: change ONE element per phrase and keep the rest locked. Build by
   opening the bass .lpf and lifting hat gain; strip back by removing a layer, not by
   rewriting the groove.""",
@@ -176,12 +258,15 @@ def genre_brief(genre: str | None) -> str:
 
 
 def build_system_prompt(genre: str | None = "deep", key: str = DEFAULT_KEY) -> str:
-    """Contract + genre idiom + key + few-shot, in that order.
+    """Contract + palette + genre idiom + key + few-shot, in that order.
 
-    The few-shot is appended for every genre: it teaches the REPL *dialect*
-    (what a valid single expression looks like), which is not genre knowledge.
+    The palette comes from the registry, per genre — the sounds, and each
+    bank's actual sound set, are DATA (`palette.json`), so widening the lane's
+    vocabulary never edits this module. The few-shot is appended for every
+    genre: it teaches the REPL *dialect* (what a valid single expression looks
+    like), which is not genre knowledge.
     """
-    parts = [SYSTEM_PROMPT]
+    parts = [SYSTEM_PROMPT, palette_block(genre)]
     brief = genre_brief(genre)
     if brief:
         parts.append(brief)
@@ -355,9 +440,14 @@ def validate_code(
     *,
     cycles: int = VALIDATE_CYCLES,
     key: str = DEFAULT_KEY,
+    genre: str | None = None,
     timeout: float = VALIDATE_TIMEOUT_SEC,
 ) -> dict:
     """Run `node validate.mjs` on `code` and return its verdict dict.
+
+    `genre` narrows the validator to that genre's registry entry (sounds AND
+    banks) — the same fence the prompt teaches; omitted or unknown, the
+    validator enforces the registry-wide vocabulary.
 
     Raises `StrudelMindError` only for harness breakage (no Node, a crashed
     validator, unparseable output) — never for a rejected pattern, which comes
@@ -369,6 +459,9 @@ def validate_code(
     """
     require_validator()
     cmd = ["node", "validate.mjs", "--cycles", str(cycles), "--key", key]
+    normalized_genre = _normalize_genre(genre)
+    if normalized_genre:
+        cmd += ["--genre", normalized_genre]
     try:
         proc = subprocess.run(
             cmd,
@@ -491,6 +584,7 @@ class StrudelMind:
                     code,
                     cycles=self._cycles,
                     key=self._key,
+                    genre=self._genre,
                     timeout=self._validate_timeout,
                 )
                 if verdict.get("valid"):

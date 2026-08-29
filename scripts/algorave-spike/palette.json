@@ -1,0 +1,151 @@
+{
+  "_doc": "The algorave lane's ONE sound registry (docs/algorave-livecoding-plan.md par.10: pack = data, not code). Read by validate.mjs (the gate: sound must be listed, and a .bank() must both exist here and carry that sound - a pair this matrix lacks plays SILENCE live), by agent/generative/strudel_mind.py (the palette and bank matrix in the prompt, per genre), and by the spike pages (sample registration from `sources`). Add sounds/banks HERE, never in code. To self-host samples, point `sources` at your own mirror - no code change. `banks` rows are extracted from the registered tidal-drum-machines.json (verified 2026-08-29).",
+  "sources": [
+    {
+      "json": "https://strudel.b-cdn.net/tidal-drum-machines.json",
+      "base": "https://strudel.b-cdn.net/tidal-drum-machines/machines/",
+      "tag": "drum-machines"
+    }
+  ],
+  "drums": [
+    "bd",
+    "sd",
+    "hh",
+    "oh",
+    "cp",
+    "rim",
+    "ht",
+    "mt",
+    "lt",
+    "rd",
+    "cr",
+    "sh",
+    "cb",
+    "tb",
+    "perc",
+    "misc",
+    "fx"
+  ],
+  "synths": [
+    "triangle",
+    "sawtooth",
+    "square",
+    "sine"
+  ],
+  "banks": {
+    "RolandTR909": [
+      "bd",
+      "sd",
+      "hh",
+      "oh",
+      "cp",
+      "rim",
+      "ht",
+      "mt",
+      "lt",
+      "rd",
+      "cr"
+    ],
+    "RolandTR808": [
+      "bd",
+      "sd",
+      "hh",
+      "oh",
+      "cp",
+      "rim",
+      "ht",
+      "mt",
+      "lt",
+      "cr",
+      "sh",
+      "cb",
+      "perc"
+    ],
+    "RolandTR707": [
+      "bd",
+      "sd",
+      "hh",
+      "oh",
+      "cp",
+      "rim",
+      "ht",
+      "mt",
+      "lt",
+      "cr",
+      "cb",
+      "tb"
+    ],
+    "RolandTR727": [
+      "sh",
+      "perc"
+    ],
+    "LinnDrum": [
+      "bd",
+      "sd",
+      "hh",
+      "oh",
+      "cp",
+      "rim",
+      "ht",
+      "mt",
+      "lt",
+      "rd",
+      "cr",
+      "sh",
+      "cb",
+      "tb",
+      "perc"
+    ],
+    "EmuSP12": [
+      "bd",
+      "sd",
+      "hh",
+      "oh",
+      "cp",
+      "rim",
+      "ht",
+      "mt",
+      "lt",
+      "rd",
+      "cr",
+      "cb",
+      "perc",
+      "misc"
+    ]
+  },
+  "genres": {
+    "deep": {
+      "drums": [
+        "bd",
+        "sd",
+        "hh",
+        "oh",
+        "cp",
+        "rim",
+        "ht",
+        "mt",
+        "lt",
+        "rd",
+        "cr",
+        "sh",
+        "cb",
+        "tb",
+        "perc"
+      ],
+      "synths": [
+        "triangle",
+        "sawtooth",
+        "square",
+        "sine"
+      ],
+      "banks": [
+        "RolandTR909",
+        "RolandTR808",
+        "RolandTR707",
+        "RolandTR727",
+        "LinnDrum",
+        "EmuSP12"
+      ]
+    }
+  }
+}

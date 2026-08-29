@@ -29,6 +29,14 @@
   (in an algorave the code on screen is the performance); and the model
   is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, so the lane
   can run on a different model from the live DJ (#123 precedent).
+  The sound vocabulary — drum roles, synth voices, and each bank's
+  actual sound set — comes from `scripts/algorave-spike/palette.json`
+  (ONE registry, plan §10; also read by `validate.mjs` and the spike
+  pages). Add sounds/banks THERE, never in this module: it loads the
+  registry at import and fails LOUD on a missing/corrupt file, and
+  `next_code` passes `--genre` so the validator enforces the same
+  per-genre fence the prompt teaches (a (sound, bank) pair the matrix
+  lacks plays silence live — the failure the pairing gate exists for).
   Benched by `scripts/bench_strudel_mind.py` before it goes anywhere
   near a stream.
 
