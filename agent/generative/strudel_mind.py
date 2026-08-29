@@ -159,6 +159,17 @@ GENRE_BRIEFS: dict[str, str] = {
 }
 
 
+# §9.2: the one line that turns a solo into a duet. It goes in the USER message,
+# never in the system prompt — the system prompt is what `bench_strudel_mind.py`
+# measures a model against, and a B2B set must stay comparable to a solo one.
+# It is also per-call state ("am I alternating right now"), which is exactly what
+# the user message is for.
+B2B_USER_LINE = (
+    "You are in a back-to-back set. recent_reasons carries your partner's moves "
+    "— acknowledge the LAST one and answer it; never undo it."
+)
+
+
 def genre_brief(genre: str | None) -> str:
     """The idiom paragraph for `genre`, or "" — an unknown genre is not fatal."""
     return GENRE_BRIEFS.get((genre or "").strip().lower(), "")
@@ -428,8 +439,11 @@ class StrudelMind:
         current = str(state.get("current_code") or "").strip()
         # The code is shown once, as code — repeating it inside the state JSON
         # would double the tokens and quote-escape the very thing we want the
-        # model to edit.
-        rest = {k: v for k, v in (state or {}).items() if k != "current_code"}
+        # model to edit. `b2b` is dropped for the same reason from the other
+        # end: it is said once, as the sentence below, and a `"b2b": true` in
+        # the state blob would be the same fact in a second dialect — leaving it
+        # out is what makes the duet prompt the solo prompt plus ONE line (§9.2).
+        rest = {k: v for k, v in (state or {}).items() if k not in ("current_code", "b2b")}
         parts = [f"Current musical state:\n{to_prompt(rest)}"]
         if current:
             parts.append("Code playing RIGHT NOW:\n" + current)
@@ -442,6 +456,8 @@ class StrudelMind:
                 "Nothing is playing yet. Write the opening pattern for this set."
             )
         parts.append(f"Standing intent: {intent.strip() or 'none'}")
+        if (state or {}).get("b2b"):
+            parts.append(B2B_USER_LINE)
         return "\n\n".join(parts)
 
     # -- the call ----------------------------------------------------------

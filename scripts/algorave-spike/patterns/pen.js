@@ -1,10 +1,12 @@
 /*
- * pen.js — who holds the pen (plan §9.1, iteration 2).
+ * pen.js — who holds the pen (plan §9.1, iteration 2; §9.2, iteration 3).
  *
  * The pen is ONE control token, `pen ∈ {mind, human}`, and everything that
  * follows from it: when the phrase scheduler is allowed to ask the mind for a
  * mutation, how many bars have gone by, and what a human edit looks like once
- * it becomes state the mind is told about.
+ * it becomes state the mind is told about. §9.2 adds a SECOND token beside it,
+ * `mode ∈ {free, b2b}`, and the scheduler that flips the first one every
+ * `b2bBars` — a back-to-back set is two turns of §9.1, alternating.
  *
  * Why this is a module and not fifty more lines inside playground.html:
  * §9.1 asks for exactly that split. The interesting failure modes here are
@@ -36,6 +38,24 @@ export const INITIAL_PEN = PEN_HUMAN;
  *  which is not a phrase, it is a denial-of-service on your own model. */
 export const DEFAULT_PHRASE_BARS = 8;
 export const MIN_PHRASE_BARS = 2;
+
+/** §9.2's second token: `mode ∈ {free, b2b}`. In `free` the pen only moves when
+ *  someone clicks it (§9.1); in `b2b` a scheduler flips it every `b2bBars`.
+ *  Strings for the same reason the pen is one — displayed, logged and sent. */
+export const MODE_FREE = 'free';
+export const MODE_B2B = 'b2b';
+
+/** §9.2: a page wakes up FREE, and the mode is never persisted — same principle
+ *  as the pen. Restoring "b2b" from localStorage would mean a reloaded tab
+ *  starts handing the editor to the mind on a timer nobody armed. */
+export const INITIAL_MODE = MODE_FREE;
+
+/** Bars per turn in a back-to-back. 16 is the contract's default (a real turn:
+ *  two 8-bar phrases at the default phrase length). 4 is the floor because a
+ *  turn shorter than that is a stutter, not a turn — at 122 BPM it is under 8
+ *  seconds, less than one round trip to the mind on the slow models. */
+export const DEFAULT_B2B_BARS = 16;
+export const MIN_B2B_BARS = 4;
 
 /** How many reasons the mind is told about. §9.1 pins 5 — the ring is the
  *  page's job because `strudel_mind` serialises whatever state it is handed. */
@@ -93,26 +113,58 @@ function normalizeBars(bars) {
   return Math.floor(bars);
 }
 
+/**
+ * Clamp a UI number box into a usable bar count, or fall back.
+ *
+ * ONE copy for both controls (§9.1's `phrase`, §9.2's `b2bBars`) because the
+ * trap they share cost a debugging session: an EMPTY box is the fallback, not
+ * the minimum. `Number('')` is 0, so clamping it would quietly drop the control
+ * to its floor for as long as the box is blank — i.e. every time someone clears
+ * it to type "16", which at 122 BPM is a mind call every four seconds (or a pen
+ * flip every eight) until they finish typing.
+ */
+function clampBarsControl(value, min, fallback) {
+  if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
+  const n = Number(typeof value === 'string' ? value.trim() : value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.floor(n));
+}
+
 /** Clamp a UI number into a usable phrase length. An empty or nonsense input
  *  falls back rather than throwing — the scheduler must keep running while
  *  someone is halfway through typing "16" into the box. */
 export function normalizePhraseBars(value, fallback = DEFAULT_PHRASE_BARS) {
-  // An EMPTY box is the fallback, not the minimum: `Number('')` is 0, so
-  // clamping it would quietly drop the phrase to 2 bars for as long as the box
-  // is blank — i.e. every time someone clears it to type "16", which at 122 BPM
-  // is a mind call every four seconds until they finish typing.
-  if (value == null || (typeof value === 'string' && value.trim() === '')) return fallback;
-  const n = Number(typeof value === 'string' ? value.trim() : value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(MIN_PHRASE_BARS, Math.floor(n));
+  return clampBarsControl(value, MIN_PHRASE_BARS, fallback);
+}
+
+/** The same clamp for §9.2's turn length: default 16, floor 4, empty box falls
+ *  back to the default rather than to the floor. */
+export function normalizeB2bBars(value, fallback = DEFAULT_B2B_BARS) {
+  return clampBarsControl(value, MIN_B2B_BARS, fallback);
+}
+
+function nextMultiple(bars, every) {
+  return (Math.floor(bars / every) + 1) * every;
 }
 
 /** The bar the next call is due at — display only, but it is the number that
  *  makes the scheduler legible on stream ("next mind call at bar 16"). */
 export function nextBoundaryBar(barsNow, phraseBars) {
+  return nextMultiple(normalizeBars(barsNow), normalizePhraseBars(phraseBars));
+}
+
+/** The bar the pen changes hands at. Standing ON a flip bar, the next one is a
+ *  full turn ahead — which is what makes the countdown below read 16, not 0,
+ *  in the tick immediately after a flip. */
+export function nextFlipBar(barsNow, b2bBars) {
+  return nextMultiple(normalizeBars(barsNow), normalizeB2bBars(b2bBars));
+}
+
+/** §9.2's on-screen countdown: "pen flips in N bars". Always ≥ 1 while the
+ *  clock runs, so the strip never sits on a stale "in 0 bars". */
+export function barsUntilFlip(barsNow, b2bBars) {
   const bars = normalizeBars(barsNow);
-  const phrase = normalizePhraseBars(phraseBars);
-  return (Math.floor(bars / phrase) + 1) * phrase;
+  return nextFlipBar(bars, b2bBars) - bars;
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +233,88 @@ export function decide({ barsNow, lastBoundaryBar, phraseBars, inFlight, pen, pl
 /** `decide(...).fire`, for callers that only want the yes/no. */
 export function shouldFire(tick) {
   return decide(tick).fire;
+}
+
+// ---------------------------------------------------------------------------
+// B2B — the alternation scheduler (§9.2)
+// ---------------------------------------------------------------------------
+
+/** The mode toggle. Anything that is not `b2b` reads as `free`, which is the
+ *  fail-safe direction: a corrupt token must never arm an automatic handover. */
+export function toggleMode(mode) {
+  return mode === MODE_B2B ? MODE_FREE : MODE_B2B;
+}
+
+/** True when the flip scheduler is allowed to exist at all. */
+export function modeIsB2b(mode) {
+  return mode === MODE_B2B;
+}
+
+/** Why a tick did or did not flip the pen. Separate from `WHY` because these
+ *  are a different set of situations about a different scheduler — sharing one
+ *  object would make `not-playing` mean two things in the same log line. */
+export const B2B_WHY = {
+  FLIP: 'b2b-boundary',
+  BETWEEN: 'between-flips',
+  HANDLED: 'flip-already-handled',
+  STOPPED: 'not-playing',
+  FREE: 'free-mode',
+};
+
+/**
+ * One tick's B2B decision (§9.2): does the pen change hands on this bar?
+ *
+ * Deliberately the SAME shape of arithmetic as `decide()` — boundaries are the
+ * multiples of `b2bBars`, they are events rather than a backlog, and the bar of
+ * the last flip HANDLED is what stops the other ~7 ticks inside that bar from
+ * flipping it again. Two schedulers with one rule is the whole reason a flip
+ * and a phrase fire landing on the same bar behave predictably.
+ *
+ * That coincidence is §9.2's one real hazard, and it is resolved by ORDER at
+ * the call site rather than by a special case here: the page runs this decision
+ * BEFORE `decide()`, and the flip goes through §9.1's handoff path, which
+ * consumes the current bar whenever the pen lands on the mind
+ * (`lastBoundaryBar = barsNow`). So on a shared boundary the flip wins and the
+ * mind's first fire is its NEXT phrase boundary — no double-act, no new
+ * mechanism. See test/b2b.test.mjs, which composes the two exactly that way.
+ *
+ * `pen` is NOT a gate — a flip is a flip whoever is holding it. It is only what
+ * `to` is computed from, and it is the one field beyond §9.2's named five
+ * (`{barsNow, lastFlipBar, b2bBars, mode, playing}`) that a `{flip, to}` answer
+ * needs: `to` is a destination, and a destination needs an origin.
+ *
+ * @param {object} tick
+ * @param {number} tick.barsNow      bars since play started (see barsElapsed)
+ * @param {number|null} tick.lastFlipBar  the last flip boundary handled
+ * @param {number} tick.b2bBars      bars per turn (UI control, default 16)
+ * @param {string} tick.mode         'free' | 'b2b'
+ * @param {boolean} tick.playing     is audio running?
+ * @param {string} [tick.pen]        'mind' | 'human' — only to compute `to`
+ * @returns {{flip: boolean, to: string|null, at: number|null, why: string, consume: boolean}}
+ */
+export function b2bDecide({ barsNow, lastFlipBar, b2bBars, mode, playing, pen }) {
+  const bars = normalizeBars(barsNow);
+  const every = normalizeB2bBars(b2bBars);
+
+  // Bar 0 is not a boundary: switching to B2B on a stopped page, or one second
+  // into a set, must not flip. The first turn is a full turn.
+  const atBoundary = bars > 0 && bars % every === 0;
+  if (!atBoundary) return { flip: false, to: null, at: null, why: B2B_WHY.BETWEEN, consume: false };
+  if (bars === lastFlipBar) return { flip: false, to: null, at: bars, why: B2B_WHY.HANDLED, consume: false };
+
+  // Neither gate consumes: nothing was scheduled, so there is nothing to burn.
+  // A boundary that goes by while the set is stopped or the mode is free must
+  // leave the next one intact — otherwise arming B2B just after one would
+  // silently cost the performer their first turn.
+  if (!playing) return { flip: false, to: null, at: bars, why: B2B_WHY.STOPPED, consume: false };
+  if (!modeIsB2b(mode)) return { flip: false, to: null, at: bars, why: B2B_WHY.FREE, consume: false };
+
+  return { flip: true, to: togglePen(pen), at: bars, why: B2B_WHY.FLIP, consume: true };
+}
+
+/** `b2bDecide(...).flip`, for callers that only want the yes/no. */
+export function shouldFlip(tick) {
+  return b2bDecide(tick).flip;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +437,12 @@ export function pushReason(ring, reason, cap = MAX_RECENT_REASONS) {
  * Built here so the manual button and the scheduler cannot drift apart — the
  * handoff in §9.1 only works because a scheduled call is *the same call*, with
  * `current_code` being whatever is in the editor, human-written or not.
+ *
+ * `b2b` is emitted ONLY when it is true (§9.2). Sending `b2b: false` would be
+ * the same request semantically and a different one on the wire: the free-mode
+ * body stays byte-identical to iteration 2's, which is what keeps a free-mode
+ * jam comparable to the bench — the same reason §9.2 puts the duet line in the
+ * user message and leaves the system prompt alone.
  */
 export function mindRequest({
   code,
@@ -311,6 +451,7 @@ export function mindRequest({
   key,
   barsElapsed: bars,
   recentReasons,
+  b2b,
   cap = MAX_RECENT_REASONS,
 }) {
   const limit = Number.isFinite(cap) && cap > 0 ? Math.floor(cap) : MAX_RECENT_REASONS;
@@ -321,5 +462,6 @@ export function mindRequest({
     key: String(key ?? ''),
     bars_elapsed: normalizeBars(bars),
     recent_reasons: (Array.isArray(recentReasons) ? recentReasons : []).slice(-limit),
+    ...(b2b ? { b2b: true } : {}),
   };
 }
