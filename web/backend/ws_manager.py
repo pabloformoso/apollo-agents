@@ -60,6 +60,20 @@ class WSManager:
     def is_connected(self, session_id: str, channel: str = "planning") -> bool:
         return self._key(session_id, channel) in self._connections
 
+    def active_sessions(self, channel: str = "planning") -> list[str]:
+        """Session ids currently holding a connection on ``channel``.
+
+        The registry is the authoritative answer to "is anything live
+        right now?" — the ``live`` channel entry exists for exactly as
+        long as the primary live WS handler runs (it connects after the
+        playlist checks and disconnects in its ``finally``). Read it
+        programmatically; never infer live state from log output.
+
+        Consumers: the ACE-Step VRAM guard
+        (``web/backend/generator.live_session_active``).
+        """
+        return [sid for (sid, ch) in self._connections if ch == channel]
+
     async def displace_existing(
         self,
         session_id: str,
