@@ -1,10 +1,75 @@
-# ACE-Step in the wizard — integration plan (G0–G4)
+# ACE-Step in the wizard — integration plan (G0–G6)
 
-> Status: G0 in progress (2026-08-29). Decision (Pablo, 2026-08-29): the
-> Suno-like generation UX lives INSIDE Apollo's session wizard, not in a
-> separate app. API contract: `docs/ACE-STEP-API-SPEC.md` (commit c96da9e).
-> Catalog contract + VRAM protocol: agreed with the ACE session, recorded in
-> the root CLAUDE.md ops rules.
+> Status: G0–G5b SHIPPED and deployed (2026-08-29, PRs #131–#136 + the
+> #137/#138 hardening pair); G6 in progress. Decision (Pablo, 2026-08-29):
+> the Suno-like generation UX lives INSIDE Apollo's session wizard, not in
+> a separate app — and Apollo is the PLATFORM (Pablo, 2026-08-29 evening):
+> autonomous creation, your own catalog, your own sessions, AI throughout.
+> API contract: `docs/ACE-STEP-API-SPEC.md` (commit c96da9e). Catalog
+> contract + VRAM protocol: agreed with the ACE session, recorded in the
+> root CLAUDE.md ops rules.
+
+## G6 contract (2026-08-29) — the Generations Library (the Suno feed)
+
+**The gap**: generations live only in the wizard page's state — close the
+tab and the history is gone (ACE's files survive; our record does not).
+A platform needs the library.
+
+### Backend
+
+- **`db.py` `init_db()` gains two idempotent tables** (the playlists
+  precedent — CREATE IF NOT EXISTS, per-user, cascading):
+  `generations(id TEXT PK /* the ACE task_id */, user_id, created_at,
+  status TEXT /* pending|done|failed|stale */, request_json TEXT /* the
+  outgoing release payload + genre_folder; edits record task_type +
+  source path here — lineage stays queryable */)` +
+  `generation_takes(generation_id, idx, file, decoded_path, metas_json,
+  prompt, lyrics, seed_value, state TEXT /* fresh|published|discarded */,
+  published_track_id TEXT NULL, PK (generation_id, idx))`.
+- **Recording hooks in the EXISTING endpoints** (the page stays dumb;
+  history survives it): `POST /tasks` success → insert `pending`;
+  `GET /tasks/{id}` first done-poll → upsert takes + `done` (idempotent —
+  re-polls no-op; unknown-to-store ids still poll fine); failed → `failed`;
+  `POST /publish` success → mark the matching take (lookup by decoded
+  path, user-scoped) `published` + `published_track_id` — zero contract
+  change; `POST /edit` success → a new generation row (its request_json
+  carries the lineage).
+- **New endpoints** (authed, same router):
+  `GET /api/generator/generations?limit&offset` → newest-first, each with
+  its takes (poll-shaped + state/published_track_id);
+  `PATCH /api/generator/generations/{id}/takes/{idx}` body
+  `{state: "discarded"|"fresh"}` (published only via publish; 422 others);
+  `POST /api/generator/generations/{id}/refresh` → re-poll ACE for a
+  `pending` generation (the resume lane, inside ACE's 24 h record window):
+  done → persist; ACE ANSWERS but doesn't know the task → `stale`;
+  unreachable/blip → stays `pending` with `degraded: true` (stale ≠ down —
+  never conflate).
+- All user-scoped via auth, like playlists.
+
+### Frontend
+
+- **`/generations` page** — the feed: generation cards newest-first
+  (prompt, genre, param chips, status), takes rendered with the EXISTING
+  take components (player via the proxy; Score / Edit / Publish wired
+  exactly as in the wizard dialog), discarded takes collapsed behind a
+  toggle, `pending` cards get a "resume" action hitting `/refresh`,
+  published takes show the track-id chip. Nav affordance wherever the app
+  registers pages today (explore, don't invent).
+- The wizard dialog needs NO changes — its polls now feed the store
+  server-side for free.
+
+### Tests
+
+- Backend: store CRUD via the endpoints; hook idempotency (two done-polls
+  persist once); publish marks by path; STRICT user scoping (A cannot see
+  B's); refresh's stale-vs-degraded distinction; PATCH validation.
+- Frontend: vitest for the list/discard/resume folds; one E2E walking the
+  stubbed feed (list → play → discard → publish chip).
+
+### Non-goals (G6)
+
+Cross-user sharing; retention/cleanup policies; auto-scoring on arrival;
+any change to the ACE API usage itself.
 
 ## Slices (daily-cycle sized)
 

@@ -21,6 +21,10 @@ import { ApolloMark, Crumb } from "./primitives";
 
 export const ROUTES = [
   { id: "dashboard", label: "Library", href: "/" },
+  // The generations feed sits beside the Library because that is what it
+  // is: the second shelf, holding what Apollo wrote rather than what it
+  // was given (G6).
+  { id: "generations", label: "Generations", href: "/generations" },
   { id: "brief", label: "Brief", href: "/brief" },
   { id: "curate", label: "Curate", href: "/curate" },
   { id: "editor", label: "Editor", href: "/editor" },
@@ -33,6 +37,7 @@ type RouteId = (typeof ROUTES)[number]["id"];
 /** Map a Next pathname to one of the canonical route ids. */
 function routeIdForPath(pathname: string | null): RouteId {
   if (!pathname || pathname === "/") return "dashboard";
+  if (pathname.startsWith("/generations")) return "generations";
   if (pathname.startsWith("/brief")) return "brief";
   if (pathname.startsWith("/curate")) return "curate";
   if (pathname.startsWith("/editor")) return "editor";

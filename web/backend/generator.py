@@ -53,6 +53,15 @@ Both halves degrade: a genre with no committed references answers
 ``passed: null`` with a note, and any LLM trouble answers
 ``critique: null``. Scoring never gates publishing.
 
+``GET /api/generator/generations``, ``PATCH
+/api/generator/generations/{id}/takes/{idx}`` and ``POST
+/api/generator/generations/{id}/refresh`` (G6) are the library. The
+endpoints above RECORD as they succeed — release inserts a pending row,
+the first done-poll fills in its takes, publish marks one of them — so
+the history outlives the page that made it. Every one of those writes is
+best-effort: the store failing must never break the endpoint it hangs
+off, least of all the 3-second poll.
+
 ``GET /api/generator/audio``, ``POST /api/generator/publish``,
 ``POST /api/generator/edit`` and ``POST /api/generator/critique`` share
 one path validator (:func:`validate_ace_audio_path`) so "what counts as
@@ -74,7 +83,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import acestep_client, auth
+from . import acestep_client, auth, db
 from .brief_parser import detect_provider
 from .ws_manager import ws_manager
 
@@ -869,6 +878,129 @@ def _validate_proxy_path(path: str) -> str:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# ── G6 recording hooks: the generations library ──────────────────────
+#
+# The wizard's page state was the only record that a generation ever
+# happened — close the tab and the history was gone, while ACE's result
+# files stayed on its disk forever. These hooks hang off the endpoints
+# that ALREADY know (release, poll, publish, edit), so the page stays
+# dumb and the library survives it. Nothing here changes a single
+# request or response contract; the store is written on the way past.
+#
+# **A store failure is never the endpoint's problem.** Every write goes
+# through :func:`_store`, which logs and returns ``None``. The poll is
+# the one that matters most: the wizard polls every 3 s and the module's
+# oldest rule is that a poll must not 5xx — a SQLite hiccup is even less
+# of a reason to break it than an ACE-Step blip is.
+
+
+async def _store(what: str, fn, *args, **kwargs):
+    """Run one library write off the event loop. **Never raises.**"""
+    try:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — history is never load-bearing
+        print(f"[generator] library store — {what} failed: {exc}", flush=True)
+        return None
+
+
+def _decoded_take_path(file: str | None) -> str | None:
+    """The take's decoded ACE path, or ``None`` if it does not name one.
+
+    The SAME validator publish resolves with, so the value stored here is
+    byte-identical to the one a later publish arrives carrying — that
+    equality is the whole lookup key of :func:`db.mark_take_published`.
+    A path the validator refuses (a relative shape, or a root that moved)
+    is stored as ``None``: the take is still recorded, it simply cannot
+    be matched by path later, which is what refusing it means anyway.
+    """
+    try:
+        return validate_ace_audio_path(file or "").file_path
+    except AceAudioPathError:
+        return None
+
+
+async def _record_release(
+    user_id: int, task_id: str, payload: dict[str, Any], genre_folder: str | None
+) -> None:
+    """Release hook: one ``pending`` generation, keyed by ACE's task id.
+
+    ``request_json`` is the ACTUAL outgoing payload — every default the
+    server pinned included — plus the ``genre_folder`` that ACE never
+    sees. An edit's payload already carries ``task_type`` and
+    ``src_audio_path``, so lineage is queryable without a second shape,
+    and it stays the JSON payload even when the request degraded to a
+    multipart upload: what was ASKED for is the interesting record.
+    """
+    await _store(
+        f"record generation {task_id}",
+        db.record_generation,
+        task_id,
+        user_id,
+        {**payload, "genre_folder": genre_folder},
+    )
+
+
+async def _record_takes(user_id: int, task_id: str, takes: list[dict]) -> None:
+    """Done-poll hook: persist the takes and mark the generation ``done``.
+
+    Idempotent by construction (see :func:`db.save_generation_takes`), so
+    a wizard that polls one more time after the answer arrives writes the
+    same rows again and changes nothing the user has done to them.
+
+    ``takes`` is the poll's own response list; the decoded path is added
+    to a COPY so the wire shape stays exactly the poll contract.
+    """
+    records = [
+        {**take, "decoded_path": _decoded_take_path(take.get("file"))}
+        for take in takes
+    ]
+    saved = await _store(
+        f"save takes of {task_id}", db.save_generation_takes, task_id, user_id, records
+    )
+    if saved is False:
+        # Not an error: a task released before G6, or one this user does
+        # not own. Either way the poll itself is unaffected.
+        print(
+            f"[generator] library store — {task_id} is not this user's "
+            "generation; takes not recorded",
+            flush=True,
+        )
+
+
+async def _record_status(user_id: int, task_id: str, status: str) -> None:
+    """Failed / stale hook: move one generation to a terminal status."""
+    await _store(
+        f"mark generation {task_id} {status}",
+        db.set_generation_status,
+        task_id,
+        user_id,
+        status,
+    )
+
+
+async def _record_publish(user_id: int, decoded_path: str, track_id: str) -> None:
+    """Publish hook: mark the take at ``decoded_path`` ``published``.
+
+    Zero contract change — publish still carries no ``task_id``, so the
+    take is found by the one value both sides hold. An unmatched path is
+    LOGGED, never an error: publishing a take generated before G6 (or
+    from another machine's session) is a perfectly good publish.
+    """
+    matched = await _store(
+        f"mark {decoded_path} published",
+        db.mark_take_published,
+        user_id,
+        decoded_path,
+        track_id,
+    )
+    if not matched:
+        print(
+            f"[generator] library store — no recorded take at '{decoded_path}' "
+            f"for this user; published '{track_id}' without a library link",
+            flush=True,
+        )
+
+
 router = APIRouter()
 
 
@@ -962,6 +1094,12 @@ async def create_generation_task(
     except acestep_client.AceStepError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    # G6: the library's first row. After this point the record outlives
+    # the page — the poll hook fills in the takes.
+    await _record_release(
+        current_user["id"], released.task_id, payload, req.genre_folder
+    )
+
     stats = await _stats_or_none(client)
     return {
         "task_id": released.task_id,
@@ -1015,20 +1153,31 @@ async def get_generation_task(
     if status == "pending":
         eta = _eta_seconds(await _stats_or_none(client), None)
 
+    takes = [
+        {
+            "index": index,
+            "file": take.file,
+            "prompt": take.prompt,
+            "lyrics": take.lyrics,
+            "metas": take.metas,
+            "seed_value": take.seed_value,
+        }
+        for index, take in enumerate(entry.takes)
+    ]
+
+    # G6: the first done-poll is what turns a pending row into history.
+    # Re-polls hit the same rows and change nothing (the store's upsert
+    # leaves published/discarded alone), and an id the store never saw is
+    # a logged no-op — polling has never required a library row.
+    if status == "done":
+        await _record_takes(current_user["id"], task_id, takes)
+    elif status == "failed":
+        await _record_status(current_user["id"], task_id, "failed")
+
     return {
         "task_id": task_id,
         "status": status,
-        "takes": [
-            {
-                "index": index,
-                "file": take.file,
-                "prompt": take.prompt,
-                "lyrics": take.lyrics,
-                "metas": take.metas,
-                "seed_value": take.seed_value,
-            }
-            for index, take in enumerate(entry.takes)
-        ],
+        "takes": takes,
         "eta_seconds": eta,
         "degraded": False,
         "result_parse_error": entry.result_parse_error,
@@ -1253,6 +1402,13 @@ async def publish_take(
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
+    # G6: the take stops being "one of a batch" and becomes a catalog
+    # track. Matched by the decoded path, user-scoped, and never allowed
+    # to turn a successful publish into a failure.
+    await _record_publish(
+        current_user["id"], resolved.file_path or req.file, entry["id"]
+    )
+
     return {
         "track_id": entry["id"],
         "file": entry["file"],
@@ -1375,6 +1531,14 @@ async def edit_take(
         ) from exc
     except acestep_client.AceStepError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    # G6: an edit is an ordinary generation with a source, so it gets its
+    # own row. The lineage rides in ``request_json`` (``task_type`` +
+    # ``src_audio_path``), which is what makes it queryable server-side —
+    # the page's chained card remains the UI's own memory.
+    await _record_release(
+        current_user["id"], released.task_id, payload, req.genre_folder
+    )
 
     stats = await _stats_or_none(client)
     return {
@@ -1896,3 +2060,187 @@ async def critique_take(
         "critique": await _critique_paragraph(req, report, bands),
         "note": None,
     }
+
+
+# ── The generations library (G6) ─────────────────────────────────────
+#
+# Three read/repair routes over what the hooks above recorded. They are
+# the ONLY generator endpoints that never speak to ACE-Step at all —
+# except ``refresh``, which is the resume lane for a generation whose
+# page died mid-flight.
+
+
+class TakeStateUpdate(BaseModel):
+    """``PATCH .../takes/{idx}`` body — the two states a human may set.
+
+    ``published`` is deliberately NOT in the Literal: a take becomes
+    published by BEING published (the publish hook writes the state and
+    the catalog id together), and letting the feed assert it would put a
+    track id in the row that no catalog entry backs. A body asking for it
+    is a 422 from pydantic, alongside every other unknown state.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    state: Literal["discarded", "fresh"]
+
+
+async def _own_generation(generation_id: str, user: dict) -> dict:
+    """One generation of THIS user's, or 404 — the ``_own_playlist`` rule.
+
+    Unknown and someone else's answer identically on purpose: a 403 would
+    confirm the id exists, and the feed is per-user by construction.
+    """
+    generation = await asyncio.to_thread(db.get_generation, generation_id)
+    if not generation or generation["user_id"] != user["id"]:
+        raise HTTPException(status_code=404, detail="Generation not found")
+    return generation
+
+
+@router.get("/api/generator/generations")
+async def list_generations(
+    limit: int = Query(db.DEFAULT_GENERATIONS_LIMIT, ge=1, le=db.MAX_GENERATIONS_LIMIT),
+    offset: int = Query(0, ge=0),
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """The feed: this user's generations, newest first, takes embedded.
+
+    A bare JSON array, the ``GET /api/playlists`` / ``GET /api/sessions``
+    shape — the page and offset are the caller's own query, so echoing
+    them back would only be a second place for them to disagree.
+
+    Each take is POLL-SHAPED (``index``, ``file``, ``prompt``, ``lyrics``,
+    ``metas``, ``seed_value``) so the library renders through the wizard's
+    existing take components, plus the three things only the store knows:
+    ``decoded_path`` (what publish/edit/score want, already decoded),
+    ``state`` and ``published_track_id``.
+
+    ``limit`` is 1–100 (default 20) and ``offset`` ≥ 0; both are enforced
+    by FastAPI, so a 200-item page is a 422 rather than a slow query.
+    """
+    return await asyncio.to_thread(
+        db.list_generations_by_user, current_user["id"], limit=limit, offset=offset
+    )
+
+
+@router.patch("/api/generator/generations/{generation_id}/takes/{idx}")
+async def set_generation_take_state(
+    generation_id: str,
+    idx: int,
+    body: TakeStateUpdate,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Discard a take, or bring a discarded one back. Returns the take.
+
+    * **404** — no such generation, no such take, or not this user's.
+    * **422** — a state outside ``discarded``/``fresh``, ``published``
+      included (see :class:`TakeStateUpdate`).
+
+    Patching a take that was published is allowed and keeps its
+    ``published_track_id``: the catalog entry is a fact about the past,
+    not a state the feed owns, so discarding the row hides it without
+    pretending the track was never made.
+    """
+    generation = await _own_generation(generation_id, current_user)
+    if not any(take["index"] == idx for take in generation["takes"]):
+        raise HTTPException(
+            status_code=404,
+            detail=f"generation '{generation_id}' has no take {idx}",
+        )
+
+    await asyncio.to_thread(db.set_take_state, generation_id, idx, body.state)
+    refreshed = await asyncio.to_thread(db.get_generation, generation_id)
+    takes = (refreshed or generation)["takes"]
+    return next(take for take in takes if take["index"] == idx)
+
+
+@router.post("/api/generator/generations/{generation_id}/refresh")
+async def refresh_generation(
+    generation_id: str,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Re-poll ACE for a ``pending`` generation — the resume lane.
+
+    A wizard tab that dies between the release and the first done-poll
+    leaves a row that nothing else will ever finish. This is the button
+    that finishes it, inside ACE's 24 h record window.
+
+    **``stale`` and ``degraded`` are different answers and must never be
+    conflated.** ACE ANSWERING that it has no such task is terminal — the
+    record window closed, and no amount of retrying brings the job back,
+    so the generation becomes ``stale``. ACE not answering at all (a
+    transport blip, a 500, a restarting box) says nothing about the job:
+    the generation stays ``pending`` and the response carries
+    ``degraded: true``, the poll endpoint's own word for "ask again".
+
+    * **404** — unknown generation, or not this user's.
+    * **409** — the generation is already ``done``/``failed``/``stale``.
+      All three are terminal, so a refresh has nothing to do; the detail
+      names the current status.
+    * **503** — the generator is disabled or the box is unreachable.
+    * **502** — an auth/bad-request failure retrying cannot fix (the poll
+      endpoint's one loud case).
+
+    Returns the generation in the feed's shape plus ``degraded``.
+    """
+    generation = await _own_generation(generation_id, current_user)
+    if generation["status"] != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"generation '{generation_id}' is {generation['status']} — refresh "
+                "is the resume lane for a generation still pending; a terminal one "
+                "has nothing left to poll for"
+            ),
+        )
+
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+
+    try:
+        results = await client.query_result([generation_id])
+    except acestep_client.AceStepDisabled as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except _POLL_DEGRADE_ERRORS as exc:
+        print(f"[generator] refresh of {generation_id} degraded: {exc}", flush=True)
+        return {**generation, "degraded": True}
+    except acestep_client.AceStepError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    entry = next((r for r in results if r.task_id == generation_id), None)
+    if entry is None and len(results) == 1 and not results[0].task_id:
+        entry = results[0]  # answered positionally, without echoing the id
+
+    if entry is None:
+        # The box answered and does not know this task. Unlike the poll
+        # endpoint — where an id ACE has not registered YET must not tear
+        # the wizard's card down — a refresh is asked about a generation
+        # released long enough ago to have been abandoned, so the honest
+        # answer is that the record is gone for good.
+        print(
+            f"[generator] refresh of {generation_id}: ACE-Step answered without "
+            "the task — its record window closed, marking stale",
+            flush=True,
+        )
+        await _record_status(current_user["id"], generation_id, "stale")
+    else:
+        status = TASK_STATUS_NAMES.get(entry.status, "pending")
+        takes = [
+            {
+                "index": index,
+                "file": take.file,
+                "prompt": take.prompt,
+                "lyrics": take.lyrics,
+                "metas": take.metas,
+                "seed_value": take.seed_value,
+            }
+            for index, take in enumerate(entry.takes)
+        ]
+        if status == "done":
+            await _record_takes(current_user["id"], generation_id, takes)
+        elif status == "failed":
+            await _record_status(current_user["id"], generation_id, "failed")
+
+    refreshed = await asyncio.to_thread(db.get_generation, generation_id)
+    return {**(refreshed or generation), "degraded": False}
