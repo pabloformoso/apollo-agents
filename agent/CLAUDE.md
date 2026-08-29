@@ -15,6 +15,22 @@
   are never SELECTED into a session.
 - `phase_lock.py` / `transition_styles.py` — beatmatch planning shared
   by offline render and both live engines.
+- `generative/strudel_mind.py` — the algorave lane's slow plane (S2,
+  docs/algorave-livecoding-plan.md §8.2): state + intent → **validated
+  Strudel code**, the sibling of `generative/mind.py` with the private
+  JSON spec swapped for the language LLMs already speak. Same
+  reject-and-hold contract (one retry carrying the error, then
+  `StrudelMindError` and the caller holds), three differences worth
+  knowing: validation is a `node scripts/algorave-spike/validate.mjs`
+  subprocess (JS can only be judged by evaluating it), so a missing
+  node/`node_modules` is diagnosed by `require_validator()` with the
+  `npm install` fix in the message instead of a traceback; a non-empty
+  `state["current_code"]` turns the call into a MUTATION of that code
+  (in an algorave the code on screen is the performance); and the model
+  is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, so the lane
+  can run on a different model from the live DJ (#123 precedent).
+  Benched by `scripts/bench_strudel_mind.py` before it goes anywhere
+  near a stream.
 
 ## Decisions (do not re-litigate without a reason)
 
