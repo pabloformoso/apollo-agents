@@ -24,16 +24,36 @@
  * genre and the title (the title becomes the WAV's filename forever), send
  * the path the page PERSISTED when the poll landed, and the row keeps the
  * new track id. Publishing is one-way per take, so the button goes inert.
+ *
+ * G3 — a take can also be EDITED before it is trusted: repaint a stretch,
+ * cover it, or continue it. The edit is released from the same persisted
+ * path and comes back as an ordinary task id, so it renders as a CHAINED
+ * card **inside its source's row** — "edited from Take 1 · repaint" — whose
+ * own takes publish and edit exactly like the originals. The nesting is the
+ * lineage: an edit of an edit sits one level deeper, and a chained take is
+ * offered `variant of` its SOURCE's published name, which is the only way
+ * the no-repeat machinery learns that the two are one piece.
  */
 import * as React from "react";
 import { getCatalog } from "@/lib/api";
 import {
+  POLL_INTERVAL_MS,
+  buildEditRequest,
   buildPublishRequest,
+  canEditTake,
   canPublishTake,
+  chainAppended,
+  chainedTaskFor,
+  editRangeError,
+  editSourceLabel,
   suggestDisplayName,
   takeAudioUrl,
   useGeneratorTask,
+  useTakeEdit,
   useTakePublish,
+  variantOptionsFor,
+  type ChainedTask,
+  type EditMode,
   type Take,
 } from "@/lib/generator";
 import { usePlayer, type Playable } from "@/lib/player";
@@ -60,6 +80,25 @@ const LANGUAGES: ReadonlyArray<[string, string]> = [
 ];
 
 const TIME_SIGNATURES = ["4/4", "3/4", "6/8", "5/4"] as const;
+
+/** G3 — the three edits, in the operator's words (API spec §3.3). */
+const EDIT_MODES: ReadonlyArray<[EditMode, string, string]> = [
+  [
+    "repaint",
+    "Repaint a stretch",
+    "Regenerates only the seconds you name; the rest of the take is left alone.",
+  ],
+  [
+    "cover",
+    "Cover the whole take",
+    "Keeps the shape, re-performs it. Low strength stays close to the original.",
+  ],
+  [
+    "complete",
+    "Continue the take",
+    "Carries the piece on from where it ends.",
+  ],
+];
 
 const LYRICS_PLACEHOLDER =
   "[Verse]\nrain on the window, tape hiss underneath\n\n[Chorus]\nstay a while longer";
@@ -105,11 +144,16 @@ function Field({
 
 // ── Takes ─────────────────────────────────────────────────────────────────
 
-function playableFor(take: Take, taskId: string, genre: string): Playable {
+function playableFor(
+  take: Take,
+  taskId: string,
+  genre: string,
+  label: string,
+): Playable {
   const metas = take.metas ?? {};
   return {
     id: `ace:${taskId}:${take.index}`,
-    display_name: `Take ${take.index + 1}`,
+    display_name: label,
     bpm: typeof metas.bpm === "number" ? metas.bpm : null,
     // ACE reports keyscale ("C major"); the Camelot conversion is G2's job.
     camelot_key: null,
@@ -123,6 +167,10 @@ const NO_METADATA_TITLE =
   "This take came back without a BPM or a key, so the catalog would have to " +
   "guess them — and guessed metadata is how it acquired its poisoned BPMs.";
 
+const EDIT_TITLE =
+  "Repaint, cover or continue this take. The result arrives as its own card " +
+  "under this one, and can be published or edited again.";
+
 function TakeRow({
   take,
   playable,
@@ -131,6 +179,8 @@ function TakeRow({
   defaultGenre,
   publishedNames,
   onPublished,
+  label,
+  depth,
 }: {
   take: Take;
   playable: Playable;
@@ -138,15 +188,27 @@ function TakeRow({
   /** Real genre folders — a take lands in one of them, never a new one. */
   genres: string[];
   defaultGenre: string;
-  /** Names already published from THIS batch, offered as `variant of`. */
+  /** Names already published, offered as `variant of` (source first). */
   publishedNames: string[];
   onPublished: (displayName: string) => void;
+  /** "Take 1", or "Take 1 · repaint 2" inside a chained card. */
+  label: string;
+  /** How many edits deep this row sits — 0 is the original batch. */
+  depth: number;
 }) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
   const { state: pub, open, cancel, publish } = useTakePublish();
+  const {
+    state: ed,
+    open: openEdit,
+    cancel: cancelEdit,
+    change,
+    submit: submitEdit,
+  } = useTakeEdit();
   const active = currentTrack?.id === playable.id;
   const playingThis = active && isPlaying;
   const metas = take.metas ?? {};
+  const duration = typeof metas.duration === "number" ? metas.duration : null;
   const chips: string[] = [
     metas.bpm != null ? `${metas.bpm} BPM` : "— BPM",
     metas.keyscale ? String(metas.keyscale) : "— key",
@@ -157,11 +219,19 @@ function TakeRow({
   const [name, setName] = React.useState("");
   const [genreFolder, setGenreFolder] = React.useState(defaultGenre);
   const [variantOf, setVariantOf] = React.useState("");
+  /** The edits released FROM this take, in the order they were asked for. */
+  const [chain, setChain] = React.useState<ChainedTask[]>([]);
 
   const publishable = canPublishTake(take);
   const busy = pub.phase === "publishing";
   const confirming =
     pub.phase === "confirm" || pub.phase === "publishing" || pub.phase === "failed";
+
+  const editable = canEditTake(take);
+  const editing = ed.phase !== "idle";
+  const editBusy = ed.phase === "submitting";
+  const rangeError = editRangeError(ed.form, duration);
+  const publishedName = pub.result?.display_name ?? null;
 
   // Defaults are computed when the panel OPENS, not at mount: a take
   // published from an earlier row changes what this one should suggest.
@@ -184,6 +254,18 @@ function TakeRow({
     if (result) onPublished(result.display_name);
   };
 
+  const onEdit = async () => {
+    // Read the form BEFORE awaiting: a successful submit closes the panel
+    // and resets it, and the card's lineage is written from what was sent.
+    const mode = ed.form.mode;
+    const res = await submitEdit(
+      buildEditRequest(take, ed.form, { genreFolder: defaultGenre }),
+    );
+    if (!res) return;
+    const source = editSourceLabel(label, publishedName);
+    setChain((prev) => chainAppended(prev, chainedTaskFor(res, mode, source)));
+  };
+
   return (
     <li
       data-testid="generator-take"
@@ -194,7 +276,7 @@ function TakeRow({
           type="button"
           onClick={() => (playingThis ? pause() : play(playable, queue))}
           data-testid="generator-take-play"
-          aria-label={`${playingThis ? "Pause" : "Play"} take ${take.index + 1}`}
+          aria-label={`${playingThis ? "Pause" : "Play"} ${label}`}
           className={
             "w-9 h-9 flex-shrink-0 flex items-center justify-center border text-sm " +
             (active
@@ -207,7 +289,7 @@ function TakeRow({
 
         <div className="min-w-0 flex-1">
           <div className="font-display italic text-lg leading-tight">
-            Take {take.index + 1}
+            {label}
           </div>
           <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
             {chips.map((c, i) => (
@@ -225,6 +307,23 @@ function TakeRow({
             </div>
           )}
         </div>
+
+        {/* Edit is a sibling of Publish, and steps aside while that take
+            is being written to the catalog — one take, one request. */}
+        <Btn
+          kind="ghost"
+          onClick={openEdit}
+          disabled={!editable || busy || editing}
+          data-testid="generator-edit"
+          title={
+            editable
+              ? EDIT_TITLE
+              : "This take carries no audio path, so there is nothing to edit."
+          }
+          className="px-3 py-[7px] text-[11px] flex-shrink-0"
+        >
+          Edit
+        </Btn>
 
         {pub.phase === "published" ? (
           <Btn
@@ -253,6 +352,151 @@ function TakeRow({
           </Btn>
         )}
       </div>
+
+      {editing && (
+        <div
+          data-testid="generator-edit-panel"
+          className="flex flex-col gap-3 border border-line2 p-3 mb-3"
+        >
+          {ed.error && (
+            <Banner tone={ed.errorStatus === 409 ? "warn" : "error"}>
+              <span
+                data-testid="generator-edit-error"
+                className="normal-case tracking-normal font-sans text-[12px]"
+              >
+                {ed.error}
+              </span>
+            </Banner>
+          )}
+
+          <Field
+            label="what to change"
+            hint={EDIT_MODES.find(([m]) => m === ed.form.mode)?.[2]}
+          >
+            <select
+              value={ed.form.mode}
+              onChange={(e) => change({ mode: e.target.value as EditMode })}
+              data-testid="generator-edit-mode"
+              className={FIELD_CLS}
+              disabled={editBusy}
+            >
+              {EDIT_MODES.map(([value, title]) => (
+                <option key={value} value={value}>
+                  {title}
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          {ed.form.mode === "repaint" && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field
+                label={
+                  duration
+                    ? `from · second (0–${Math.floor(duration)})`
+                    : "from · second"
+                }
+              >
+                <input
+                  type="number"
+                  min={0}
+                  max={duration ?? undefined}
+                  step={1}
+                  value={ed.form.start}
+                  onChange={(e) => change({ start: Number(e.target.value) })}
+                  data-testid="generator-edit-start"
+                  className={FIELD_CLS}
+                  disabled={editBusy}
+                />
+              </Field>
+              <Field label="to · second" hint="−1 regenerates through to the end.">
+                <input
+                  type="number"
+                  min={-1}
+                  max={duration ?? undefined}
+                  step={1}
+                  value={ed.form.end}
+                  onChange={(e) => change({ end: Number(e.target.value) })}
+                  data-testid="generator-edit-end"
+                  className={FIELD_CLS}
+                  disabled={editBusy}
+                />
+              </Field>
+            </div>
+          )}
+
+          {ed.form.mode === "cover" && (
+            <Field
+              label={`strength · ${ed.form.strength.toFixed(2)}`}
+              hint="Low keeps the original close; high lets it wander."
+            >
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={ed.form.strength}
+                onChange={(e) => change({ strength: Number(e.target.value) })}
+                data-testid="generator-edit-strength"
+                className="accent-ember"
+                disabled={editBusy}
+              />
+            </Field>
+          )}
+
+          <Field
+            label="prompt override"
+            hint="Leave empty to keep this take's own prompt."
+          >
+            <textarea
+              value={ed.form.prompt}
+              onChange={(e) => change({ prompt: e.target.value })}
+              rows={2}
+              data-testid="generator-edit-prompt"
+              placeholder={take.prompt || "same style, more energy"}
+              className={FIELD_CLS + " resize-y"}
+              disabled={editBusy}
+            />
+          </Field>
+
+          {rangeError && (
+            <span
+              data-testid="generator-edit-range-error"
+              className="text-[11px] text-warn leading-[1.45]"
+            >
+              {rangeError}
+            </span>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Btn
+              kind="ghost"
+              type="button"
+              onClick={cancelEdit}
+              disabled={editBusy}
+              data-testid="generator-edit-cancel"
+              className="px-3 py-1.5 text-[11px]"
+            >
+              Cancel
+            </Btn>
+            <Btn
+              type="button"
+              onClick={() => void onEdit()}
+              disabled={editBusy || rangeError !== null}
+              data-testid="generator-edit-submit"
+              className="px-4 py-[7px] text-[11px]"
+            >
+              {editBusy ? (
+                <>
+                  <Spinner /> Sending
+                </>
+              ) : (
+                "Send the edit"
+              )}
+            </Btn>
+          </div>
+        </div>
+      )}
 
       {confirming && (
         <div
@@ -372,7 +616,135 @@ function TakeRow({
           </span>
         </div>
       )}
+
+      {/* The lineage IS the nesting: an edit of this take lives inside its
+          row, and an edit of that one goes a level deeper still. */}
+      {chain.map((chained) => (
+        <ChainedTaskCard
+          key={chained.task.task_id}
+          chained={chained}
+          genres={genres}
+          defaultGenre={defaultGenre}
+          publishedNames={variantOptionsFor(publishedName, publishedNames)}
+          onPublished={onPublished}
+          depth={depth + 1}
+        />
+      ))}
     </li>
+  );
+}
+
+// ── Chained card: one edit, polled exactly like an original ───────────────
+
+/**
+ * An edit's task card, rendered under the take it came from.
+ *
+ * It is a normal generation card in every respect — same poller, same ETA
+ * countdown, same degraded-blip handling — because on the backend an edit
+ * IS a normal task. The only thing that makes it an edit is the lineage
+ * this component prints, which lives on the page and nowhere else.
+ */
+function ChainedTaskCard({
+  chained,
+  genres,
+  defaultGenre,
+  publishedNames,
+  onPublished,
+  depth,
+}: {
+  chained: ChainedTask;
+  genres: string[];
+  defaultGenre: string;
+  publishedNames: string[];
+  onPublished: (displayName: string) => void;
+  depth: number;
+}) {
+  // The task handle is adopted as the INITIAL state (the card is keyed by
+  // its task id and never re-points), so polling starts without an effect.
+  const { state, etaCountdown } = useGeneratorTask(
+    POLL_INTERVAL_MS,
+    chained.task,
+  );
+
+  const takeLabel = React.useCallback(
+    (index: number) => `${chained.source} · ${chained.mode} ${index + 1}`,
+    [chained.source, chained.mode],
+  );
+
+  const playables = React.useMemo(
+    () =>
+      state.takes.map((t, i) =>
+        playableFor(
+          t,
+          state.taskId ?? chained.task.task_id,
+          defaultGenre,
+          takeLabel(i),
+        ),
+      ),
+    [state.takes, state.taskId, chained.task.task_id, defaultGenre, takeLabel],
+  );
+
+  return (
+    <div
+      data-testid="generator-chained-card"
+      className="border-l-2 border-line2 pl-3 mb-3 flex flex-col gap-2"
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span data-testid="generator-chained-lineage">
+          <Crumb tone="ember">{chained.lineage}</Crumb>
+        </span>
+        {state.phase === "pending" && (
+          <span className="flex items-center gap-2 font-mono text-[10px] text-mute uppercase tracking-mono">
+            <Spinner />
+            <span data-testid="generator-chained-eta">
+              {etaCountdown == null
+                ? "eta unknown"
+                : etaCountdown === 0
+                  ? "any second now"
+                  : `~${etaCountdown}s left`}
+            </span>
+            {state.degraded && (
+              <span
+                className="text-faint"
+                data-testid="generator-chained-degraded"
+              >
+                · reconnecting
+              </span>
+            )}
+          </span>
+        )}
+      </div>
+
+      {state.phase === "failed" && state.error && (
+        <Banner tone="error">
+          <span
+            data-testid="generator-chained-error"
+            className="normal-case tracking-normal font-sans text-[12px]"
+          >
+            {state.error}
+          </span>
+        </Banner>
+      )}
+
+      {state.takes.length > 0 && (
+        <ul className="list-none m-0 p-0 flex flex-col">
+          {state.takes.map((t, i) => (
+            <TakeRow
+              key={`${state.taskId}-${t.index}-${i}`}
+              take={t}
+              playable={playables[i]}
+              queue={playables}
+              genres={genres}
+              defaultGenre={defaultGenre}
+              publishedNames={publishedNames}
+              onPublished={onPublished}
+              label={takeLabel(i)}
+              depth={depth}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -464,7 +836,9 @@ export function GeneratorDialog({
 
   const playables = React.useMemo(
     () =>
-      state.takes.map((t) => playableFor(t, state.taskId ?? "task", genre)),
+      state.takes.map((t, i) =>
+        playableFor(t, state.taskId ?? "task", genre, `Take ${i + 1}`),
+      ),
     [state.takes, state.taskId, genre],
   );
 
@@ -800,6 +1174,8 @@ export function GeneratorDialog({
                   defaultGenre={genre}
                   publishedNames={publishedNames}
                   onPublished={onPublished}
+                  label={`Take ${i + 1}`}
+                  depth={0}
                 />
               ))}
             </ul>
