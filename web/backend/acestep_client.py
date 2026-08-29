@@ -378,9 +378,19 @@ class AceStepClient:
         path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        files: dict[str, Any] | None = None,
         timeout: float | httpx.Timeout | None = None,
     ) -> Any:
-        """Issue one request and return the unwrapped ``data`` payload."""
+        """Issue one request and return the unwrapped ``data`` payload.
+
+        Two encodings, never mixed (httpx refuses ``json=`` alongside
+        ``data=``): JSON by default, ``multipart/form-data`` when
+        ``files`` is present — then ``json_body`` becomes the form
+        fields, flattened by :func:`_form_value`. The API spec (§3)
+        documents both for ``/release_task``; multipart exists solely
+        for G3's degradation lane (upload the source audio when the box
+        refuses to read it off its own disk).
+        """
         base = self._require_base_url()
         async with httpx.AsyncClient(
             base_url=base,
@@ -389,7 +399,15 @@ class AceStepClient:
             headers=self._headers(),
         ) as client:
             try:
-                resp = await client.request(method, path, json=json_body)
+                if files is not None:
+                    resp = await client.request(
+                        method,
+                        path,
+                        data={k: _form_value(v) for k, v in (json_body or {}).items()},
+                        files=files,
+                    )
+                else:
+                    resp = await client.request(method, path, json=json_body)
             except httpx.HTTPError as exc:
                 raise AceStepUnavailable(
                     f"ACE-Step unreachable at {base}{path}: "
@@ -425,15 +443,32 @@ class AceStepClient:
         data = await self._request("GET", "/v1/stats")
         return data if isinstance(data, dict) else {"value": data}
 
-    async def release_task(self, payload: dict[str, Any]) -> ReleaseTaskResult:
+    async def release_task(
+        self,
+        payload: dict[str, Any],
+        *,
+        files: dict[str, Any] | None = None,
+    ) -> ReleaseTaskResult:
         """``POST /release_task`` — enqueue a generation, return its handle.
 
         ``payload`` is passed through verbatim (the API accepts both
         snake_case and camelCase, so this client does not second-guess
         the caller's field names). ``429`` raises
         :class:`AceStepQueueFull`, which is ``retryable``.
+
+        ``files`` switches the request to ``multipart/form-data`` with
+        ``payload`` as the form fields — httpx's ``{name: (filename,
+        fileobj_or_bytes, content_type)}`` shape, e.g.
+        ``{"src_audio": ("take.wav", handle, "audio/wav")}``. That is the
+        spec's upload lane (§3.3), and G3's *only* use for it: when ACE
+        refuses an absolute ``src_audio_path`` because its process
+        ``TMPDIR`` points somewhere else, the edit re-releases with the
+        downloaded take attached instead. The default stays JSON, so no
+        existing caller changes shape.
         """
-        data = await self._request("POST", "/release_task", json_body=payload)
+        data = await self._request(
+            "POST", "/release_task", json_body=payload, files=files
+        )
         if not isinstance(data, dict):
             raise AceStepProtocolError(
                 f"release_task returned {type(data).__name__}, expected object",
@@ -573,6 +608,26 @@ class AceStepClient:
         if raw.startswith("/"):
             return f"{base}{raw}"
         return f"{base}/v1/audio?path={quote(raw, safe='')}"
+
+
+def _form_value(value: Any) -> str:
+    """One JSON payload field as a ``multipart/form-data`` scalar.
+
+    Multipart carries text, so every value has to be flattened. The
+    encodings are chosen to survive ACE's FastAPI ``Form(...)`` coercion:
+    booleans go out lower-case (``true``/``false``, which pydantic reads
+    as a bool while ``"True"`` also works but ``"None"`` would not),
+    ``None`` becomes an empty string, numbers and strings go verbatim,
+    and anything structured falls back to JSON — the only lossless
+    option for a nested ``experimental`` block.
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (int, float, str)):
+        return str(value)
+    return json.dumps(value)
 
 
 def _unwrap(resp: httpx.Response) -> Any:

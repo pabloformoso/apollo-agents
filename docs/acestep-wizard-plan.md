@@ -164,12 +164,18 @@ wizard).
 
 ### G3 contract (draft 2026-08-29) — take editing before publishing
 
-- **Backend**: `POST /api/generator/tasks/{task_id}/edit` — body
-  `{take_index, mode: "repaint"|"cover"|"complete", prompt?,
-  repainting_start?, repainting_end?, audio_cover_strength?}` → re-releases
-  against ACE with `task_type` set and the SOURCE take referenced, returns a
-  new `task_id` served by the existing polling endpoint. Refusals mirror
-  `POST /tasks` (503 / 409-VRAM / 422 — an edit releases GPU work too).
+- **Backend**: `POST /api/generator/edit` — body `{file (the SOURCE take's
+  persisted decoded path — the persistence rule: no task_id, ever), mode:
+  "repaint"|"cover"|"complete", prompt?, repainting_start?,
+  repainting_end?, audio_cover_strength?, genre_folder? (for the bpm
+  default), experimental?}` → validates `file` with THE validator
+  (root-checked — this value is sent to ACE as `src_audio_path`), releases
+  with `task_type` set, returns `{task_id, queue_position, eta_seconds}`
+  served by the existing polling endpoint. Refusals mirror `POST /tasks`
+  (503 / 409-VRAM / 422 — an edit releases GPU work too). On ACE's 400
+  "absolute audio file paths are not allowed" (the TMPDIR caveat below):
+  degrade to multipart — download via `stream_audio`, re-release as a
+  multipart upload — never a fatal error.
 - **Source audio: CONFIRMED by the ACE session (verified in their server
   code, 2026-08-29)** — the result's `file` is `/v1/audio?path=<server
   path>`; the URL-DECODED path is directly reusable as `src_audio_path`
@@ -202,6 +208,38 @@ wizard).
   renders as a CHAINED task card under its source (lineage visible — on
   stream and in the wizard, "v2 of take 1" must read at a glance).
 - Tests both sides, house patterns (MockTransport / vitest + one E2E stub).
+
+### G4 contract (draft 2026-08-29) — the critic scores takes
+
+An LLM cannot hear, so the SCORE comes from machinery that can, and the
+LLM adds the read. Two layers, one endpoint:
+
+- **Backend**: `POST /api/generator/critique` — body `{file (persisted
+  decoded path), metas{bpm, keyscale, duration}, prompt, genre_folder}`
+  (`extra="forbid"`, the persistence rule as ever). Flow: validate path
+  (THE validator, root-checked) → download via `stream_audio` to a temp
+  file → run **`bench_wav`** (agent/generative/bench.py, PR #127 — the
+  project's own definition-of-done gate) against `genre_folder`'s
+  references → optional LLM layer: ONE completion (the `GENERATIVE_MODEL`
+  precedent, e4b-class; env-gated, degraded gracefully to null when the
+  LLM is off/unreachable) given the bench numbers + the request's prompt +
+  metas, returning one paragraph: does this take match what was asked, and
+  what would you fix. Response: `{passed, reference_informed, advisory,
+  bands, critique: str|null}`. 503 generator-off; NO 409 (disk + a small
+  LLM call, not the ACE GPU — but the LLM lives on tunel too: use a SHORT
+  timeout and degrade, never block the wizard on it). Genres without
+  committed references → `{passed: null, ...}` with a clear note, not an
+  error.
+- **Frontend**: a per-take "Score" action (button first, auto later):
+  renders the bench verdict as compact chips (each reference_informed
+  metric in/out of band, LUFS advisory) + the critique paragraph. Scoring
+  never gates publishing — it informs the human (the bench's
+  merge-gate philosophy: automated evidence, human decision).
+- **Tests**: backend — happy score with a synthetic in-band WAV +
+  injectable references (the #127 pattern), out-of-band rendering,
+  missing-references genre, LLM layer mocked (present/absent/timeout →
+  critique null), path validation, 503; frontend — score state machine +
+  chips rendering; E2E — stub critique, walk take → score → chips.
 
 ### G2b — publish endpoint + wizard button (queued behind G1's merge)
 

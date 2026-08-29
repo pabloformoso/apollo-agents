@@ -39,9 +39,17 @@ inside the handler. It carries no ``task_id`` on purpose: ACE's job
 records are mortal, its result files are not, so the page supplies the
 take's decoded path and metas from its own state.
 
-``GET /api/generator/audio`` and ``POST /api/generator/publish`` share
-one path validator (:func:`validate_ace_audio_path`) so "what counts as
-a take's audio" has a single definition.
+``POST /api/generator/edit`` (G3) re-releases one take as a repaint,
+a cover or a completion. It is GPU work like ``/tasks``, so it carries
+the same 409 guard, and its answer is a plain ``task_id`` served by the
+SAME polling endpoint — an edit is just another task whose source
+happens to be an earlier take. Like publish it carries no ``task_id``:
+the page supplies the source take's decoded path.
+
+``GET /api/generator/audio``, ``POST /api/generator/publish`` and
+``POST /api/generator/edit`` share one path validator
+(:func:`validate_ace_audio_path`) so "what counts as a take's audio" has
+a single definition.
 """
 from __future__ import annotations
 
@@ -52,7 +60,7 @@ import posixpath
 import shutil
 import tempfile
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -446,6 +454,180 @@ FIX_INCOMPLETE_NOTE = (
 #: Streaming chunk for the take download. A 3-minute 48 kHz WAV is
 #: ~35 MB — never buffered whole, same rule as the proxy.
 PUBLISH_CHUNK_BYTES = 1 << 20
+
+
+# ── Edit body (G3) ───────────────────────────────────────────────────
+
+#: The three edits the wizard offers, and the ``task_type`` each maps to
+#: (spec §3.3). ``text2music`` is deliberately absent — this endpoint
+#: always has a source take; a fresh generation is ``POST /tasks``.
+#: ``lego``/``extract`` are out of scope: neither produces a track the
+#: catalog could take.
+EditMode = Literal["repaint", "cover", "complete"]
+
+#: Spec §3.3: "bajo ≈ 0.2 para style transfer". Pinned server-side when
+#: the caller says nothing, for the same reason ``bpm`` is: an unset
+#: knob on a generation is a knob the model gets to invent.
+DEFAULT_COVER_STRENGTH = 0.2
+
+#: ``repainting_end`` sentinel — "to the end of the source" (spec §3.3).
+REPAINT_TO_THE_END = -1.0
+
+#: Without this the range is a hint; with it, the mask is exact (§3.3).
+REPAINT_CHUNK_MASK_MODE = "explicit"
+
+#: ``experimental`` may not shadow anything the edit decides. Everything
+#: ``POST /tasks`` owns, plus the edit's own vocabulary — otherwise an
+#: ``experimental.task_type`` would quietly turn a repaint into an
+#: extract, and the source path could be redirected off the box.
+EDIT_SERVER_OWNED_FIELDS = SERVER_OWNED_FIELDS | frozenset({
+    "audio_cover_strength", "chunk_mask_mode", "ctx_audio",
+    "repainting_end", "repainting_start", "src_audio", "src_audio_path",
+    "task_type",
+})
+
+#: ACE's own words when it refuses to read a file off its own disk: its
+#: validator compares ``src_audio_path`` against the process's
+#: ``gettempdir()``, which a foreign ``TMPDIR`` in the launch env moves
+#: elsewhere — so the box can 400 the very paths it just handed out (the
+#: plan's G3 fallback caveat). Matched as a marker SET over whitespace-
+#: normalised lower-case text, because the exact sentence is theirs to
+#: change and a fatal error here would cost the operator the edit.
+ABSOLUTE_PATH_REFUSAL_MARKERS = ("absolute", "audio file path", "not allowed")
+
+#: Every take Apollo releases asks for WAV (the catalog contract), so a
+#: source take being uploaded back is one too.
+EDIT_UPLOAD_CONTENT_TYPE = "audio/wav"
+
+#: Spec §3.3's multipart field name for the source audio.
+EDIT_UPLOAD_FIELD = "src_audio"
+
+
+class EditRequest(BaseModel):
+    """Re-release one take as a repaint / cover / completion (plan: G3).
+
+    No ``task_id``, for the reason :class:`PublishRequest` documents:
+    ACE's job records are mortal and its result files are not, so the
+    page carries the source take's decoded path here.
+
+    ``extra="forbid"`` **and** wrong-mode parameters are a 422 rather
+    than a silent drop. A ``repainting_start`` sent with ``mode:
+    "cover"`` means the caller believes something about the request that
+    is not true; ignoring it would hand back a take that does not match
+    what was asked for, and the only evidence would be the audio.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The SOURCE take's URL-DECODED ACE path, as persisted by the page.
+    #: It travels to ACE as ``src_audio_path``, so it is root-checked.
+    file: str = Field(..., min_length=1, max_length=4096)
+    mode: EditMode
+    #: Style/direction for the edit. Absent = the page reuses the take's
+    #: own prompt, which it holds; the backend never re-queries it.
+    prompt: str | None = Field(None, max_length=4000)
+    #: SECONDS into the source (spec §3.3), not bars and not a fraction.
+    repainting_start: float | None = Field(None, ge=0)
+    repainting_end: float | None = Field(None, ge=REPAINT_TO_THE_END)
+    audio_cover_strength: float | None = Field(None, ge=0.0, le=1.0)
+    #: Only drives the bpm default, exactly as on ``POST /tasks``.
+    genre_folder: str | None = Field(None, min_length=1, max_length=120)
+    experimental: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _mode_owns_its_parameters(self) -> EditRequest:
+        start, end = self.repainting_start, self.repainting_end
+        strength = self.audio_cover_strength
+
+        if self.mode == "repaint":
+            if strength is not None:
+                raise ValueError(
+                    "audio_cover_strength belongs to mode 'cover', not 'repaint'"
+                )
+            if start is None or end is None:
+                raise ValueError(
+                    "repaint needs repainting_start and repainting_end (seconds; "
+                    "repainting_end -1 means 'to the end of the take')"
+                )
+            if end != REPAINT_TO_THE_END and end <= 0:
+                raise ValueError(
+                    "repainting_end must be a positive offset in seconds, or "
+                    "-1 for 'to the end of the take'"
+                )
+            if end != REPAINT_TO_THE_END and start >= end:
+                raise ValueError(
+                    f"repainting_start ({start}) must be before repainting_end "
+                    f"({end}) — the range is the slice ACE regenerates"
+                )
+        elif self.mode == "cover":
+            if start is not None or end is not None:
+                raise ValueError(
+                    "repainting_start/repainting_end belong to mode 'repaint', "
+                    "not 'cover' — a cover re-sings the whole take"
+                )
+        else:  # complete
+            if start is not None or end is not None or strength is not None:
+                raise ValueError(
+                    "mode 'complete' takes no range and no strength — it "
+                    "continues the take from where it ends"
+                )
+
+        if self.experimental:
+            clashes = sorted(
+                k for k in self.experimental
+                if k.strip().lower() in EDIT_SERVER_OWNED_FIELDS
+            )
+            if clashes:
+                raise ValueError(
+                    "experimental may not override server-owned fields: "
+                    + ", ".join(clashes)
+                )
+        return self
+
+
+def _edit_payload(
+    req: EditRequest, src_audio_path: str, bpm: int | None
+) -> dict[str, Any]:
+    """Body for ``POST /release_task`` in edit form (spec §3.3).
+
+    ``audio_format``/``thinking`` are pinned exactly as on a fresh
+    generation — ``thinking`` is auto-ignored by ACE in repaint and
+    cover, and sending it anyway keeps one release shape instead of two.
+    """
+    payload: dict[str, Any] = {
+        "task_type": req.mode,
+        "src_audio_path": src_audio_path,
+        "audio_format": CATALOG_AUDIO_FORMAT,
+        "thinking": True,
+    }
+    if req.prompt and req.prompt.strip():
+        payload["prompt"] = req.prompt.strip()
+    if bpm is not None:
+        payload["bpm"] = bpm
+
+    if req.mode == "repaint":
+        payload["repainting_start"] = float(req.repainting_start or 0.0)
+        payload["repainting_end"] = float(req.repainting_end)  # type: ignore[arg-type]
+        payload["chunk_mask_mode"] = REPAINT_CHUNK_MASK_MODE
+    elif req.mode == "cover":
+        payload["audio_cover_strength"] = (
+            DEFAULT_COVER_STRENGTH
+            if req.audio_cover_strength is None
+            else float(req.audio_cover_strength)
+        )
+
+    if req.experimental:
+        payload.update(req.experimental)
+    return payload
+
+
+def _is_absolute_path_refusal(exc: acestep_client.AceStepError) -> bool:
+    """Is this 400 the TMPDIR caveat, i.e. the one worth degrading on?"""
+    haystack = " ".join(
+        str(part) for part in (exc.message, exc.payload) if part
+    ).lower()
+    haystack = " ".join(haystack.split())
+    return all(marker in haystack for marker in ABSOLUTE_PATH_REFUSAL_MARKERS)
 
 
 # ── Audio proxy helpers ──────────────────────────────────────────────
@@ -1041,4 +1223,124 @@ async def publish_take(
         "bpm": entry["bpm"],
         "variant_of": entry["variant_of"],
         "note": FIX_INCOMPLETE_NOTE,
+    }
+
+
+# ── POST /api/generator/edit (G3) ────────────────────────────────────
+
+
+async def _release_edit(
+    client: acestep_client.AceStepClient,
+    payload: dict[str, Any],
+    resolved: AceAudioPath,
+) -> acestep_client.ReleaseTaskResult:
+    """Release the edit, degrading to a multipart upload if ACE refuses.
+
+    The happy path hands ACE a path on its OWN disk: the take is already
+    there, so nothing crosses the LAN twice. ACE validates that path
+    against its process's ``gettempdir()`` though, and a foreign
+    ``TMPDIR`` in its launch env points that somewhere else — at which
+    point the box 400s the very paths it handed out (the plan's G3
+    fallback caveat).
+
+    That specific 400 is not a failure, it is a slower route: download
+    the take through the proxy's own client and re-release it as a
+    multipart upload (spec §3.3's ``src_audio`` field). Every OTHER 400
+    is a real bad request and propagates into the normal taxonomy — a
+    mistyped ``task_type`` must not be answered by uploading 35 MB and
+    failing the same way.
+    """
+    try:
+        return await client.release_task(payload)
+    except acestep_client.AceStepBadRequest as exc:
+        if not _is_absolute_path_refusal(exc):
+            raise
+        print(
+            "[generator] edit degraded to multipart: ACE-Step refused "
+            f"src_audio_path '{resolved.file_path}' ({exc.message}) — "
+            "uploading the take instead",
+            flush=True,
+        )
+
+    name = posixpath.basename(resolved.file_path or "") or "source.wav"
+    work_dir = tempfile.mkdtemp(prefix="apollo-edit-")
+    try:
+        local = os.path.join(work_dir, "source.wav")
+        await _download_take(client, resolved.api_path, local)
+        upload = {k: v for k, v in payload.items() if k != "src_audio_path"}
+        with open(local, "rb") as fh:
+            return await client.release_task(
+                upload,
+                files={EDIT_UPLOAD_FIELD: (name, fh, EDIT_UPLOAD_CONTENT_TYPE)},
+            )
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+@router.post("/api/generator/edit")
+async def edit_take(
+    req: EditRequest,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Re-release one take as a repaint / cover / completion (plan: G3).
+
+    **This releases GPU work**, so unlike publish it carries the full
+    ``POST /tasks`` refusal ladder, 409 included: an edit loads the same
+    ~12.5 GB onto the GPU the live DJ's model needs. The message is
+    :data:`VRAM_CONFLICT_MESSAGE`, rendered verbatim by the wizard.
+
+    * **503** — generator disabled or the box unreachable.
+    * **409** — a live set is on air.
+    * **422** — a ``file`` that is not an ACE result path (root-checked:
+      the value goes to ACE as ``src_audio_path``), an unknown
+      ``genre_folder``, or a parameter that belongs to another mode.
+    * **429** — ACE-Step's queue is full.
+    * **502** — ACE answered but rejected/broke.
+
+    Returns ``{task_id, queue_position, eta_seconds}`` — the same shape
+    ``POST /tasks`` returns, polled by the same
+    ``GET /tasks/{task_id}``. An edit is just another task; what makes
+    it an edit is its source, which the PAGE remembers (that is where
+    the chained "edited from …" card gets its lineage).
+    """
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+    if live_session_active():
+        raise HTTPException(status_code=409, detail=VRAM_CONFLICT_MESSAGE)
+
+    try:
+        resolved = validate_ace_audio_path(req.file, resolve_file=True)
+    except AceAudioPathError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    bpm = None
+    if req.genre_folder:
+        genre_key = await asyncio.to_thread(_resolve_genre, req.genre_folder)
+        bpm = _default_bpm_for(genre_key)
+        if bpm is None:
+            print(
+                f"[generator] no BPM window for genre '{genre_key}' — "
+                "editing without a server-pinned bpm",
+                flush=True,
+            )
+
+    payload = _edit_payload(req, resolved.file_path or req.file, bpm)
+    try:
+        released = await _release_edit(client, payload, resolved)
+    except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except acestep_client.AceStepQueueFull as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="ACE-Step's queue is full — retry in a moment.",
+        ) from exc
+    except acestep_client.AceStepError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    stats = await _stats_or_none(client)
+    return {
+        "task_id": released.task_id,
+        "queue_position": released.queue_position,
+        "eta_seconds": _eta_seconds(stats, released.queue_position),
     }

@@ -115,6 +115,23 @@ export type PublishResponse = {
   note: string;
 };
 
+/** G3 — the three edits the wizard offers (API spec §3.3). */
+export type EditMode = "repaint" | "cover" | "complete";
+
+/** What the edit sends. `file` is the SOURCE take's DECODED ACE path —
+ *  no task id here either: the page owns the lineage, not the backend. */
+export type EditRequest = {
+  file: string;
+  mode: EditMode;
+  prompt?: string;
+  /** SECONDS into the source, not bars and not a fraction. */
+  repainting_start?: number;
+  repainting_end?: number;
+  audio_cover_strength?: number;
+  genre_folder?: string;
+  experimental?: Record<string, unknown>;
+};
+
 // ── Errors ────────────────────────────────────────────────────────────────
 
 /** HTTP-status-carrying error. `lib/api.ts`'s `req` throws a bare Error, so
@@ -196,6 +213,15 @@ export const getGeneratorTask = (taskId: string) =>
 
 export const publishTake = (body: PublishRequest) =>
   gfetch<PublishResponse>("/generator/publish", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+/** G3 — re-release one take. Answers with a task handle like `/tasks`, so
+ *  the edit is polled by the SAME loop; what makes it an edit is its
+ *  source, which only the page remembers. */
+export const editGeneratorTake = (body: EditRequest) =>
+  gfetch<CreateTaskResponse>("/generator/edit", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -341,6 +367,27 @@ export function applyPollError(
   return { ...prev, degraded: true };
 }
 
+/**
+ * The state a freshly-released task starts in.
+ *
+ * Shared by `submit` and by the chained cards an edit spawns (G3), which
+ * are handed a task handle rather than making one: an edit is polled by
+ * exactly the same loop, so it must ENTER that loop in the same state.
+ */
+export function taskAdopted(
+  res: CreateTaskResponse,
+  nowMs: number,
+): GeneratorTaskState {
+  return {
+    ...INITIAL_TASK_STATE,
+    phase: "pending",
+    taskId: res.task_id,
+    queuePosition: res.queue_position ?? null,
+    etaSeconds: res.eta_seconds ?? null,
+    etaAtMs: nowMs,
+  };
+}
+
 export type GeneratorTaskApi = {
   state: GeneratorTaskState;
   /** Seconds left, recomputed every second while pending. Null when the
@@ -354,11 +401,20 @@ export type GeneratorTaskApi = {
  * Own one generation task: submit, then poll every `pollMs` until the task
  * resolves. The first poll fires immediately so the card isn't blank for
  * three seconds.
+ *
+ * `adopted` skips the submit half: the caller already has a task handle
+ * (G3's chained card gets one from `POST /generator/edit`) and only wants
+ * the polling. It is read ONCE, as the lazy initial state — a chained card
+ * is keyed by its task id and never re-points at another task, so adopting
+ * in an effect would only buy a set-state-during-render smell.
  */
 export function useGeneratorTask(
   pollMs: number = POLL_INTERVAL_MS,
+  adopted?: CreateTaskResponse | null,
 ): GeneratorTaskApi {
-  const [state, setState] = useState<GeneratorTaskState>(INITIAL_TASK_STATE);
+  const [state, setState] = useState<GeneratorTaskState>(() =>
+    adopted ? taskAdopted(adopted, Date.now()) : INITIAL_TASK_STATE,
+  );
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
   const { phase, taskId } = state;
@@ -397,14 +453,7 @@ export function useGeneratorTask(
     setState({ ...INITIAL_TASK_STATE, phase: "submitting" });
     try {
       const res = await createGeneratorTask(body);
-      setState({
-        ...INITIAL_TASK_STATE,
-        phase: "pending",
-        taskId: res.task_id,
-        queuePosition: res.queue_position ?? null,
-        etaSeconds: res.eta_seconds ?? null,
-        etaAtMs: Date.now(),
-      });
+      setState(taskAdopted(res, Date.now()));
     } catch (err: unknown) {
       // A refused submit is a form-level answer, not a dead task: stay on
       // the form (phase "idle") with the server's words attached.
@@ -627,6 +676,277 @@ export function useTakePublish(): TakePublishApi {
   }, []);
 
   return { state, open, cancel, publish };
+}
+
+// ── Editing a take before publishing it (G3) ──────────────────────────────
+
+/** `repainting_end` sentinel: regenerate through to the end of the take. */
+export const REPAINT_TO_THE_END = -1;
+
+/** API spec §3.3 — "bajo ≈ 0.2 para style transfer". */
+export const DEFAULT_COVER_STRENGTH = 0.2;
+
+/** The edit panel's fields. One shape for all three modes; which of them
+ *  reach the wire is `buildEditRequest`'s decision, because the server
+ *  refuses a parameter that belongs to another mode rather than dropping
+ *  it (a wrongly-sent range would only show up as three minutes of the
+ *  wrong music). */
+export type EditForm = {
+  mode: EditMode;
+  /** Seconds into the source take. */
+  start: number;
+  /** Seconds, or `REPAINT_TO_THE_END`. */
+  end: number;
+  strength: number;
+  /** Empty = reuse the take's own prompt, which the page still holds. */
+  prompt: string;
+};
+
+export const INITIAL_EDIT_FORM: EditForm = {
+  mode: "repaint",
+  start: 0,
+  end: REPAINT_TO_THE_END,
+  strength: DEFAULT_COVER_STRENGTH,
+  prompt: "",
+};
+
+export type EditPhase = "idle" | "editing" | "submitting" | "failed";
+
+export type EditState = {
+  phase: EditPhase;
+  form: EditForm;
+  error: string | null;
+  /** So a 409 (VRAM) can be toned differently from a real error. */
+  errorStatus: number | null;
+};
+
+export const INITIAL_EDIT_STATE: EditState = {
+  phase: "idle",
+  form: INITIAL_EDIT_FORM,
+  error: null,
+  errorStatus: null,
+};
+
+/**
+ * Can this take be edited at all?
+ *
+ * Weaker than `canPublishTake` on purpose: publishing needs a bpm and a
+ * key the ingest refuses to guess, but an edit only needs the audio — a
+ * take whose `metas` failed to parse can still be repainted, and the
+ * result may well come back with readable metadata.
+ */
+export function canEditTake(take: Take): boolean {
+  return Boolean(decodedTakePath(take.file));
+}
+
+/** Pure folds, so the panel is testable without fetch or a DOM. */
+export function editOpened(prev: EditState): EditState {
+  if (prev.phase === "submitting") return prev;
+  return { ...INITIAL_EDIT_STATE, phase: "editing" };
+}
+
+export function editCancelled(prev: EditState): EditState {
+  if (prev.phase === "submitting") return prev;
+  return INITIAL_EDIT_STATE;
+}
+
+export function editChanged(
+  prev: EditState,
+  patch: Partial<EditForm>,
+): EditState {
+  if (prev.phase === "submitting") return prev;
+  return { ...prev, form: { ...prev.form, ...patch } };
+}
+
+export function editStarted(prev: EditState): EditState {
+  return { ...prev, phase: "submitting", error: null, errorStatus: null };
+}
+
+/** The panel closes on success: the chained card is now the whole story. */
+export function editSucceeded(): EditState {
+  return INITIAL_EDIT_STATE;
+}
+
+export function editFailed(prev: EditState, err: unknown): EditState {
+  return {
+    ...prev,
+    phase: "failed",
+    // Verbatim, the same rule the 409 and the ingest refusals follow.
+    error: err instanceof Error ? err.message : "Could not start the edit.",
+    errorStatus: err instanceof GeneratorError ? err.status : null,
+  };
+}
+
+/**
+ * Why this repaint range cannot be sent, or null when it can.
+ *
+ * Mirrors the server's own refusals so the panel explains the problem
+ * before a round trip, and adds the one check the backend cannot make:
+ * the source take's duration is known HERE (the page persisted it) and
+ * nowhere on the backend, which never re-queries the task.
+ */
+export function editRangeError(
+  form: EditForm,
+  durationSec?: number | null,
+): string | null {
+  if (form.mode !== "repaint") return null;
+  const { start, end } = form;
+  if (!Number.isFinite(start) || !Number.isFinite(end)) {
+    return "Give the range in seconds.";
+  }
+  if (start < 0) return "The start cannot be negative.";
+  if (end !== REPAINT_TO_THE_END) {
+    if (end <= 0) return "Use -1 for “to the end”, or a positive second.";
+    if (start >= end) return "The start has to come before the end.";
+  }
+  const total = typeof durationSec === "number" && durationSec > 0 ? durationSec : null;
+  if (total !== null) {
+    if (start >= total) {
+      return `The take is ${Math.round(total)}s long — the start is past it.`;
+    }
+    if (end !== REPAINT_TO_THE_END && end > total) {
+      return `The take is ${Math.round(total)}s long — the end is past it.`;
+    }
+  }
+  return null;
+}
+
+export type EditOptions = {
+  /** Only drives the server's bpm default, exactly as on a generation. */
+  genreFolder?: string | null;
+};
+
+/**
+ * Build the wire body from the take the page PERSISTED plus the panel.
+ *
+ * Only the parameters the chosen mode owns go out — the server treats a
+ * stray one as a 422, which is the point: the request means what it says.
+ * An empty prompt override falls back to the take's OWN prompt, held here
+ * since the poll landed, because the backend never re-queries an old task.
+ */
+export function buildEditRequest(
+  take: Take,
+  form: EditForm,
+  opts: EditOptions = {},
+): EditRequest {
+  const body: EditRequest = {
+    file: decodedTakePath(take.file),
+    mode: form.mode,
+  };
+  const override = form.prompt.trim();
+  const inherited = (take.prompt ?? "").trim();
+  if (override) body.prompt = override;
+  else if (inherited) body.prompt = inherited;
+
+  if (form.mode === "repaint") {
+    body.repainting_start = form.start;
+    body.repainting_end = form.end;
+  } else if (form.mode === "cover") {
+    body.audio_cover_strength = form.strength;
+  }
+  if (opts.genreFolder && opts.genreFolder.trim()) {
+    body.genre_folder = opts.genreFolder.trim();
+  }
+  return body;
+}
+
+// ── Lineage: the chained cards an edit spawns ─────────────────────────────
+
+/** One edit released from a take, as the page remembers it. */
+export type ChainedTask = {
+  task: CreateTaskResponse;
+  mode: EditMode;
+  /** The source as the operator knows it — its published catalog name
+   *  when it has one, otherwise its label in this dialog. */
+  source: string;
+  /** What the card says at a glance. */
+  lineage: string;
+};
+
+export function editLineage(source: string, mode: EditMode): string {
+  return `edited from ${source} · ${mode}`;
+}
+
+/** The source's own name wins over its position once it is published. */
+export function editSourceLabel(
+  takeLabel: string,
+  publishedName?: string | null,
+): string {
+  return (publishedName ?? "").trim() || takeLabel;
+}
+
+export function chainedTaskFor(
+  task: CreateTaskResponse,
+  mode: EditMode,
+  source: string,
+): ChainedTask {
+  return { task, mode, source, lineage: editLineage(source, mode) };
+}
+
+/**
+ * Append one chained card, ignoring a task id already on the chain.
+ *
+ * The dedupe is not defensive dressing: a double-clicked submit would
+ * otherwise render two cards polling the same task, and both would show
+ * the same takes with different publish state.
+ */
+export function chainAppended(
+  prev: ChainedTask[],
+  entry: ChainedTask,
+): ChainedTask[] {
+  if (prev.some((c) => c.task.task_id === entry.task.task_id)) return prev;
+  return [...prev, entry];
+}
+
+/**
+ * The `variant of` options a chained take is offered.
+ *
+ * The SOURCE take's published name comes first and becomes the default,
+ * because an edit of a published take is another take of that same piece
+ * — which is exactly what `variant_of` means to the no-repeat machinery.
+ */
+export function variantOptionsFor(
+  sourcePublished: string | null | undefined,
+  published: string[],
+): string[] {
+  const source = (sourcePublished ?? "").trim();
+  const rest = published.filter((n) => n && n !== source);
+  return source ? [source, ...rest] : rest;
+}
+
+export type TakeEditApi = {
+  state: EditState;
+  open: () => void;
+  cancel: () => void;
+  change: (patch: Partial<EditForm>) => void;
+  submit: (body: EditRequest) => Promise<CreateTaskResponse | null>;
+};
+
+/** Own one take's edit panel. One instance per take row. */
+export function useTakeEdit(): TakeEditApi {
+  const [state, setState] = useState<EditState>(INITIAL_EDIT_STATE);
+
+  const open = useCallback(() => setState(editOpened), []);
+  const cancel = useCallback(() => setState(editCancelled), []);
+  const change = useCallback(
+    (patch: Partial<EditForm>) =>
+      setState((prev) => editChanged(prev, patch)),
+    [],
+  );
+
+  const submit = useCallback(async (body: EditRequest) => {
+    setState(editStarted);
+    try {
+      const res = await editGeneratorTake(body);
+      setState(editSucceeded);
+      return res;
+    } catch (err: unknown) {
+      setState((prev) => editFailed(prev, err));
+      return null;
+    }
+  }, []);
+
+  return { state, open, cancel, change, submit };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────

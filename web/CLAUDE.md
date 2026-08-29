@@ -104,6 +104,40 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   possible without changing the CLI's behaviour. There is **no 409**:
   publishing touches the disk, not the GPU, so the VRAM protocol has
   nothing to protect here.
+- **`POST /api/generator/edit` (G3) is GPU work, so it keeps the 409.**
+  Repaint / cover / complete on an existing take: it re-releases through
+  `release_task` with `task_type` set and `src_audio_path` pointing at
+  the SOURCE take's decoded path — validated by the same
+  `validate_ace_audio_path(resolve_file=True)` publish uses, because
+  that value is handed to ACE as a filesystem location. Full `/tasks`
+  ladder (503 → **409 VRAM** → 422 → 429 → 502); publish's "no 409"
+  exemption does NOT apply — an edit loads the model exactly like a
+  fresh generation. It answers `{task_id, queue_position, eta_seconds}`
+  and is polled by the SAME `GET /tasks/{id}`: an edit *is* an ordinary
+  task, and what makes it an edit is its source, which only the page
+  remembers (no `task_id` in the contract, per the persistence rule).
+  **Wrong-mode parameters are a 422, never ignored** — a
+  `repainting_start` sent with `mode: "cover"` means the caller believes
+  something untrue, and the only other evidence would be three minutes
+  of wrong music. `repainting_*` are SECONDS with `-1` = "to the end",
+  and repaint always ships `chunk_mask_mode: "explicit"` (without it the
+  range is a hint, not a mask); cover pins `audio_cover_strength` to
+  0.2 when unset, the same "don't let the model invent it" rule as `bpm`.
+- **The edit's TMPDIR degradation: one 400 means "upload it instead".**
+  ACE validates `src_audio_path` against its own process `gettempdir()`,
+  which a foreign `TMPDIR` in its launch env moves — so the box can 400
+  the very paths it handed out. On a 400 matching
+  `ABSOLUTE_PATH_REFUSAL_MARKERS` (a whitespace-normalised marker SET,
+  not an equality: the sentence is ACE's to reword and a fatal error
+  costs the operator the edit) the handler downloads the take through
+  `stream_audio` and re-releases it as `multipart/form-data` with the
+  spec's `src_audio` field, same response shape, degradation logged.
+  **Every other 400 stays a 502** — a mistyped `task_type` must not be
+  answered by uploading 35 MB and failing identically. That is the only
+  reason `acestep_client.release_task` grew a `files=` argument (JSON
+  stays the default, so no existing caller changed shape); form values
+  are flattened by `_form_value` — bools lower-case, `None` empty,
+  structured values as JSON.
 - **Publishing while `--build-catalog` is running is a human-scheduling
   problem, not a lock** (same class as the VRAM rule). The builder is
   serial, takes ~1.25 min/track, and writes `tracks.json` **only at the
@@ -218,6 +252,25 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   are offered `variant of <that name>` — the only way two takes of one
   prompt link as a single piece for the no-repeat machinery. Server
   refusals render VERBATIM, the same rule as the 409.
+- **An edit renders as a CHAINED card inside its source's row** (G3).
+  "Edit" is a sibling of "Publish" and steps aside while that take is
+  publishing. The panel is mode-switched — repaint gets start/end in
+  seconds over `metas.duration` (`-1` = to the end), cover gets a
+  strength slider, complete gets neither — and an empty prompt override
+  reuses the take's OWN prompt, which the page holds and the backend
+  never re-queries. `editRangeError` is the one check that exists
+  nowhere else: only the page knows how long the source is. On success
+  the panel closes and a `ChainedTaskCard` appears **nested in the
+  source's `<li>`** — the DOM tree IS the lineage, so an edit of an edit
+  sits a level deeper — labelled `edited from <source> · <mode>`, where
+  `<source>` becomes the source's CATALOG name once it is published.
+  That card is an ordinary generation card: it adopts the task handle as
+  `useGeneratorTask`'s lazy initial state (no effect, hence no
+  set-state-in-effect) and its takes publish and edit like originals,
+  offered `variant of` the SOURCE take's published name first
+  (`variantOptionsFor`). `chainAppended` dedupes by task id, or a
+  double-clicked submit would render two cards polling one task with
+  separate publish state.
 
 ## Testing
 
@@ -231,6 +284,13 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   `generator-publish.spec.ts` picks up where it stops and walks take →
   confirm → refusal → published chip → variant, capturing the POST body
   so the DECODED-path contract is asserted on the wire.
+  `generator-edit.spec.ts` walks take → publish → edit (repaint 10–20 s)
+  → chained card → edited take, so the lineage label, the nesting, the
+  `variant of` default and the edit's wire body are all asserted in one
+  pass; its second test pins the 409 rendering verbatim with the panel
+  left open. Locators there are scoped through
+  `generator-chained-card`, not the outer take — once a card nests,
+  `take.getByTestId(...)` matches twice and strict mode bites.
 
 ## Known issues
 
