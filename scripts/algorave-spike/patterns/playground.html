@@ -1,0 +1,564 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>ApolloAgents · algorave playground · human + mind</title>
+
+    <!--
+      Plan §9 stage 1: the playground. An EDITABLE buffer, hot-swapped into the
+      running pattern with @strudel/web's evaluate(), plus a "mind" button that
+      asks scripts/algorave_playground.py (:4032) for a mutation and offers it
+      back as a diff. Local and detached from the stream on purpose — this is
+      the jam/practice surface and the audition bench, not the broadcast.
+
+      It lives in patterns/ rather than next to index.html for one boring
+      reason: serve.mjs mounts exactly /, /index.html, /vendor/* and /patterns/*,
+      and serve.mjs is not ours to edit this cycle. So the URL is
+      http://127.0.0.1:4031/patterns/playground.html (see the README).
+
+      Same import-map trick as index.html — every @strudel/* specifier points at
+      the ONE prebuilt bundle, so there is only ever one Pattern class.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@strudel/web": "/vendor/strudel/index.mjs",
+          "@strudel/core": "/vendor/strudel/index.mjs",
+          "@strudel/mini": "/vendor/strudel/index.mjs",
+          "@strudel/tonal": "/vendor/strudel/index.mjs",
+          "@strudel/webaudio": "/vendor/strudel/index.mjs"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0d10;
+        --panel: #12161b;
+        --line: #232b34;
+        --fg: #d7dee6;
+        --dim: #7d8b99;
+        --accent: #38e8b0;
+        --accent2: #ff5f9e;
+        --warn: #ffcc55;
+        --add: #14301f;
+        --del: #2b1520;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        flex-wrap: wrap;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
+      h1 b { color: var(--accent); }
+      .meta { color: var(--dim); font-size: 12px; }
+      .meta span { color: var(--fg); }
+      main { flex: 1; display: flex; min-height: 0; }
+      .pane {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--line);
+      }
+      .pane h2 {
+        margin: 0;
+        padding: 8px 14px;
+        font-size: 11px;
+        font-weight: normal;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--dim);
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+      }
+      .pane h2 em { font-style: normal; color: var(--accent); }
+      #editor {
+        flex: 1;
+        margin: 0;
+        padding: 16px 18px;
+        border: 0;
+        resize: none;
+        outline: none;
+        background: transparent;
+        color: var(--fg);
+        font: 13px/1.55 ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+        tab-size: 2;
+        white-space: pre;
+        overflow: auto;
+      }
+      #editor:focus { background: #0e1216; }
+      /* The reason line is the narrative — it gets the loudest thing on screen. */
+      #reason {
+        display: none;
+        margin: 0;
+        padding: 12px 16px;
+        border-bottom: 1px solid var(--line);
+        background: #10201c;
+        color: var(--accent);
+        font-size: 14px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #reason b {
+        display: block;
+        font-size: 10px;
+        font-weight: normal;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--dim);
+        margin-bottom: 4px;
+      }
+      #proposal {
+        flex: 1;
+        margin: 0;
+        padding: 12px 0;
+        overflow: auto;
+        font-size: 13px;
+        line-height: 1.55;
+        white-space: pre;
+        tab-size: 2;
+      }
+      #proposal .ln { display: block; padding: 0 16px 0 8px; border-left: 3px solid transparent; }
+      #proposal .ln.add { background: var(--add); border-left-color: var(--accent); }
+      #proposal .ln.del { background: var(--del); border-left-color: var(--accent2); color: #94707f; text-decoration: line-through; }
+      #proposal .gut { color: var(--dim); user-select: none; }
+      #proposal .ln.add .gut { color: var(--accent); }
+      #proposal .ln.del .gut { color: var(--accent2); }
+      #proposal .empty { display: block; padding: 18px 16px; color: var(--dim); }
+      #proposal .err { display: block; padding: 16px; color: var(--accent2); white-space: pre-wrap; word-break: break-word; }
+      #proposal .err b { display: block; color: var(--warn); margin-bottom: 6px; }
+      #proposal .err code { color: var(--fg); }
+      .actions {
+        display: none;
+        gap: 8px;
+        padding: 10px 14px;
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+      }
+      aside {
+        width: 320px;
+        flex: none;
+        background: var(--panel);
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        overflow: auto;
+      }
+      button {
+        font: inherit;
+        color: var(--bg);
+        background: var(--accent);
+        border: 0;
+        border-radius: 4px;
+        padding: 10px 12px;
+        cursor: pointer;
+        text-align: left;
+      }
+      button.secondary { background: #2a3540; color: var(--fg); }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button small { display: block; font-weight: normal; opacity: 0.75; }
+      input[type="text"] {
+        font: inherit;
+        color: var(--fg);
+        background: #0b0d10;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        padding: 9px 10px;
+        width: 100%;
+      }
+      input[type="text"]:focus { outline: 1px solid var(--accent); }
+      label { font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--dim); }
+      #state {
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+        font-size: 12px;
+        color: var(--dim);
+      }
+      #state b { color: var(--fg); font-weight: normal; }
+      #state b.on { color: var(--accent); }
+      #stats { font-size: 12px; color: var(--dim); word-break: break-word; }
+      #stats b { color: var(--fg); font-weight: normal; }
+      #status {
+        margin-top: auto;
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+        font-size: 12px;
+        color: var(--dim);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 34vh;
+        overflow: auto;
+      }
+      #status .err { color: var(--accent2); }
+      #status .ok { color: var(--accent); }
+      #status .warn { color: var(--warn); }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Apollo <b>algorave</b> — playground</h1>
+      <div class="meta">
+        <span id="m-bpm">…</span> BPM · <span id="m-key">A:minor</span> ·
+        strudel <span id="m-ver">…</span> · mind <span id="m-mind">…</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="pane">
+        <h2><span>editor — <em>the code the room hears</em></span><span>Ctrl+Enter evaluates</span></h2>
+        <textarea id="editor" spellcheck="false" autocomplete="off">loading patterns/seed.repl.js …</textarea>
+      </section>
+
+      <section class="pane">
+        <h2><span>proposal — <em>what the mind would play</em></span><span id="p-src"></span></h2>
+        <p id="reason"><b>reason</b><span id="reason-text"></span></p>
+        <div id="proposal"><span class="empty">Type an intent and press <b>mind</b>. The proposal lands here, changed lines marked.</span></div>
+        <div class="actions" id="actions">
+          <button id="apply">✓ Apply<small>into the editor + evaluate</small></button>
+          <button id="discard" class="secondary">✕ Discard</button>
+        </div>
+      </section>
+
+      <aside>
+        <button id="play">▶ Play<small>evaluates the editor buffer</small></button>
+        <button id="stop" class="secondary">■ Stop<small>Ctrl+.</small></button>
+        <button id="eval" class="secondary">⏎ Evaluate<small>hot-swap at the next cycle</small></button>
+
+        <label for="intent">intent</label>
+        <input id="intent" type="text" value="darker" autocomplete="off"
+               placeholder="darker · build to a peak · strip it back" />
+        <button id="mind">✦ mind<small>POST /mind → validated mutation</small></button>
+
+        <div id="stats"></div>
+        <div id="state">— <b id="s-play">stopped</b> · last evaluate <b id="s-eval">never</b></div>
+        <div id="status"></div>
+      </aside>
+    </main>
+
+    <script type="module">
+      import { initStrudel, samples, evaluate, hush } from '@strudel/web';
+
+      // ---------------------------------------------------------------------
+      // Constants. The harness owns tempo (§8.1's code contract forbids setcps
+      // in mind-written code), so the page sets it once, here.
+      // ---------------------------------------------------------------------
+      const BPM = 122;
+      const CPS = BPM / 60 / 4; // one cycle = one bar of 4/4
+      const KEY = 'A:minor';
+      const GENRE = 'deep';
+      // Same hostname spelling the user typed, so the Origin we send is the one
+      // the server allowlists (127.0.0.1:4031 and localhost:4031 are different
+      // origins to a browser, and both are allowed).
+      const MIND_URL = `http://${location.hostname || '127.0.0.1'}:4032/mind`;
+
+      const CDN = 'https://strudel.b-cdn.net';
+      const DRUM_MACHINES = `${CDN}/tidal-drum-machines.json`;
+      const DRUM_MACHINES_BASE = `${CDN}/tidal-drum-machines/machines/`;
+
+      const $ = (id) => document.getElementById(id);
+      const editor = $('editor');
+      const statusEl = $('status');
+
+      const log = (msg, cls = '') => {
+        const line = document.createElement('div');
+        if (cls) line.className = cls;
+        line.textContent = `${new Date().toISOString().slice(11, 19)}  ${msg}`;
+        statusEl.append(line);
+        statusEl.scrollTop = statusEl.scrollHeight;
+        (cls === 'err' ? console.error : console.log)('[playground]', msg);
+      };
+
+      $('m-bpm').textContent = BPM;
+      $('m-key').textContent = KEY;
+      $('m-mind').textContent = MIND_URL.replace(/^https?:\/\//, '');
+      fetch('/vendor/strudel-pkg/package.json')
+        .then((r) => r.json())
+        .then((pkg) => ($('m-ver').textContent = pkg.version))
+        .catch(() => ($('m-ver').textContent = '?'));
+
+      // ---------------------------------------------------------------------
+      // Seed. Fetched as TEXT, never imported: this buffer is code the human
+      // edits, not a module the page binds to.
+      // ---------------------------------------------------------------------
+      fetch('./seed.repl.js')
+        .then((r) => (r.ok ? r.text() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((src) => {
+          editor.value = src.trimEnd();
+          log('seed loaded — press Play (audio needs a click to start)');
+        })
+        .catch((e) => {
+          editor.value = '// could not load patterns/seed.repl.js: ' + e.message;
+          log(`could not load the seed: ${e.message}`, 'err');
+        });
+
+      // ---------------------------------------------------------------------
+      // Engine. In Strudel, "play" and "evaluate" are the SAME primitive —
+      // evaluate() swaps the pattern at the next cycle boundary whether or not
+      // something is already playing. That is precisely why livecoding works,
+      // so both buttons below call the same function and only the wording of
+      // the log differs.
+      // ---------------------------------------------------------------------
+      let ready = null;
+      const boot = () => {
+        if (!ready) {
+          log('initStrudel + registering the RolandTR909 bank…');
+          ready = initStrudel({
+            prebake: () =>
+              samples(DRUM_MACHINES, DRUM_MACHINES_BASE, { prebake: true, tag: 'drum-machines' }),
+          }).then((repl) => {
+            repl.setCps(CPS);
+            log(`ready · cps ${CPS.toFixed(5)} (${BPM} BPM)`, 'ok');
+            return repl;
+          });
+        }
+        return ready;
+      };
+
+      let playing = false;
+      const setState = (isPlaying, stamp) => {
+        playing = isPlaying;
+        $('s-play').textContent = isPlaying ? 'playing' : 'stopped';
+        $('s-play').className = isPlaying ? 'on' : '';
+        if (stamp) $('s-eval').textContent = stamp;
+      };
+
+      const run = async (what) => {
+        const code = editor.value;
+        if (!code.trim()) throw new Error('the editor is empty — nothing to evaluate');
+        const repl = await boot();
+        repl.setCps(CPS);
+        await evaluate(code, true);
+        setState(true, new Date().toTimeString().slice(0, 8));
+        log(what, 'ok');
+      };
+
+      const stop = async () => {
+        await boot();
+        hush();
+        setState(false);
+        log('stopped');
+      };
+
+      const guard = (fn) => async (event) => {
+        const button = event?.currentTarget;
+        if (button) button.disabled = true;
+        try {
+          await fn();
+        } catch (err) {
+          // Never swallowed: an evaluate error is the most useful thing on the
+          // page — it is the livecoder's compiler.
+          log(err?.message || String(err), 'err');
+        } finally {
+          if (button) button.disabled = false;
+        }
+      };
+
+      $('play').onclick = guard(() => run('playing'));
+      $('eval').onclick = guard(() => run('hot-swapped at the next cycle'));
+      $('stop').onclick = guard(stop);
+
+      // Ctrl/Cmd+Enter evaluates, Ctrl+. stops — the strudel.cc REPL bindings.
+      // Tab types two spaces instead of leaving the field; a code buffer you
+      // cannot indent is not an editor.
+      editor.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+          e.preventDefault();
+          run('hot-swapped at the next cycle').catch((err) => log(err.message, 'err'));
+        } else if ((e.ctrlKey || e.metaKey) && e.key === '.') {
+          e.preventDefault();
+          stop().catch((err) => log(err.message, 'err'));
+        } else if (e.key === 'Tab') {
+          e.preventDefault();
+          const { selectionStart: a, selectionEnd: b, value } = editor;
+          editor.value = `${value.slice(0, a)}  ${value.slice(b)}`;
+          editor.selectionStart = editor.selectionEnd = a + 2;
+        }
+      });
+
+      // ---------------------------------------------------------------------
+      // Diff. Hand-rolled LCS over lines — a dependency for this would be
+      // heavier than the algorithm.
+      // ---------------------------------------------------------------------
+      const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+
+      function diffLines(before, after) {
+        const a = before.split('\n');
+        const b = after.split('\n');
+        // lcs[i][j] = length of the longest common subsequence of a[i:], b[j:].
+        const lcs = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1));
+        for (let i = a.length - 1; i >= 0; i--) {
+          for (let j = b.length - 1; j >= 0; j--) {
+            lcs[i][j] = a[i] === b[j]
+              ? lcs[i + 1][j + 1] + 1
+              : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+          }
+        }
+        const out = [];
+        let i = 0;
+        let j = 0;
+        while (i < a.length && j < b.length) {
+          if (a[i] === b[j]) out.push({ type: 'same', text: b[j++], _: i++ });
+          else if (lcs[i + 1][j] >= lcs[i][j + 1]) out.push({ type: 'del', text: a[i++] });
+          else out.push({ type: 'add', text: b[j++] });
+        }
+        while (i < a.length) out.push({ type: 'del', text: a[i++] });
+        while (j < b.length) out.push({ type: 'add', text: b[j++] });
+        return out;
+      }
+
+      const GUTTER = { same: ' ', add: '+', del: '-' };
+      function renderDiff(before, after) {
+        const rows = diffLines(before, after);
+        $('proposal').innerHTML = rows
+          .map((r) => `<span class="ln ${r.type}"><span class="gut">${GUTTER[r.type]} </span>${esc(r.text) || ' '}</span>`)
+          .join('');
+        const changed = rows.filter((r) => r.type !== 'same').length;
+        $('p-src').textContent = changed
+          ? `${rows.filter((r) => r.type === 'add').length}+ / ${rows.filter((r) => r.type === 'del').length}−`
+          : 'identical to the editor';
+      }
+
+      // ---------------------------------------------------------------------
+      // The mind button.
+      // ---------------------------------------------------------------------
+      let proposal = null;              // the last 200's code, or null
+      const recentReasons = [];         // what the mind already said — it is told
+      let barsElapsed = 0;              // one "bar" per applied mutation; honest enough
+                                        // for a jam, and it keeps the state shape real
+
+      const showError = (title, detail) => {
+        proposal = null;
+        $('actions').style.display = 'none';
+        $('reason').style.display = 'none';
+        $('p-src').textContent = 'error';
+        $('proposal').innerHTML =
+          `<span class="err"><b>${esc(title)}</b><code>${esc(detail || '')}</code></span>`;
+        log(title, 'err');
+        if (detail) log(detail.split('\n')[0], 'err');
+      };
+
+      async function askTheMind() {
+        const intent = $('intent').value.trim();
+        if (!intent) throw new Error('an intent is the whole request — type one');
+        $('p-src').textContent = 'thinking…';
+        $('proposal').innerHTML = '<span class="empty">waiting for the mind…</span>';
+
+        let response;
+        try {
+          response = await fetch(MIND_URL, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              code: editor.value,
+              intent,
+              genre: GENRE,
+              key: KEY,
+              bars_elapsed: barsElapsed,
+              recent_reasons: recentReasons.slice(-4),
+            }),
+          });
+        } catch (err) {
+          // fetch() rejects on connection refused / CORS refusal — the two most
+          // likely first-run states, so say what to run rather than "failed".
+          showError(
+            `could not reach the playground server at ${MIND_URL}`,
+            `${err.message}\n\nStart it from the repo root:\n` +
+              '  uv run python scripts/algorave_playground.py --mock\n' +
+              'It must be the one on :4032 — serve.mjs (:4031) only serves this page.',
+          );
+          return;
+        }
+
+        let body = null;
+        const text = await response.text();
+        try {
+          body = JSON.parse(text);
+        } catch {
+          showError(`the server answered ${response.status} with non-JSON`, text.slice(0, 400));
+          return;
+        }
+
+        if (!response.ok) {
+          const hint = {
+            400: 'the page sent something malformed — this is a bug here, not in the mind',
+            404: 'wrong path — the endpoint is POST /mind',
+            405: 'the endpoint is POST /mind',
+            500: 'the server itself failed',
+            502: 'the mind failed twice and held — the editor is untouched, both validator errors are below',
+            503: 'the Node validator is not installed — nothing was asked of the mind',
+          }[response.status] || 'unexpected status';
+          showError(`${response.status} · ${body.error || hint}`, `${hint}\n\n${body.detail || ''}`);
+          return;
+        }
+
+        proposal = body.code || '';
+        const reason = body.reason || '(the mind returned no reason line)';
+        $('reason-text').textContent = reason;
+        $('reason').style.display = 'block';
+        renderDiff(editor.value, proposal);
+        $('actions').style.display = 'flex';
+
+        const s = body.stats || {};
+        $('stats').innerHTML =
+          `<b>${s.events ?? '?'}</b> events / <b>${s.cycles_checked ?? '?'}</b> cycles · ` +
+          `kick 4/4 <b>${s.kick_four_on_floor ? 'yes' : 'no'}</b><br />` +
+          `sounds <b>${esc((s.sounds || []).join(' ') || '—')}</b>` +
+          (s.out_of_key && s.out_of_key.length ? `<br />out of key <b>${esc(s.out_of_key.join(' '))}</b>` : '');
+        log(`proposal in: ${reason}`, 'ok');
+      }
+
+      $('mind').onclick = guard(askTheMind);
+      $('intent').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') $('mind').click();
+      });
+
+      $('apply').onclick = guard(async () => {
+        if (proposal == null) return;
+        editor.value = proposal;
+        const reason = $('reason-text').textContent;
+        if (reason) recentReasons.push(reason);
+        barsElapsed += 1;
+        $('actions').style.display = 'none';
+        $('proposal').innerHTML = '<span class="empty">applied — the editor is now the proposal.</span>';
+        $('p-src').textContent = 'applied';
+        proposal = null;
+        await run('applied + evaluated');
+      });
+
+      $('discard').onclick = guard(async () => {
+        proposal = null;
+        $('actions').style.display = 'none';
+        $('reason').style.display = 'none';
+        $('proposal').innerHTML = '<span class="empty">discarded. The editor is unchanged.</span>';
+        $('p-src').textContent = '';
+        log('proposal discarded');
+      });
+
+      log(`page loaded · mind endpoint ${MIND_URL}`);
+    </script>
+  </body>
+</html>

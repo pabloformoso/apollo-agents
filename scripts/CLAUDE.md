@@ -85,6 +85,24 @@
     is fast only when it fails is not fast.
   - The number to beat is the JSON mind's: ~50% invalid, warm 8.6 s
     (gemma-4-e4b) / 12.5 s (qwen3.5-9b), measured 2026-08-28.
+- `algorave_playground.py` — the playground's mind button
+  (docs/algorave-livecoding-plan.md §9 stage 1): a stdlib HTTP server on
+  **4032** whose one endpoint, `POST /mind`, hands the editor's code +
+  an intent to `StrudelMind` and returns the validated mutation. Pairs
+  with `scripts/algorave-spike/patterns/playground.html` served by
+  `serve.mjs` on 4031 (that page lives under `patterns/` because
+  serve.mjs mounts nothing else). Gotchas:
+  - **`--mock` builds no LLM client** — a canned deterministic mutation
+    through the REAL validator, so the whole path is demoable with no
+    tunnel. Use it before blaming the model for a page bug.
+  - The four failure codes are deliberately distinct: 400 malformed,
+    502 the mind failed twice (detail carries BOTH validator errors,
+    caller holds), 503 the validator is missing (`npm install`), 500
+    anything else. All of them carry CORS headers — a 502 the browser
+    will not let the page read is a swallowed error.
+  - `validate.mjs`'s token screen covers **comments**, so a comment
+    saying "cannot import Python" rejects the whole buffer. Cost a 502
+    on the seed file's own header, 2026-08-29.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
 
 Convention: scripts are operator-facing and safe to run against the

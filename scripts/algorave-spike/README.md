@@ -552,3 +552,86 @@ is the thing that makes a wrong one obvious.
 Self-host the samples before the stream depends on them: the CDN fetch is a
 single point of failure that currently sits between "start the set" and "any
 sound at all".
+
+## The playground — human + mind on one buffer (§9 stage 1)
+
+The jam surface: an **editable** pattern, hot-swapped into the running audio,
+with a **mind** button that asks `StrudelMind` for a mutation and offers it back
+as a diff. Local, detached from the stream, and the audition bench for §10's
+packs.
+
+Two processes, two ports — they are separate on purpose (the page is static and
+the mind is Python; neither should be able to break the other):
+
+```bash
+# 1. the page (this package, port 4031)
+cd scripts/algorave-spike && npm run serve
+
+# 2. the mind endpoint (repo root, port 4032). --mock needs no model at all.
+uv run python scripts/algorave_playground.py --mock
+uv run python scripts/algorave_playground.py --model qwen/qwen3.6-27b   # a real one
+
+# then open
+http://127.0.0.1:4031/patterns/playground.html
+```
+
+| port | what | whose |
+|---|---|---|
+| 4010 / 4020 | **prod stack** — never bind these | frontend / backend |
+| 4011 / 4021 | dev pair | |
+| 4031 | this package's static server (`serve.mjs`) — serves the page | node |
+| 4032 | `scripts/algorave_playground.py` — `POST /mind` only | python |
+
+**Why the page lives in `patterns/`.** `serve.mjs` mounts exactly `/`,
+`/index.html`, `/vendor/*` and `/patterns/*`; a file dropped next to
+`index.html` 404s (verified against the running server). Rather than edit
+`serve.mjs`, `playground.html` and `seed.repl.js` sit in `patterns/`, which is
+already mounted — hence the `/patterns/playground.html` URL.
+
+### The page
+
+- **Editor** — a monospace `<textarea>`, preloaded from `patterns/seed.repl.js`.
+  Ctrl+Enter evaluates (hot-swap at the next cycle), Ctrl+`.` stops, Tab indents.
+- **Proposal** — read-only, with the `// reason:` line in a banner above it (the
+  reason IS the narrative) and a hand-rolled line diff marking `+`/`-` against
+  the editor. **Apply** copies it into the editor and evaluates; **Discard**
+  drops it. The validator's stats — events, cycles, `kick_four_on_floor`,
+  sounds, `out_of_key` — render next to the controls.
+- **Errors are rendered, never swallowed**: a refused connection says which
+  command starts the missing server, a 502 shows BOTH validator errors with the
+  editor left untouched, a 503 shows the `npm install` fix.
+- Play and Evaluate call the same `evaluate()` — in Strudel they ARE the same
+  primitive, which is exactly why livecoding works.
+
+### `<strudel-editor>` probe: rejected, on availability, not on merit
+
+The `<strudel-editor>` web component ships in **`@strudel/repl`**, which is not
+in this package's `dependencies` and not in `package-lock.json`. Adding it would
+mean editing `package.json` (and re-locking), and reaching it from the browser
+would mean a fourth mount in `serve.mjs` — both out of scope for this slice. A
+CDN `<script>` would dodge both and cost the thing this package is careful about
+(exact pins, no ranges, everything served from `node_modules`), so: the
+`<textarea>` ships. It is also enough — the buffer is small, and `evaluate()`
+does the interesting part. Revisit when the editor moves to `/live`, where
+syntax highlighting and the playhead cursor start earning their weight.
+
+### `--mock`: the whole path, zero network
+
+`--mock` never builds an LLM client. It substitutes a canned deterministic
+mutation (pull the first numeric `.gain()` down 15 %, prepend a
+`// reason: mock — …` line) and sends it through the **real** `StrudelMind`,
+which shells out to the **real** `node validate.mjs`. So a mock request
+exercises parse → validate → respond exactly as a live one does, stats included,
+and the page can be demoed on a laptop with no tunnel. What it does not exercise
+is the model.
+
+### Gotcha, paid for on 2026-08-29: the token screen reads your comments
+
+`validate.mjs` screens `(import|require|fetch|eval|process)` over the whole
+buffer minus a leading `// reason:` line — **comments included**. The seed file's
+provenance header originally read "cannot import Python at run time", so the
+first mind click on a freshly loaded page came back `502 … disallowed token(s):
+import`, with the code itself perfectly fine. `tests/test_algorave_playground.py`
+now runs the validator's own regex over `seed.repl.js` and POSTs the file
+verbatim through the real validator, because the file — not the constant it was
+copied from — is what the page sends.
