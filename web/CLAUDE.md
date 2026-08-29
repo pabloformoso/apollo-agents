@@ -34,6 +34,42 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   written by the primary live WS handler — never log output. G1's
   generation endpoints import this helper and refuse to release tasks
   while it is true; keep one definition of "a set is on air".
+- **Generation endpoints (G1)** — `POST /api/generator/tasks` is the
+  ONLY GPU-touching call, so it is the only one behind the 409 VRAM
+  guard (`VRAM_CONFLICT_MESSAGE`, rendered verbatim by the wizard, hence
+  English like the rest of the wizard's copy); polling and the audio
+  proxy stay open during a live set.
+  Refusal ladder: 503 disabled/unreachable → 409 live → 422 bad
+  genre/field → 429 ACE queue full → 502 ACE broke. The body is
+  `extra="forbid"` (a silently ignored knob only surfaces hours later as
+  an ordinary take); `experimental` is a verbatim passthrough that may
+  NOT shadow server-owned fields — `audio_format: "wav"` and
+  `thinking: true` are the catalog contract, not preferences.
+  **`bpm` defaults to the centre of the genre window** (spec §5.5:
+  pinned at release time so `metas.bpm` comes back in-window and G2
+  never has to re-detect it). That table is bound to
+  `agent.tools._BPM_GENRE_RANGES`, NOT to the canonical
+  `main.BPM_GENRE_RANGES`: importing `main` costs ~2.6 s and ~1800
+  modules (librosa/numba/moviepy) inside a request handler. Since that
+  copy is knowingly partial, the window table is used ONLY for the
+  default and never as the genre allow-list — a genre the table misses
+  but the catalog has (`aural`, `synthware`) still generates, logs
+  `no BPM window for genre`, and lets the LM pick the tempo.
+- **A poll must never 5xx** — the wizard polls every 3 s, so an
+  ACE-Step transport blip, a 500, a malformed batch or an id the box
+  does not know yet all answer `200 {status: "pending", degraded:
+  true}`; only an auth/bad-request failure (a misconfiguration retrying
+  cannot fix) becomes a 502. A take's `result_parse_error` is carried
+  through, never raised. Keys are always present so the poll loop never
+  feature-detects.
+- **`GET /api/generator/audio` is a streaming proxy, not a redirect** —
+  the browser never talks to :8001 (auth + LAN isolation live here).
+  `path` is the take's `file`, forwarded opaque to
+  `AceStepClient.stream_audio`; a value carrying a host or naming a
+  local file is a 400. `Range` is forwarded and upstream's 206 +
+  range headers are mirrored, so `<audio>` seeking works as it does on
+  `FileResponse` without buffering a 35 MB WAV. Auth accepts a bearer
+  header OR `?token=`, the same escape hatch as `stream_track`.
 - **Live WS roles**: `/live/stream` = PRIMARY (drives playback, sends
   `playback_pos` every ~250 ms and `track_ended`); `/live/viewer` =
   read-only follower (OBS). Viewers never send. A wrongly-primary OBS
@@ -86,13 +122,49 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   `track_ended` (skip), capped at 3 consecutive, streak reset on a
   healthy schedule. `BufferCache.load` races a 20 s deadline.
 
+## Frontend generator surface (G1, `lib/generator.ts` + `components/ember/Generator*`)
+
+- **Entry lives in the Editor's track row** — the "Generate (ACE)" tile
+  sits beside "Add a track", because that row IS the wizard's
+  track-selection stage; generating and picking are two ways into the
+  same slot. `GenerateTrackTile` renders NOTHING while
+  `/api/generator/health` is loading or `available` is false: the ACE box
+  is off most of the time by design, so absent is the normal look, not an
+  error state. `blocked_by_live` renders it disabled with the VRAM
+  tooltip — a courtesy, since the POST's **409 is the authoritative
+  guard** and its message is shown verbatim (never paraphrase a protocol
+  refusal). Health is read once on mount, deliberately not polled.
+- **A degraded poll is a blip, not a failure.** `applySnapshot` /
+  `applyPollError` are pure folds so the transitions are testable without
+  timers: a `degraded` snapshot keeps the task pending AND keeps the ETA
+  it could not refresh, so the countdown ticks on through the blip. A
+  thrown poll degrades too — only 401/403/404 ends the loop, otherwise a
+  wrong turn spins forever. Cadence is 3 s with an immediate first poll.
+- **The ETA is `(server estimate, capture time)`, not a local timer.**
+  Every poll that carries `eta_seconds` restamps both, so the countdown
+  resets to the server's newer number instead of drifting off a stale one.
+- **Takes play through the existing `PlayerProvider`.** `Playable =
+  Track & { stream_url?: string }` — catalog tracks still resolve via
+  `streamUrl(id)`; a take is not a catalog entry and carries the
+  `/api/generator/audio` proxy URL instead. The JWT rides the query
+  string there for the same reason it does on `streamUrl`: `<audio>`
+  can't set an Authorization header.
+- Genres in the form come from `/api/catalog` (the same fetch
+  `TrackPicker` makes) — ACE writes into a real genre folder. The BPM
+  default is NOT duplicated client-side: the helper text says the server
+  fills the centre of the genre's window. A third copy of
+  `BPM_GENRE_RANGES` in TS is exactly the drift the root CLAUDE.md warns
+  about.
+
 ## Testing
 
 - Unit: `npx vitest run` in `web/frontend` (hook tests use the
   FakeWebSocket + FakeAudioContext harness in `__tests__/live.test.ts`).
 - E2E: `npx playwright test` — the transition spec stubs
   `decodeAudioData` and shims stream fetches; other specs rely on the
-  404→inert contract above.
+  404→inert contract above. `generator-wizard.spec.ts` uses the same
+  `addInitScript` fetch shim to script `/api/generator/*` (including two
+  degraded polls), so it passes whether or not ACE is running.
 
 ## Known issues
 
