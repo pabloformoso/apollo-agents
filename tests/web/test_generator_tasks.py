@@ -11,6 +11,7 @@ Contract under test: ``docs/acestep-wizard-plan.md`` §"G1 contract" and
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -37,8 +38,19 @@ _STATS = {
 
 _RELEASED = {"task_id": "task-1", "status": "queued", "queue_position": 4}
 
+#: ACE's own result root (``generator.DEFAULT_AUDIO_ROOTS``). The shared
+#: validator root-checks a take's DECODED path on EVERY route — the proxy
+#: included — so the fixture take has to name a file that could really be
+#: one: an absolute POSIX path under this root, encoded ``quote(p, safe="")``
+#: exactly as ACE hands it out.
+_ACE_ROOT = generator.DEFAULT_AUDIO_ROOTS[0]
+_TAKE_FILE = f"{_ACE_ROOT}/6f1c2b7e-9d4a-4c11-b0a3-2e5f8d7c1a90_0.wav"
+
+_AUDIO_PATH = f"/v1/audio?path={quote(_TAKE_FILE, safe='')}"
+_AUDIO_BYTES = b"RIFF....WAVEmock-pcm-bytes"
+
 _TAKE = {
-    "file": "/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav",
+    "file": _AUDIO_PATH,
     "status": 1,
     "prompt": "dark melodic techno, hypnotic, driving",
     "lyrics": "[Verse]\nneon rain",
@@ -50,9 +62,6 @@ _TAKE = {
 }
 
 _BODY = {"prompt": "dark melodic techno, hypnotic", "genre_folder": "techno"}
-
-_AUDIO_PATH = "/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav"
-_AUDIO_BYTES = b"RIFF....WAVEmock-pcm-bytes"
 
 
 def _box(*, release=_RELEASED, results=(), stats=_STATS, audio=None):
@@ -763,8 +772,10 @@ def test_audio_streams_the_take(auth_client, ace_on, monkeypatch):
 
     proxied = [c for c in calls if c.url.path == "/v1/audio"]
     assert len(proxied) == 1
-    # The inner path stays opaque and url-encoded end to end.
-    assert proxied[0].url.params.get("path") == "/tmp/out/take0.wav"
+    # Forwarded byte for byte — Apollo screens the inner path (it is under
+    # ACE's result root) but never rewrites it; ACE's own validator is
+    # still the far-side authority on what it will serve.
+    assert proxied[0].url.params.get("path") == _TAKE_FILE
     assert proxied[0].url.host == "ace.test"
 
 
@@ -836,8 +847,12 @@ def test_audio_is_allowed_during_a_live_session(
         "http://evil.test/v1/audio?path=x",     # host-carrying
         "https://ace.test:8001/v1/audio",       # even the real host
         "//evil.test/v1/audio",                 # protocol-relative
-        "/tmp/out/take0.wav",                   # absolute server file path
+        "/tmp/out/take0.wav",                   # absolute file path, out of root
         "/etc/passwd",
+        # The endpoint shape wrapping that same out-of-root path: the
+        # proxy no longer forwards what publish would refuse.
+        "/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav",
+        "/v1/audio?path=%2Fetc%2Fpasswd",
         "C:\\Windows\\win.ini",                 # windows drive
         "out\\take0.wav",                       # backslashes
         "/v1/../secret",                        # traversal
@@ -853,6 +868,30 @@ def test_audio_400_on_a_non_relative_path(
 
     assert r.status_code == 400, bad_path
     assert calls == []  # nothing was proxied anywhere
+
+
+def test_audio_streams_a_bare_absolute_path_under_the_root(
+    auth_client, ace_on, monkeypatch
+):
+    """The contrast to the 400 list above: in-root, so it streams.
+
+    A bare absolute path is what the wizard persists, and the validator
+    resolves it the same way for the proxy as for publish — re-encoded
+    into ``/v1/audio?path=<quote(p, safe="")>``, slashes as ``%2F``. Only
+    the ROOT decides; the shape does not (the proxy-side twin of
+    ``test_publish_shape_is_the_absolute_path_under_the_root``).
+    """
+    calls = _install_ace(monkeypatch, _box())
+
+    r = auth_client.get("/api/generator/audio", params={"path": _TAKE_FILE})
+
+    assert r.status_code == 200
+    assert r.content == _AUDIO_BYTES
+    proxied = [c for c in calls if c.url.path == "/v1/audio"]
+    assert len(proxied) == 1
+    assert proxied[0].url.params.get("path") == _TAKE_FILE
+    # Re-encoded, not passed through raw: slashes travel as %2F.
+    assert b"%2F" in proxied[0].url.query
 
 
 def test_audio_422_without_a_path(auth_client, ace_on, monkeypatch):

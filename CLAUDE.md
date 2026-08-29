@@ -146,6 +146,12 @@ Hard rules:
   violation: LM Studio returns 400 "Failed to load model" for EVERY
   model while `/v1/models` still lists them — *listed ≠ loadable*; check
   `nvidia-smi` on tunel before blaming the model or the gateway.
+  **The exclusivity is SYMMETRIC**: while an ACE generation batch runs,
+  LM Studio must hold NO model — `~/.lmstudio/bin/lms unload --all` on
+  tunel and stop every Apollo-side LLM caller (playground server on
+  :4032, benches) first. A single playground /mind click mid-batch
+  JIT-loads a model and OOMs ACE's 5 Hz LM at init (first real batch,
+  2026-08-29). LLM work resumes when ACE frees the GPU.
 
 ## Known issues / backlog
 

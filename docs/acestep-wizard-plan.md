@@ -88,8 +88,12 @@
   touches the GPU.
 - **`GET /api/generator/audio?path=...`** — streaming proxy of ACE's
   `/v1/audio` (the browser never talks to :8001 directly; auth + LAN
-  isolation live here). Path is passed opaque and url-encoded to the
-  client's `audio_url()`; refuse (400) obviously non-relative paths.
+  isolation live here). Superseded 2026-08-29 (proxy-root-check fix):
+  the path is forwarded UNREWRITTEN but not unexamined — an absolute
+  decoded path (bare or inside the `/v1/audio?path=` shape) must sit
+  under `ACESTEP_AUDIO_ROOT` on every route, same rule as publish;
+  schemes/hosts/drives/traversal are 400; relative still streams (ACE
+  resolves it against a root only ACE knows).
 
 ### Frontend (the wizard)
 
@@ -269,7 +273,17 @@ persistence rule — result files are immortal, so each phase can run with
 the GPU in a different hands:
 
 1. **Coordinate** with the ACE session: server up on :8001, no live set
-   (`live-ws` check), GPU handed to ACE.
+   (`live-ws` check), GPU handed to ACE. **The exclusivity is
+   SYMMETRIC** (learned the hard way, first real batch 2026-08-29:
+   LM Studio JIT-loaded e4b mid-phase-A — a playground /mind click is
+   enough — and ACE's 5 Hz LM died OOM at init): before phase A,
+   `lms unload --all` on tunel AND stop every Apollo-side LLM caller
+   (playground server, benches); they come back in phase C.
+   **Poisoned-init cure** (first batch, 2026-08-29): after an OOM, ACE
+   caches `_llm_init_error` and every `thinking` release fails
+   INSTANTLY without touching the GPU. The cure is
+   `POST /v1/init {init_llm: true}` — re-runs the LM init and clears
+   the cached error, DiT untouched. No restart needed.
 2. **Generate**: one release per target genre (deep house first),
    `bpm` = window center, `audio_duration ≥ 150`, `thinking: true`,
    `batch_size 2`, `audio_format wav`. Poll to done; PERSIST decoded
@@ -280,16 +294,20 @@ the GPU in a different hands:
    load, not a failure; `avg_job_seconds` only means something after it.
    Both takes of the batch share the piece → the keeper publishes first,
    the sibling as `variant_of` its display name.
-3. **ACE unloads** (the VRAM protocol; they ping when free).
-4. **Score with the GPU back**: download takes; `quality_bench --wav`
-   per take vs the genre references; optional LLM critique now that LM
+3. **Download WHILE the server is up** (runbook fix 2026-08-29:
+   `/v1/audio` dies with the server — the download is the TAIL of phase
+   A, before the stop signal; scp over SSH is the fallback if the server
+   already stopped, since the files themselves survive).
+4. **ACE unloads** (the VRAM protocol; they ping when free).
+5. **Score with the GPU back**: `quality_bench --wav` per downloaded
+   take vs the genre references; optional LLM critique now that LM
    Studio can load.
-5. **Publish the keeper**: `main.py --ingest` with the generation metas
+6. **Publish the keeper**: `main.py --ingest` with the generation metas
    (backup automatic); second take as `variant_of`. **The Apollo session
    validates the first tracks.json entry before anything else** — the
    agreed handshake.
-6. `--fix-incomplete` (detached Docker) backfills duration/beatgrid/MP3.
-7. **Prove the loop closed**: the eligibility screen accepts it and
+7. `--fix-incomplete` (detached Docker) backfills duration/beatgrid/MP3.
+8. **Prove the loop closed**: the eligibility screen accepts it and
    `pick_next_track` can surface it (a dry selection check, not a live
    set).
 
