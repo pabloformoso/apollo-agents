@@ -45,6 +45,9 @@ The pattern tests need neither network nor a browser.
 | `test/wav.test.mjs` | spec §5.2 — 7 tests, `describe.skipIf` when the WAV is absent. |
 | `validate.mjs` | spec §8.1 (iteration 1, S2) — the mind's validator: `node validate.mjs` takes Strudel code on stdin, prints one verdict JSON line on stdout. See "S2 validator" below. |
 | `test/validate.test.mjs` | spec §8.1 — 18 tests, CI-safe (no audio, no network, no browser). |
+| `patterns/playground.html` | spec §9 — the jam surface: editable buffer, mind button, and (§9.1) the pen. |
+| `patterns/pen.js` | spec §9.1 — the pen, as a pure module: scheduler decision, bar derivation, human-edit summary, reason ring. No DOM, no fetch. |
+| `test/pen.test.mjs` | spec §9.1 — 36 tests, CI-safe (no audio, no network, no browser). |
 
 ## Pinned versions
 
@@ -635,3 +638,65 @@ import`, with the code itself perfectly fine. `tests/test_algorave_playground.py
 now runs the validator's own regex over `seed.repl.js` and POSTs the file
 verbatim through the real validator, because the file — not the constant it was
 copied from — is what the page sends.
+
+## The pen — the mind's hand on the phrase (§9.1)
+
+Iteration 1 gave the mind a *voice* (click, read a diff, decide). Iteration 2
+gives it a **hand**: one token, `pen ∈ {mind, human}`, that decides who is
+allowed to change the code that is playing.
+
+- **The holder is displayed LARGE** — a colour-coded strip under the header
+  (`✍ HUMAN` pink / `✦ MIND` green). That strip is the stream overlay: "the
+  human grabs the code" is content, and it has to read in a quarter of a
+  second on a crop. The toggle sits in the same strip.
+- **Starts at `human`, always.** Loading the page fires no LLM call by itself.
+- **The phrase scheduler** runs only while `pen === mind` AND audio is playing.
+  Every `phraseBars` bars (control in the sidebar, default 8, floor 2) it POSTs
+  the current buffer to `/mind` and — this is what holding the pen means —
+  **auto-applies** the validated mutation and evaluates it, leaving the diff on
+  screen with a flash and the reason in the banner. One request in flight at a
+  time; a boundary reached while one is open is **skipped, not queued**. Any
+  failure logs and holds: the code that is playing keeps playing, and the next
+  boundary tries again.
+- **Bars come from the audio clock**, `floor(elapsed_since_play × cps)` — not
+  from a counter of applied mutations (which is what iteration 1 sent). The
+  clock starts at the stopped→playing edge, never on an evaluate.
+- **Human edits become state.** While the human holds the pen, every evaluate of
+  a changed buffer appends `human: ±N lines — "<first changed line>"` to the
+  recent-reasons ring, diffed automatically — nobody narrates their own edits
+  mid-phrase. The ring keeps 5, mind reasons and human summaries mixed in order,
+  and the page logs what each call carries (`→ mind · bar 18 · carrying 3
+  recent, last: …`) so "was the mind actually told" is answerable without a
+  network panel.
+- **The manual `✦ mind` button still works in BOTH states**, and a hand-asked
+  proposal is still Apply/Discard — a proposal someone asked for is never
+  applied for them.
+
+**The split.** `patterns/pen.js` is pure — no DOM, no fetch, no timers, no
+module-level state — and `test/pen.test.mjs` drives whole jams through it in
+milliseconds. The page wires those functions to a 250 ms tick and is
+browser-verified, exactly as iteration 1's was. The line diff moved into
+`pen.js` too: the human-edit summary is a *reading* of the same diff the
+proposal pane draws, and two copies could disagree about what changed.
+
+Three things this cost, all of them arithmetic:
+
+- **`Number('') === 0`, not `NaN`.** Clearing the phrase box to type "16"
+  briefly reads as 0 → clamped to the floor of 2 → a mind call every four
+  seconds at 122 BPM until you finish typing. An empty box now falls back to
+  the default rather than the minimum.
+- **A missed boundary must be *burned*, not remembered.** `barsNow - lastFired
+  >= phraseBars` looks equivalent to modulo arithmetic and is not: it stays
+  true forever after a skip, so the skipped call fires the instant the previous
+  one lands. Boundaries are the multiples of `phraseBars`, and the bar of the
+  last boundary *handled* — fired **or** deliberately skipped — is what stops a
+  later tick in the same bar from re-firing it.
+- **Handing over on a boundary bar fires inside that bar.** Harmless musically
+  (§9.1 wants no better than ±1 bar) but it makes the page's own "first
+  mutation at bar N" announcement wrong, so the handoff consumes the current
+  bar and the mind comes in at the top of the next phrase.
+
+Browser-verified 2026-08-29 against `--mock` on a spare port: consecutive
+automatic apply cycles at the announced bars, the scheduler going silent the
+moment the pen is taken back mid-run, and a `human:` summary from a real
+keyboard edit showing up in the very next scheduled call's payload.

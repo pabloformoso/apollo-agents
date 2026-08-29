@@ -138,6 +138,14 @@ Hard rules:
   main checkout; run anything runtime-ish from the main checkout.
 - `--build-catalog` needs madmom → run it in detached Docker
   (~1.25 min/track, serial; writes tracks.json only at the end).
+- **The `tunel` GPU (16 GB) is SHARED** with the ACE-Step project
+  (music generation, same box as LM Studio). Protocol agreed 2026-08-29:
+  ACE never holds VRAM idle (lazy-load, unload after batches) and never
+  during a live session (same `live-ws` check as above); it pings this
+  project's session via SendMessage when it frees the GPU. Symptom of a
+  violation: LM Studio returns 400 "Failed to load model" for EVERY
+  model while `/v1/models` still lists them — *listed ≠ loadable*; check
+  `nvidia-smi` on tunel before blaming the model or the gateway.
 
 ## Known issues / backlog
 

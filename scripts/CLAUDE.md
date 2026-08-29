@@ -103,6 +103,17 @@
   - `validate.mjs`'s token screen covers **comments**, so a comment
     saying "cannot import Python" rejects the whole buffer. Cost a 502
     on the seed file's own header, 2026-08-29.
+  - **The pen** (§9.1, iteration 2) lives entirely in the page — no
+    server change. `pen ∈ {mind, human}`, starts human; while the mind
+    holds it a phrase scheduler POSTs every N bars (default 8) and
+    **auto-applies** the mutation, one request in flight, a boundary
+    reached mid-request skipped rather than queued. The decisions are a
+    pure module, `scripts/algorave-spike/patterns/pen.js`, unit-tested
+    in `test/pen.test.mjs`; only the wiring is browser-verified. To
+    demo or debug it against `--mock` while a real-model instance is
+    already on 4032, start a second server on another port and point
+    `MIND_URL` at it — then put it back, the page must ship pointing at
+    4032.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
 
 Convention: scripts are operator-facing and safe to run against the

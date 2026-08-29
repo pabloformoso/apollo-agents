@@ -269,6 +269,42 @@ Three stages, each daily-cycle sized, each subsuming the previous:
 Sequencing: playground first (it is S3's editor panel built local-first),
 then the pen, then the B2B scheduler on top.
 
+### 9.1 The pen — contract (iteration 2, 2026-08-29)
+
+State lives in the playground page; the server contract from iteration 1 is
+already sufficient (it accepts `bars_elapsed` and `recent_reasons`).
+
+- **Pen token**: `pen ∈ {mind, human}`, starts at `human` (loading a page must
+  never fire LLM calls by itself). One toggle: *take the pen / hand to the
+  mind*. The holder is displayed LARGE (stream-ready — OBS will crop this).
+- **Phrase scheduler** (the mind's hand): runs ONLY while `pen === mind` AND
+  playing. Every `phraseBars` bars (control in the UI, default 8) it POSTs
+  `{code: current buffer, intent, bars_elapsed, recent_reasons}` to `/mind`
+  and — this is what holding the pen MEANS — **auto-applies** the validated
+  mutation into the editor and evaluates it, flashing the diff and the reason
+  on screen. One request in flight max (a boundary reached while one is
+  pending is skipped, not queued). A 4xx/5xx/network failure logs, keeps the
+  current code looping (page-level reject-and-hold) and tries again at the
+  next boundary.
+- **Bars**: derived from the audio clock the page already owns —
+  `bars_elapsed = floor(elapsed_since_play × cps)`. Precision beyond ±1 bar
+  is NOT required (application happens on evaluate, which hot-swaps at the
+  next cycle anyway); drift is irrelevant at this granularity.
+- **Human edits become state**: while `pen === human`, every evaluate of a
+  buffer that differs from the last evaluated one appends
+  `"human: <summary>"` to `recent_reasons` — summarized automatically from a
+  line diff (±N lines + a truncated first changed line), never typed. The
+  ring keeps the last 5 (the mind's MAX_RECENT_REASONS convention).
+- **Handoff is free**: taking the pen just stops the scheduler; handing back
+  makes the next scheduled call `next_code(current_code = whatever is in the
+  editor)` — §8.2 unchanged, no new server work.
+- **Testability**: the scheduler/diff/ring logic ships as a pure module
+  (`patterns/pen.js`) with vitest coverage (fire decisions, in-flight
+  skipping, bar derivation, human-edit summaries, ring trimming); the page
+  wires it. DOM wiring is browser-verified, as the playground's was.
+- **Non-goals (iteration 2)**: the B2B alternation scheduler (stage 3), /live
+  integration, chat intake, any server change.
+
 ## 10. Pattern packs — collections of banks / roles / sections
 
 Today the vocabulary is hardcoded in two places (the §8.1 palette in the
