@@ -4,8 +4,10 @@ import json
 import os
 import random
 import re
+import shutil
 import subprocess
 import sys
+import time
 import wave
 from dataclasses import dataclass
 
@@ -1770,6 +1772,332 @@ def build_catalog():
         f"\nCatalog written: {len(updated)} total entries ({new_count} new, "
         f"{renamed} renamed) → {CATALOG_PATH}"
     )
+
+
+# === Ingest (catalog append for generated audio) ===
+
+# The catalog's WAV contract: 44.1 kHz / 16-bit / stereo. ACE-Step
+# renders at 48 kHz, so most ingests resample — but a file that already
+# conforms is copied byte-for-byte rather than pushed through a
+# needless lossy-adjacent round trip.
+INGEST_SAMPLE_RATE = 44100
+INGEST_SUBTYPE = "PCM_16"
+INGEST_CHANNELS = 2
+
+
+def _ingest_refuse(message):
+    """Print a refusal in the catalog-flow voice and exit non-zero."""
+    print(f"Error: {message}")
+    sys.exit(1)
+
+
+def _catalog_backup_path(catalog_path):
+    """Timestamped backup name for tracks.json.
+
+    ``.gitignore`` carries the convention (``tracks/tracks.json.bak``
+    and ``tracks/tracks.json.*.bak``), so the stamp goes BEFORE the
+    ``.bak`` suffix — a backup named the other way round would sit in
+    ``git status`` as untracked noise forever.
+    """
+    return f"{catalog_path}.{time.strftime('%Y%m%d-%H%M%S')}.bak"
+
+
+def _ingest_load_sidecar(sidecar_path):
+    """Read a ``{bpm, keyscale, display_name, variant_of?, lyrics?}`` sidecar."""
+    if not os.path.exists(sidecar_path):
+        _ingest_refuse(f"sidecar not found: {sidecar_path}")
+    try:
+        with open(sidecar_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        _ingest_refuse(f"sidecar {sidecar_path} is not readable JSON: {exc}")
+    if not isinstance(data, dict):
+        _ingest_refuse(
+            f"sidecar {sidecar_path} must be a JSON object with "
+            f"{{bpm, keyscale, display_name, variant_of?, lyrics?}}"
+        )
+    return data
+
+
+def _resolve_genre_folder(genre_folder):
+    """Match ``genre_folder`` against tracks/ case-insensitively, as --genre does.
+
+    Returns the folder's real on-disk name. Refuses (listing what does
+    exist) rather than creating it: a typo'd genre would otherwise grow
+    a folder with no BPM_GENRE_RANGES entry and no theme, and both of
+    those degrade silently.
+    """
+    if not os.path.isdir(TRACKS_BASE_DIR):
+        _ingest_refuse(f"tracks folder not found: {TRACKS_BASE_DIR}")
+    available = sorted(
+        d for d in os.listdir(TRACKS_BASE_DIR)
+        if os.path.isdir(os.path.join(TRACKS_BASE_DIR, d))
+    )
+    for folder in available:
+        if folder.lower() == (genre_folder or "").lower():
+            return folder
+    _ingest_refuse(
+        f"genre folder '{genre_folder}' does not exist under {TRACKS_BASE_DIR}. "
+        f"Available: {', '.join(available) if available else '(none)'}. "
+        f"Create it (and its BPM_GENRE_RANGES entry) before ingesting."
+    )
+
+
+def _ingest_probe(audio_path):
+    """Probe the source with soundfile. Returns (samplerate, channels, subtype, duration)."""
+    import soundfile as sf  # noqa: PLC0415
+
+    try:
+        info = sf.info(audio_path)
+    except Exception as exc:  # sf raises RuntimeError/LibsndfileError by format
+        _ingest_refuse(f"cannot read audio from {audio_path}: {exc}")
+    duration = info.frames / float(info.samplerate) if info.samplerate else 0.0
+    return info.samplerate, info.channels, info.subtype, duration
+
+
+def _ingest_write_wav(src, dst, conformant):
+    """Land the WAV at ``dst`` — bit-exact copy when conformant, else ffmpeg.
+
+    The resample command is the one the ACE-Step spec prescribes
+    (``-ar 44100 -sample_fmt s16 -ac 2``), wrapped the way
+    ``_ensure_mp3_for`` wraps its encode: availability checked first,
+    stderr surfaced, no half-written file left behind.
+    """
+    if conformant:
+        shutil.copy2(src, dst)
+        return
+    if not _ffmpeg_available():
+        _ingest_refuse(
+            "ffmpeg not found — it is required to resample a non-conformant "
+            f"source to {INGEST_SAMPLE_RATE} Hz / 16-bit / stereo"
+        )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel", "error",
+                "-i", src,
+                "-ar", str(INGEST_SAMPLE_RATE),
+                "-sample_fmt", "s16",
+                "-ac", str(INGEST_CHANNELS),
+                dst,
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        if os.path.exists(dst):
+            try:
+                os.remove(dst)
+            except OSError:
+                pass
+        _ingest_refuse(f"ffmpeg resample failed for {os.path.basename(src)}: {stderr or exc}")
+
+
+def ingest_track(audio_path, genre_folder, display_name=None, bpm=None, keyscale=None,
+                 sidecar=None, variant_of=None, lyrics=None, dry_run=False):
+    """Append ONE externally generated track to the catalog. Returns its entry.
+
+    The ingest counterpart to ``--build-catalog``: instead of scanning a
+    folder and *detecting* BPM and key, it takes them from the generator
+    that already knows them (ACE-Step's ``metas``). That is the point —
+    detected metadata is how the catalog acquired its poisoned BPMs, and
+    those act as genre-drift bridges in a live set.
+
+    Deliberately madmom-free: no beatgrid, no waveform peaks, no MP3
+    sibling. Those are ``--fix-incomplete``'s job, and keeping them out
+    lets this run on any host (madmom only exists in the backend image).
+
+    Every check runs BEFORE anything is written, so a refusal never
+    leaves a stray WAV next to an unchanged catalog — and ``--dry-run``
+    exercises the identical path with the writes skipped.
+    """
+    from agent.eligibility import MIN_TRACK_DURATION_SEC  # noqa: PLC0415
+    from agent.keyscale import keyscale_to_camelot  # noqa: PLC0415
+
+    print("=== Ingesting Track ===\n")
+
+    # --- Metadata: sidecar first, flags override it ---
+    meta = _ingest_load_sidecar(sidecar) if sidecar else {}
+    display_name = display_name or meta.get("display_name")
+    bpm = bpm if bpm is not None else meta.get("bpm")
+    keyscale = keyscale or meta.get("keyscale")
+    variant_of = variant_of or meta.get("variant_of")
+    lyrics_text = None
+    if lyrics:
+        if not os.path.exists(lyrics):
+            _ingest_refuse(f"lyrics file not found: {lyrics}")
+        with open(lyrics, encoding="utf-8") as f:
+            lyrics_text = f.read()
+    elif meta.get("lyrics"):
+        lyrics_text = str(meta["lyrics"])
+
+    missing = [
+        flag for flag, value in
+        (("--display-name", display_name), ("--bpm", bpm), ("--keyscale", keyscale))
+        if value in (None, "")
+    ]
+    if missing:
+        _ingest_refuse(
+            f"{', '.join(missing)} required (give them as flags or in --sidecar)"
+        )
+
+    if not os.path.exists(audio_path):
+        _ingest_refuse(f"audio file not found: {audio_path}")
+
+    # --- Destination folder ---
+    genre_folder = _resolve_genre_folder(genre_folder)
+    dest_dir = os.path.join(TRACKS_BASE_DIR, genre_folder)
+
+    # --- Audio contract ---
+    samplerate, channels, subtype, duration = _ingest_probe(audio_path)
+    if duration < MIN_TRACK_DURATION_SEC:
+        _ingest_refuse(
+            f"track is {duration:.1f}s long — shorter than the "
+            f"{MIN_TRACK_DURATION_SEC:.0f}s minimum for session eligibility, so it "
+            f"could never be selected into a session"
+        )
+    conformant = (
+        samplerate == INGEST_SAMPLE_RATE
+        and channels == INGEST_CHANNELS
+        and subtype == INGEST_SUBTYPE
+        and os.path.splitext(audio_path)[1].lower() == ".wav"
+    )
+
+    # --- BPM must sit inside the genre's window ---
+    window = BPM_GENRE_RANGES.get(genre_folder.lower())
+    if window is None:
+        _ingest_refuse(
+            f"genre '{genre_folder}' has no BPM_GENRE_RANGES window in main.py. "
+            f"Add one before ingesting — without it a wrong BPM is stored verbatim "
+            f"and poisons matching for every set that touches this genre."
+        )
+    try:
+        bpm = float(bpm)
+    except (TypeError, ValueError):
+        _ingest_refuse(f"bpm {bpm!r} is not a number")
+    lo, hi = window
+    if not (lo <= bpm <= hi):
+        _ingest_refuse(
+            f"bpm {bpm:g} is outside the '{genre_folder}' window {lo}-{hi} BPM"
+        )
+
+    # --- Key ---
+    try:
+        camelot_key = keyscale_to_camelot(keyscale)
+    except ValueError as exc:
+        _ingest_refuse(str(exc))
+
+    # --- Identity, mirroring --build-catalog's conventions ---
+    # build_catalog derives display_name FROM the filename stem and marks
+    # a second take by the trailing " (1)"; ingest runs that backwards so
+    # a later --build-catalog scan re-derives this very entry instead of
+    # inventing a duplicate.
+    is_variant = bool(variant_of)
+    illegal = sorted({c for c in display_name if c in '<>:"/\\|?*'})
+    if illegal or not display_name.strip():
+        _ingest_refuse(
+            f"display name {display_name!r} cannot be a filename "
+            f"(illegal characters: {' '.join(illegal) or 'none, but it is blank'}). "
+            f"The catalog stores display_name as the file's stem, so it must be "
+            f"filesystem-safe."
+        )
+    stem = f"{display_name} (1)" if is_variant else display_name
+    dest_path = os.path.join(dest_dir, f"{stem}.wav")
+    rel_path = os.path.relpath(dest_path).replace("\\", "/")
+    track_id = _make_track_id(genre_folder, display_name, is_variant)
+
+    # --- Catalog state ---
+    catalog = {"tracks": []}
+    if os.path.exists(CATALOG_PATH):
+        with open(CATALOG_PATH, encoding="utf-8") as f:
+            catalog = json.load(f)
+    entries = catalog.get("tracks", [])
+
+    if variant_of:
+        # track_identity.piece_keys rebuilds the BASE take's id as
+        # `<genre>--<slug(variant_of)>`, so variant_of has to hold the
+        # base take's display_name (that is what --build-catalog stores).
+        # An id is accepted at the flag and resolved here; a dangling
+        # value would silently unlink the two takes for the no-repeat
+        # machinery, so it is refused instead.
+        by_id = {e.get("id"): e for e in entries}
+        names = {e.get("display_name") for e in entries}
+        if variant_of in by_id:
+            variant_of = by_id[variant_of].get("display_name")
+        elif variant_of not in names:
+            _ingest_refuse(
+                f"--variant-of '{variant_of}' matches no catalog id or display_name. "
+                f"It must name the base take, or the two takes never link as one piece."
+            )
+
+    if any(e.get("id") == track_id for e in entries):
+        clash = next(e for e in entries if e.get("id") == track_id)
+        _ingest_refuse(
+            f"track id '{track_id}' already exists in the catalog "
+            f"(file: {clash.get('file')}). --build-catalog has no id-collision "
+            f"convention to mirror — its only de-duplication renames display_name "
+            f"via an LLM pass. Rename with --display-name, or pass --variant-of "
+            f"if this is a second take."
+        )
+    if os.path.exists(dest_path):
+        _ingest_refuse(f"a file already exists at {rel_path} — refusing to overwrite it")
+
+    entry = {
+        "id": track_id,
+        "display_name": display_name,
+        "file": rel_path,
+        "genre_folder": genre_folder,
+        "genre": genre_folder,
+        "camelot_key": camelot_key,
+        "bpm": bpm,
+        "variant_of": variant_of if is_variant else None,
+    }
+    lrc_path = os.path.splitext(dest_path)[0] + ".lrc" if lyrics_text else None
+    backup_path = _catalog_backup_path(CATALOG_PATH) if os.path.exists(CATALOG_PATH) else None
+
+    # --- Plan ---
+    source_desc = f"{samplerate} Hz / {subtype} / {channels}ch / {duration:.1f}s"
+    audio_plan = (
+        "already conformant — copying bit-exact" if conformant else
+        f"resampling to {INGEST_SAMPLE_RATE} Hz / 16-bit / {INGEST_CHANNELS}ch via ffmpeg"
+    )
+    print(f"  Source:    {audio_path}  ({source_desc})")
+    print(f"  Audio:     {audio_plan}")
+    print(f"  WAV:       {rel_path}")
+    if lrc_path:
+        print(f"  Lyrics:    {os.path.relpath(lrc_path).replace(os.sep, '/')}")
+    print(f"  BPM:       {bpm:g}  (inside the '{genre_folder}' window {lo}-{hi})")
+    print(f"  Key:       {keyscale} → {camelot_key}")
+    print(f"  Backup:    {backup_path or '(no catalog yet — nothing to back up)'}")
+    print("  Entry:")
+    for line in json.dumps(entry, indent=2, ensure_ascii=False).splitlines():
+        print(f"    {line}")
+
+    if dry_run:
+        print("\n--dry-run: nothing written.")
+        return entry
+
+    # --- Writes ---
+    os.makedirs(dest_dir, exist_ok=True)
+    _ingest_write_wav(audio_path, dest_path, conformant)
+    if lrc_path:
+        with open(lrc_path, "w", encoding="utf-8") as f:
+            f.write(lyrics_text)
+
+    if backup_path:
+        shutil.copy2(CATALOG_PATH, backup_path)
+        print(f"\nCatalog backed up → {backup_path}")
+    entries.append(entry)
+    catalog["tracks"] = entries
+    os.makedirs(os.path.dirname(CATALOG_PATH) or ".", exist_ok=True)
+    with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(catalog, f, indent=2, ensure_ascii=False)
+    print(f"Ingested '{display_name}' as {track_id} → {CATALOG_PATH} ({len(entries)} entries)")
+    print("Run --fix-incomplete to backfill duration, beatgrid and the MP3 sibling.")
+    return entry
 
 
 # === Smart session generation ===
@@ -4188,6 +4516,31 @@ def _parse_args():
     parser.add_argument("--force", action="store_true",
                         help="Re-analyse every entry even if it already has the current schema "
                              "(combine with --regenerate-beatgrid)")
+    parser.add_argument("--ingest", default=None, metavar="WAV",
+                        help="Add ONE already-analysed track to the catalog (e.g. an ACE-Step "
+                             "render): needs --genre and --display-name, plus BPM and key from "
+                             "either --bpm/--keyscale or --sidecar. No madmom, no detection — "
+                             "run --fix-incomplete afterwards to backfill beatgrid and duration")
+    parser.add_argument("--display-name", default=None,
+                        help="Track title for --ingest. Also becomes the WAV's filename stem, "
+                             "the way --build-catalog derives one from the other")
+    parser.add_argument("--bpm", type=float, default=None,
+                        help="BPM for --ingest, from the generator's metas (must sit inside the "
+                             "genre's BPM_GENRE_RANGES window)")
+    parser.add_argument("--keyscale", default=None,
+                        help="Musical key for --ingest in ACE-Step's metas.keyscale form "
+                             "(e.g. 'A Minor', 'C# Major', 'Ab minor') — converted to Camelot")
+    parser.add_argument("--sidecar", default=None, metavar="META_JSON",
+                        help="JSON file with {bpm, keyscale, display_name, variant_of?, lyrics?} "
+                             "for --ingest. Flags win over the sidecar on conflict")
+    parser.add_argument("--variant-of", default=None, metavar="ID_OR_NAME",
+                        help="Mark an --ingest track as a second take of an existing catalog "
+                             "entry (its id or display_name); the new id gets the -v2 suffix")
+    parser.add_argument("--lyrics", default=None, metavar="FILE",
+                        help="Text file whose contents land as a .lrc sidecar next to the "
+                             "ingested WAV (inert today; for a future live overlay)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print what --ingest would do and write nothing")
     parser.add_argument("--name", default=None,
                         help="Session name (used as output folder name)")
     parser.add_argument("--genre", default=None,
@@ -4217,6 +4570,24 @@ def main():
     # --fix-incomplete: re-analyse entries with missing BPM or key and exit
     if args.fix_incomplete:
         fix_incomplete_catalog()
+        return
+
+    # --ingest: append one externally analysed track to the catalog and exit
+    if args.ingest:
+        if not args.genre:
+            print("Error: --genre required with --ingest (the tracks/ subfolder to land in).")
+            sys.exit(1)
+        ingest_track(
+            args.ingest,
+            args.genre,
+            display_name=args.display_name,
+            bpm=args.bpm,
+            keyscale=args.keyscale,
+            sidecar=args.sidecar,
+            variant_of=args.variant_of,
+            lyrics=args.lyrics,
+            dry_run=args.dry_run,
+        )
         return
 
     # --redetect-bpm: force BPM re-detection for all (or one genre's) entries and exit
