@@ -729,6 +729,21 @@ def _is_under_a_root(path: str) -> bool:
     )
 
 
+def _outside_the_root() -> AceAudioPathError:
+    """The one sentence for "that absolute path is not a take of ours".
+
+    Shared by the two shapes that name an absolute location (``api``'s
+    decoded inner path and a bare ``absolute``) so the wording — and the
+    ``ACESTEP_AUDIO_ROOT`` hint the operator actually needs — cannot
+    drift between them.
+    """
+    return AceAudioPathError(
+        f"path must be an ACE-Step result file under "
+        f"{' or '.join(ace_audio_roots())} (set {ENV_AUDIO_ROOT} if the "
+        f"generator writes elsewhere)"
+    )
+
+
 def _inner_path_of(api_path: str) -> str | None:
     """The ``?path=`` parameter of an ACE API path, decoded exactly once.
 
@@ -748,26 +763,34 @@ def _inner_path_of(api_path: str) -> str | None:
 def validate_ace_audio_path(value: str, *, resolve_file: bool = False) -> AceAudioPath:
     """Validate one take-audio location. **The single source of truth.**
 
-    Three shapes are accepted, and they are not equally trusted:
+    Three shapes are accepted, and every ABSOLUTE path any of them names
+    is held to the SAME root check on EVERY route, proxy included:
 
     ``api`` — ``/v1/audio?path=<encoded>``, a take's ``file`` field
-        verbatim. This names an ACE *endpoint*, so the inner filesystem
-        path stays opaque when merely proxying: ACE's own validator is
-        the authority on what it will serve, and Apollo only screens for
-        hosts and traversal.
+        verbatim. It names an ACE *endpoint* and ACE's own validator is
+        still the far-side authority on what it will serve — but the
+        decoded inner path is screened against :func:`ace_audio_roots`
+        here too. Defence in depth: Apollo does not FORWARD a location
+        it would refuse to PUBLISH, and one rule for one value is one
+        fewer thing for the two call sites to disagree about. (The proxy
+        used to leave this opaque; that asymmetry was the bug.)
     ``absolute`` — a bare ``/home/.../api_audio/<uuid>_0.wav``, the
         decoded path the wizard persists per the plan's persistence rule.
         This names a FILESYSTEM LOCATION, so it must sit under
-        :func:`ace_audio_roots`.
-    ``relative`` — ``api_audio/x.wav``. Forwarded to ACE (which resolves
-        it against its own root) but never enough for a publish.
+        :func:`ace_audio_roots`. It still streams: the proxy re-encodes
+        it into the endpoint form exactly as publish resolves it.
+    ``relative`` — ``api_audio/x.wav``. The root check CANNOT apply to
+        this shape — ACE resolves it against a root only ACE knows, so
+        there is no absolute path here to prefix-match, and inventing
+        one would mean guessing at the far side's layout. It is
+        forwarded (ACE resolves and screens it) but is never enough for
+        a publish, which needs a concrete file to download.
 
     ``resolve_file=True`` is the publisher's mode: it needs a concrete
     file to download and write into the catalog, so it unwraps the
-    ``api`` shape, refuses ``relative``, and root-checks whatever it
-    ends up with. Downloading is the moment the value stops being
-    someone else's problem, which is why the strict check lives there
-    and not on the read-only proxy.
+    ``api`` shape and refuses ``relative``. What separates the two modes
+    is now only what each DOES with the value — not how hard it looked
+    at it.
 
     Raises :class:`AceAudioPathError` naming what was wrong.
     """
@@ -788,6 +811,11 @@ def validate_ace_audio_path(value: str, *, resolve_file: bool = False) -> AceAud
         inner = _inner_path_of(raw)
         if inner is not None and ".." in inner.split("/"):
             raise AceAudioPathError("path must not traverse directories")
+        # An ABSOLUTE inner path names a file on the ACE box, so it gets
+        # publish's root check even when we are only proxying. A missing
+        # or relative one is ACE's to resolve (see the docstring).
+        if inner and inner.startswith("/") and not _is_under_a_root(inner):
+            raise _outside_the_root()
         resolved = AceAudioPath(
             shape="api",
             api_path=raw,
@@ -797,11 +825,7 @@ def validate_ace_audio_path(value: str, *, resolve_file: bool = False) -> AceAud
         # Already decoded by contract — do NOT unquote again, a literal
         # '%' in a filename would be silently mangled.
         if not _is_under_a_root(raw):
-            raise AceAudioPathError(
-                f"path must be an ACE-Step result file under "
-                f"{' or '.join(ace_audio_roots())} (set {ENV_AUDIO_ROOT} if the "
-                f"generator writes elsewhere)"
-            )
+            raise _outside_the_root()
         resolved = AceAudioPath(
             shape="absolute",
             api_path=f"{ACE_AUDIO_ENDPOINT}?path={quote(raw, safe='')}",
@@ -820,6 +844,10 @@ def validate_ace_audio_path(value: str, *, resolve_file: bool = False) -> AceAud
             "when the take arrived — ACE's job records expire, its result files "
             "do not"
         )
+    # Backstop, not the gate: every shape that sets ``file_path`` was
+    # root-checked above. Kept because this is the last line before a
+    # download, and a fourth shape added later must not slip past — the
+    # same defence-in-depth argument that closed the proxy's asymmetry.
     if not _is_under_a_root(resolved.file_path):
         raise AceAudioPathError(
             f"file '{resolved.file_path}' is not under "
@@ -1029,9 +1057,11 @@ async def proxy_take_audio(
 
     The browser never talks to :8001: auth (header or ``?token=``, since
     ``<audio>`` cannot set headers) and LAN isolation live here.
-    ``path`` is the take's ``file`` field, forwarded opaque to
-    ``AceStepClient.audio_url``; :func:`_validate_proxy_path` refuses
-    anything carrying a host or naming a local file.
+    ``path`` is the take's ``file`` field, forwarded UNREWRITTEN to
+    ``AceStepClient.audio_url`` — but not unexamined:
+    :func:`_validate_proxy_path` refuses anything carrying a host,
+    naming a local file, or pointing outside ``ACESTEP_AUDIO_ROOT``,
+    the same rule publish applies (400 here, 422 there).
 
     Range-friendly the cheap way: the client's ``Range`` header is
     forwarded and upstream's status (206) plus its range headers are

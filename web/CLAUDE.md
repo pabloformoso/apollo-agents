@@ -64,27 +64,38 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   feature-detects.
 - **`GET /api/generator/audio` is a streaming proxy, not a redirect** —
   the browser never talks to :8001 (auth + LAN isolation live here).
-  `path` is the take's `file`, forwarded opaque to
-  `AceStepClient.stream_audio`; a value carrying a host or naming a
-  local file is a 400. `Range` is forwarded and upstream's 206 +
+  `path` is the take's `file`, forwarded UNREWRITTEN to
+  `AceStepClient.stream_audio` but not unexamined: an absolute decoded
+  path must sit under `ACESTEP_AUDIO_ROOT` (same rule as publish — see
+  the validator bullet below), and a value carrying a host, a drive or
+  traversal is a 400. `Range` is forwarded and upstream's 206 +
   range headers are mirrored, so `<audio>` seeking works as it does on
   `FileResponse` without buffering a 35 MB WAV. Auth accepts a bearer
   header OR `?token=`, the same escape hatch as `stream_track`.
 - **One validator decides what "a take's audio" is** (G2b):
   `validate_ace_audio_path` — the proxy and the publisher both call it,
   so flipping the accepted location is a constant, not a refactor. Three
-  shapes, deliberately unequal in trust: `/v1/audio?path=<encoded>` is an
-  ACE *endpoint*, so proxying it leaves the inner path opaque (ACE's own
-  validator is the authority, and Apollo only screens for hosts and
-  traversal); a bare absolute path and everything **publish** resolves
-  name a FILESYSTEM location and must sit under `ACESTEP_AUDIO_ROOT`
-  (default `/home/pablo/code/ACE-Step-1.5/.cache/acestep/tmp/api_audio`,
-  comma-separated for several, read at CALL time). Confirmed with the ACE
-  session 2026-08-29: the encoding is `quote(p, safe="")`, so slashes
-  arrive as `%2F` and there are **no literal `/` in the query param** —
-  decode once, then prefix-match. Decoding uses `unquote`, never
-  `parse_qs`, which would turn a `+` in a filename into a space. A
-  relative path still streams (ACE resolves it) but can never publish.
+  shapes, and every ABSOLUTE path any of them names is root-checked on
+  EVERY route: a bare absolute path, the decoded inner path of
+  `/v1/audio?path=<encoded>`, and everything **publish** resolves must
+  all sit under `ACESTEP_AUDIO_ROOT` (default
+  `/home/pablo/code/ACE-Step-1.5/.cache/acestep/tmp/api_audio`,
+  comma-separated for several, read at CALL time). The endpoint shape
+  named an ACE *endpoint*, so the proxy used to forward its inner path
+  unchecked (hosts and traversal only) and let ACE's validator decide —
+  which made the read-only route the soft way in and let the two call
+  sites disagree about one value. ACE is still the far-side authority;
+  Apollo just does not forward a location it would refuse to publish.
+  **Only the status differs now: the proxy answers 400, publish/edit
+  422.** Confirmed with the ACE session 2026-08-29: the encoding is
+  `quote(p, safe="")`, so slashes arrive as `%2F` and there are **no
+  literal `/` in the query param** — decode once, then prefix-match.
+  Decoding uses `unquote`, never `parse_qs`, which would turn a `+` in a
+  filename into a space. A **relative** path is the one shape the root
+  check cannot reach — ACE resolves it against a root only ACE knows, so
+  there is no absolute path to prefix-match and guessing one would mean
+  inventing the far side's layout; it still streams and can still never
+  publish.
 - **`POST /api/generator/publish` (G2b) runs the CLI's ingest, not a
   copy.** It downloads the take through `stream_audio` and calls
   `main.ingest_track` — the same function `python main.py --ingest`

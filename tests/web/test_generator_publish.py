@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import wave
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -38,6 +39,11 @@ from web.backend.ws_manager import ws_manager
 #: path on their box, under the tmp api_audio root, ``<uuid>_<take>.wav``.
 ACE_ROOT = generator.DEFAULT_AUDIO_ROOTS[0]
 ACE_FILE = f"{ACE_ROOT}/6f1c2b7e-9d4a-4c11-b0a3-2e5f8d7c1a90_0.wav"
+
+#: The same file in ACE's own wire form — ``quote(p, safe="")``, so every
+#: slash arrives as ``%2F``. The inner path is root-checked on EVERY
+#: route now, so this is the only endpoint shape either mode accepts.
+ACE_ENDPOINT_FILE = f"/v1/audio?path={quote(ACE_FILE, safe='')}"
 
 #: Over the 120 s session-eligibility floor.
 LONG_SEC = 121
@@ -580,7 +586,7 @@ def test_publish_502_when_ace_errors(auth_client, ace_on, monkeypatch, tmp_catal
 @pytest.mark.parametrize("shape", [
     ACE_FILE,                                          # the real shape
     f"{ACE_ROOT}/take with spaces_1.wav",              # spaces survive
-    f"/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav",        # G1's endpoint shape
+    ACE_ENDPOINT_FILE,                                 # G1's endpoint shape
     "api_audio/x.wav",                                 # relative, ACE resolves it
 ])
 def test_proxy_accepts_every_documented_shape(shape):
@@ -619,19 +625,32 @@ def test_publish_refuses_an_absolute_path_outside_the_root():
     assert generator.ENV_AUDIO_ROOT in str(exc.value)
 
 
-def test_the_two_modes_disagree_about_an_endpoint_path_out_of_root():
-    """The asymmetry is the design, so pin it.
+def test_the_two_modes_agree_about_an_endpoint_path():
+    """The asymmetry is GONE — one rule for one value, so pin that.
 
-    ``/v1/audio?path=<anything>`` names an ACE ENDPOINT: proxying it
-    leaves the inner path to ACE's own validator, which is the authority
-    on what it will serve. Publishing DOWNLOADS that path and writes it
-    into the catalog, so the same value has to clear the root check.
+    ``/v1/audio?path=<encoded>`` still names an ACE ENDPOINT, and ACE's
+    own validator is still the far-side authority on what it will serve.
+    But Apollo will not FORWARD a location it would refuse to PUBLISH:
+    the decoded inner path clears the root check on both routes or on
+    neither, so the proxy can no longer be the soft way in.
     """
-    endpoint = "/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav"
+    in_root = ACE_ENDPOINT_FILE
+    out_of_root = "/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav"
 
-    assert generator.validate_ace_audio_path(endpoint).api_path == endpoint
-    with pytest.raises(generator.AceAudioPathError):
-        generator.validate_ace_audio_path(endpoint, resolve_file=True)
+    # Under the root: both modes accept, and both resolve the same file.
+    assert generator.validate_ace_audio_path(in_root).api_path == in_root
+    assert generator.validate_ace_audio_path(in_root).file_path == ACE_FILE
+    assert (
+        generator.validate_ace_audio_path(in_root, resolve_file=True).file_path
+        == ACE_FILE
+    )
+
+    # Outside it: both modes refuse, and both name the env override the
+    # operator needs (only the HTTP status differs — 400 vs 422).
+    for resolve_file in (False, True):
+        with pytest.raises(generator.AceAudioPathError) as exc:
+            generator.validate_ace_audio_path(out_of_root, resolve_file=resolve_file)
+        assert generator.ENV_AUDIO_ROOT in str(exc.value)
 
 
 @pytest.mark.parametrize("bad", [
@@ -715,3 +734,20 @@ def test_publish_422_names_the_root_on_a_bad_file(
     assert r.status_code == 422
     assert ACE_ROOT in r.json()["detail"]
     assert calls == []
+
+
+def test_publish_422_on_an_endpoint_path_out_of_root(
+    auth_client, ace_on, monkeypatch, tmp_catalog
+):
+    """Wrapping the same out-of-root path in ACE's endpoint form is no
+    way around the root check — the wire twin of the proxy's 400."""
+    calls = _install_ace(monkeypatch)
+
+    r = auth_client.post(
+        "/api/generator/publish",
+        json=_body(file="/v1/audio?path=%2Ftmp%2Fout%2Ftake0.wav"),
+    )
+
+    assert r.status_code == 422
+    assert ACE_ROOT in r.json()["detail"]
+    assert calls == []  # nothing downloaded, nothing written
