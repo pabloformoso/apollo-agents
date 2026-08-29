@@ -46,10 +46,17 @@ SAME polling endpoint — an edit is just another task whose source
 happens to be an earlier take. Like publish it carries no ``task_id``:
 the page supplies the source take's decoded path.
 
-``GET /api/generator/audio``, ``POST /api/generator/publish`` and
-``POST /api/generator/edit`` share one path validator
-(:func:`validate_ace_audio_path`) so "what counts as a take's audio" has
-a single definition.
+``POST /api/generator/critique`` (G4) scores one take. An LLM cannot
+hear, so the SCORE comes from machinery that can — ``bench_wav``, the
+project's own definition-of-done gate — and the LLM only adds the read.
+Both halves degrade: a genre with no committed references answers
+``passed: null`` with a note, and any LLM trouble answers
+``critique: null``. Scoring never gates publishing.
+
+``GET /api/generator/audio``, ``POST /api/generator/publish``,
+``POST /api/generator/edit`` and ``POST /api/generator/critique`` share
+one path validator (:func:`validate_ace_audio_path`) so "what counts as
+a take's audio" has a single definition.
 """
 from __future__ import annotations
 
@@ -68,6 +75,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import acestep_client, auth
+from .brief_parser import detect_provider
 from .ws_manager import ws_manager
 
 
@@ -1343,4 +1351,518 @@ async def edit_take(
         "task_id": released.task_id,
         "queue_position": released.queue_position,
         "eta_seconds": _eta_seconds(stats, released.queue_position),
+    }
+
+
+# ── POST /api/generator/critique (G4) ────────────────────────────────
+#
+# Two layers, one endpoint, and they fail independently:
+#
+#   1. the SCORE — ``agent.generative.bench.bench_wav``, the same
+#      function the generative engine's merge gate runs. An LLM cannot
+#      hear; this can. Without it there is no number worth printing.
+#   2. the READ — one LLM completion over those numbers plus what the
+#      user asked for. Nice to have, never load-bearing: any trouble at
+#      all (no provider, unreachable box, timeout, empty reply) answers
+#      ``critique: null``.
+#
+# Neither layer gates publishing. The bench's own philosophy is
+# automated evidence + human decision, and a take the bench dislikes is
+# still the operator's to keep.
+
+
+#: Hard bound on the LLM read. The gateway is the same tunnelled LiteLLM
+#: / LM Studio node the live DJ speaks to, and the wizard is waiting on
+#: this request, so the read gets a fraction of ``brief_parser``'s 45 s:
+#: the score is already worth showing without it, and a paragraph that
+#: costs the operator half a minute is not worth waiting for. Enforced
+#: with ``asyncio.wait_for`` on top of the SDK's own timeout — the SDK's
+#: is the polite bound, this one is the real one. A worker thread that
+#: outlives the deadline is simply abandoned.
+CRITIQUE_TIMEOUT_SEC = 15.0
+
+#: Completion budget. The answer is ~80 words, but assume a reasoner: it
+#: spends its budget thinking before the first content token, which is
+#: exactly how a 512 ceiling once truncated ``brief_parser`` into
+#: silence. Headroom costs a non-reasoning model nothing.
+CRITIQUE_MAX_TOKENS = 2048
+
+#: Paragraph ceiling. A model that ignores "one paragraph" must not be
+#: able to push a wall of text into the wizard's take row.
+CRITIQUE_MAX_CHARS = 1200
+
+#: Provider defaults, mirroring the house wiring. The model itself is
+#: ``GENERATIVE_MODEL`` > ``AGENT_MODEL`` > these (the #123 precedent,
+#: shared with ``agent/generative/strudel_mind.py``): the critic is a
+#: generative-lane job and must be free to run on a different model from
+#: the live DJ, which is tuned for tool calls rather than prose.
+CRITIQUE_DEFAULT_MODELS = {
+    "anthropic": "claude-opus-4-6",
+    "ollama": "gemma4:4b",
+    "litellm": "qwen3.6-27b",
+}
+
+#: Override for the reference band file. Unset (the normal case) means
+#: the bench's own committed ``quality_references.json`` — the same
+#: numbers ``scripts/quality_bench.py`` gates the generative engine on,
+#: which is the whole point of scoring against them. Read at CALL time,
+#: never captured as a default argument: ``--reload`` plus a late
+#: ``.env`` is the house rule, and it is also what lets a test point the
+#: endpoint at bands it built around a synthetic take.
+ENV_BENCH_REFERENCES = "APOLLO_BENCH_REFERENCES"
+
+CRITIQUE_SYSTEM = (
+    "You are the critic of an automated DJ catalog. You are given "
+    "measurements of ONE generated take and the request it came from. "
+    "You cannot hear the audio: the numbers are your ears, and they were "
+    "produced by the same quality bench the project gates its own "
+    "generative engine on.\n"
+    "Answer with ONE short paragraph of plain prose (80 words at most, no "
+    "markdown, no lists, no headings, no preamble): does this take match "
+    "what was asked for, and what is the one thing you would change in the "
+    "next attempt. Be concrete about the numbers you were given. If they "
+    "sit inside their bands, say so plainly instead of inventing a fault. "
+    "Never claim to have listened."
+)
+
+
+class CritiqueMetas(BaseModel):
+    """ACE's ``metas`` for the take being scored.
+
+    ``extra="ignore"``, like :class:`PublishMetas` — the block's shape
+    belongs to ACE and an upgrade that adds a field must not start
+    422-ing a read-only request.
+
+    Every field is OPTIONAL here, unlike publish. Publishing refuses to
+    guess a bpm or a key because the catalog would carry the guess
+    forever; scoring writes nothing, and a take whose metas failed to
+    parse is exactly the take an operator most wants a second opinion
+    on. What is absent is simply absent from the LLM's brief.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    bpm: float | None = Field(None, ge=MIN_BPM, le=MAX_BPM)
+    keyscale: str | None = Field(None, max_length=64)
+    duration: float | None = Field(None, gt=0)
+
+
+class CritiqueRequest(BaseModel):
+    """Score one take against its genre's references (plan: G4).
+
+    ``extra="forbid"`` and no ``task_id``, for the reasons
+    :class:`PublishRequest` documents: the page persists the take's
+    decoded path and hands it back, because ACE's job records are mortal
+    and its result files are not.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The take's URL-DECODED ACE path, as persisted by the page. It
+    #: names a file this handler downloads, so it is root-checked.
+    file: str = Field(..., min_length=1, max_length=4096)
+    metas: CritiqueMetas = Field(default_factory=CritiqueMetas)
+    #: What the take was asked to be — the half of "does this match?"
+    #: the bench knows nothing about.
+    prompt: str | None = Field(None, max_length=4000)
+    #: Picks the reference band set. NOT run through
+    #: :func:`_resolve_genre`: this endpoint writes nothing, the value
+    #: only chooses which numbers to compare against, and the bench's own
+    #: refusal ("no references for genre 'techno' (has: ambient, deep,
+    #: lofi)") tells the operator more than "unknown genre_folder" would.
+    genre_folder: str = Field(..., min_length=1, max_length=120)
+
+
+def _reference_genre(genre_folder: str, genre_folders: dict[str, str]) -> str:
+    """Map a catalog ``genre_folder`` to a bench reference key.
+
+    The bench's references are keyed by GENRE (``lofi``, ``ambient``,
+    ``deep``) while the wizard speaks in FOLDERS (``lofi - ambient``,
+    ``deep house``), and ``bench.GENRE_FOLDERS`` is the map between them
+    — one folder can back several genres, which is why this needs a rule
+    rather than a lookup.
+
+    The rule: a genre matching the folder's leading text wins
+    (``lofi - ambient`` scores as ``lofi``, the folder's primary genre),
+    otherwise the first candidate in sorted order, so the answer is
+    deterministic. A folder no genre claims passes through UNCHANGED —
+    that hands the raw name to ``bench_wav``, whose refusal then names
+    both the genre and the ones that do have references, which is the
+    message the wizard shows.
+    """
+    key = (genre_folder or "").strip().lower()
+    candidates = sorted(
+        genre for genre, folder in genre_folders.items()
+        if folder.strip().lower() == key
+    )
+    if not candidates:
+        return key
+    for candidate in candidates:
+        if key.startswith(candidate):
+            return candidate
+    return candidates[0]
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _band(lo: Any, hi: Any, *, pad_lo, pad_hi, digits: int) -> dict | None:
+    """One metric's band: what fails, plus the raw reference range."""
+    if not (_is_number(lo) and _is_number(hi)):
+        return None
+    return {
+        "min": round(pad_lo(lo), digits),
+        "max": round(pad_hi(hi), digits),
+        "reference_min": round(float(lo), digits),
+        "reference_max": round(float(hi), digits),
+    }
+
+
+def _reference_bands(
+    genre_ref: dict, *, centroid_ratio: float, tilt_delta: float
+) -> dict | None:
+    """The bands the wizard draws its chips against.
+
+    ``min``/``max`` are the EFFECTIVE band — the reference range widened
+    by the bench's own margins — because that is the band that decides
+    ``passed``, and a chip reading "out of band" for a value the bench
+    passed would be contradicting the verdict next to it. The raw catalog
+    range travels alongside as ``reference_min``/``reference_max``, so a
+    value that clears the margin but sits far from real records still
+    reads as far.
+
+    ``advisory_lufs`` gets no margin: nothing advisory can fail, so its
+    band IS the reference range. Keeping it in the same shape as the
+    other two is what lets the frontend fold every chip with one rule.
+    """
+    if not genre_ref:
+        return None
+    centroid = genre_ref.get("centroid_hz") or {}
+    tilt = genre_ref.get("tilt_db_per_oct") or {}
+    lufs = genre_ref.get("advisory_lufs") or {}
+    bands = {
+        "centroid_hz": _band(
+            centroid.get("min"), centroid.get("max"),
+            pad_lo=lambda v: v / centroid_ratio,
+            pad_hi=lambda v: v * centroid_ratio,
+            digits=1,
+        ),
+        "tilt_db_per_oct": _band(
+            tilt.get("min"), tilt.get("max"),
+            pad_lo=lambda v: v - tilt_delta,
+            pad_hi=lambda v: v + tilt_delta,
+            digits=2,
+        ),
+        "advisory_lufs": _band(
+            lufs.get("min"), lufs.get("max"),
+            pad_lo=float, pad_hi=float, digits=1,
+        ),
+    }
+    return {k: v for k, v in bands.items() if v is not None} or None
+
+
+def _no_verdict(genre: str, note: str) -> dict:
+    """The answer when the bench cannot put a number on this take.
+
+    A 200, never an error. Every refusal ``bench_wav`` raises lands here
+    — no references for the genre, an unreadable download, a broken
+    references file — because this endpoint is advisory by construction:
+    the wizard asked for a second opinion, and "there isn't one, here is
+    why" is a complete answer, while a 5xx would read as a fault the
+    operator has to fix before publishing (which it never is). The note
+    is the bench's OWN message, so the wording has one source.
+    """
+    return {
+        "passed": None,
+        "reference_genre": genre,
+        "reference_informed": None,
+        "advisory": None,
+        "bands": None,
+        "failures": [],
+        "critique": None,
+        "note": note,
+    }
+
+
+def _critique_brief(req: CritiqueRequest, report: dict, bands: dict | None) -> str:
+    """The user half of the LLM read: numbers, bands, and what was asked.
+
+    Pure and text-only, so what the model sees is exactly what a test can
+    assert on. Never includes a file path — the model has no use for one
+    and it is the one field here that names the box's filesystem.
+    """
+    audio = report.get("audio") or {}
+    ri = audio.get("reference_informed") or {}
+    adv = audio.get("advisory") or {}
+    metas = req.metas
+
+    def _band_text(key: str) -> str:
+        band = (bands or {}).get(key) or {}
+        if not band:
+            return "no band"
+        return f"band {band['min']}–{band['max']}"
+
+    reported = ", ".join(
+        part for part in (
+            f"{metas.bpm:g} BPM" if metas.bpm is not None else "",
+            f"key {metas.keyscale.strip()}" if (metas.keyscale or "").strip() else "",
+            f"{metas.duration:.0f}s" if metas.duration is not None else "",
+        ) if part
+    )
+    lines = [
+        f"Asked for: {(req.prompt or '').strip() or '(no prompt recorded)'}",
+        f"Genre folder: {req.genre_folder} "
+        f"(scored against '{report.get('genre')}' references)",
+        f"Reported metadata: {reported or 'none reported'}",
+        "",
+        "Measured (reference-informed — these decide the verdict):",
+        f"- spectral centroid {ri.get('centroid_hz')} Hz ({_band_text('centroid_hz')})",
+        f"- spectral tilt {ri.get('tilt_db_per_oct')} dB/oct "
+        f"({_band_text('tilt_db_per_oct')})",
+        "",
+        "Measured (advisory — reported, never a failure):",
+        f"- {adv.get('lufs')} LUFS, LRA {adv.get('lra')}, "
+        f"crest {adv.get('crest_db')} dB",
+        "",
+        "Bench verdict: " + (
+            "PASS" if report.get("passed")
+            else "FAIL — " + "; ".join(report.get("reference_informed_failures") or [])
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _resolve_critique_model(provider: str) -> str:
+    """``GENERATIVE_MODEL`` > ``AGENT_MODEL`` > the provider's default."""
+    fallback = (
+        os.getenv("AZURE_OPENAI_DEPLOYMENT", "") if provider == "azure"
+        else CRITIQUE_DEFAULT_MODELS.get(provider, "")
+    )
+    return os.getenv("GENERATIVE_MODEL") or os.getenv("AGENT_MODEL") or fallback
+
+
+def _llm_paragraph(system: str, user: str, provider: str) -> str:
+    """ONE completion against whichever provider the env has wired.
+
+    Blocking on purpose — called through ``asyncio.to_thread`` under a
+    hard ``wait_for``, the way ``brief_parser.parse`` is. It deliberately
+    does NOT reuse ``brief_parser``'s client builder: that one carries a
+    45 s timeout and the ``BRIEF_MODEL`` precedence, both right for
+    parsing a brief and wrong for a paragraph the wizard is waiting on.
+    What IS shared is the provider detection, so there is one answer to
+    "which LLM is this box wired to".
+
+    This is the single seam the tests replace; everything above it stays
+    honest about degradation.
+    """
+    model = _resolve_critique_model(provider)
+    if not model:
+        raise RuntimeError(f"no model configured for provider {provider!r}")
+
+    if provider == "anthropic":
+        from anthropic import Anthropic  # noqa: PLC0415 — heavy, optional SDK
+
+        anthropic_client = Anthropic(timeout=CRITIQUE_TIMEOUT_SEC)
+        message = anthropic_client.messages.create(
+            model=model,
+            max_tokens=CRITIQUE_MAX_TOKENS,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return "".join(b.text for b in message.content if hasattr(b, "text"))
+
+    if provider == "azure":
+        from openai import AzureOpenAI  # noqa: PLC0415
+
+        client: Any = AzureOpenAI(
+            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+            timeout=CRITIQUE_TIMEOUT_SEC,
+        )
+    else:
+        from openai import OpenAI  # noqa: PLC0415
+
+        if provider == "litellm":
+            base_url = os.environ["LITELLM_BASE_URL"]
+            api_key = os.getenv("LITELLM_API_KEY", "sk-litellm")
+        else:
+            # The generic OpenAI-compatible path: LM Studio over the
+            # tunnel is what this actually is, not Ollama specifically.
+            base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+            api_key = "ollama"
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=CRITIQUE_TIMEOUT_SEC)
+
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        max_tokens=CRITIQUE_MAX_TOKENS,
+        temperature=0.2,
+    )
+    return resp.choices[0].message.content or ""
+
+
+def _clean_paragraph(text: str | None) -> str | None:
+    """One line of prose, or ``None`` if there is nothing usable left.
+
+    Reasoning models leak ``<think>`` blocks into the content and small
+    ones fence prose as if it were code, so both are stripped before the
+    whitespace is collapsed. An empty result is treated exactly like a
+    failed call: the take renders its numbers without a read.
+    """
+    if not text:
+        return None
+    body = text
+    if "</think>" in body:
+        body = body.rsplit("</think>", 1)[1]
+    body = " ".join(body.replace("```", " ").split()).strip()
+    if not body:
+        return None
+    return body[:CRITIQUE_MAX_CHARS].strip()
+
+
+async def _critique_paragraph(
+    req: CritiqueRequest, report: dict, bands: dict | None
+) -> str | None:
+    """The optional LLM read. **Never raises, never retries.**
+
+    Degradation is the contract, not a safety net: no provider wired,
+    ``AGENT_PROVIDER=mock``, a box that does not answer, a reply that is
+    all thinking and no prose — every one of them is ``None``, and the
+    wizard shows the bench numbers alone. A retry would double the wait
+    the operator is already sitting through, for the least important
+    thing on the panel.
+    """
+    provider = detect_provider()
+    if provider == "mock":
+        # The E2E and unit suites set this precisely so nothing reaches a
+        # network. Short-circuit BEFORE any SDK import.
+        return None
+
+    brief = _critique_brief(req, report, bands)
+    try:
+        raw = await asyncio.wait_for(
+            asyncio.to_thread(_llm_paragraph, CRITIQUE_SYSTEM, brief, provider),
+            timeout=CRITIQUE_TIMEOUT_SEC,
+        )
+    except (asyncio.TimeoutError, TimeoutError):
+        print(
+            f"[generator] critique LLM timed out after {CRITIQUE_TIMEOUT_SEC:g}s "
+            f"(provider {provider}) — scoring without a read",
+            flush=True,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001 — the read is never load-bearing
+        print(
+            f"[generator] critique LLM unavailable ({provider}): {exc} — "
+            "scoring without a read",
+            flush=True,
+        )
+        return None
+    return _clean_paragraph(raw)
+
+
+@router.post("/api/generator/critique")
+async def critique_take(
+    req: CritiqueRequest,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Score one take: the bench puts the number on it, the LLM reads it.
+
+    Flow: validate the path (the shared validator, root-checked — this
+    handler downloads the file) → pull the take through ``stream_audio``
+    → ``bench_wav`` against the genre's committed references → one
+    optional LLM paragraph over those numbers and the original prompt.
+
+    Answers ``{passed, reference_genre, reference_informed, advisory,
+    bands, failures, critique, note}``. Every key is always present, the
+    poll endpoint's rule: a UI that has to feature-detect its own
+    contract eventually gets it wrong.
+
+    * **503** — the generator is disabled or the box unreachable.
+      Structural, exactly as on publish: the take's audio exists only on
+      the ACE box, so there is nothing to measure without it.
+    * **422** — a ``file`` that is not an ACE result path.
+    * **404 / 502** — the result file is gone, or ACE broke serving it.
+    * **200 with ``passed: null`` and a ``note``** — the bench refused
+      (most often: this genre has no committed references yet). Not an
+      error; see :func:`_no_verdict`.
+    * **200 with ``critique: null``** — the LLM layer was off or did not
+      answer in time. Also not an error.
+
+    **No 409, deliberately** — publish's exemption, with one wrinkle
+    worth naming. The VRAM guard exists because releasing a task parks
+    ~12.5 GB of ACE-Step on the GPU the live DJ's model needs, and it
+    does not give it back. This endpoint parks nothing: it reads a file
+    ACE rendered earlier and runs the bench on the CPU. The LLM read is
+    the wrinkle — it does travel to the same tunnelled gateway the live
+    DJ speaks to, so it is not literally free during a set. But it is
+    ONE short completion under :data:`CRITIQUE_TIMEOUT_SEC`, competing
+    for a few seconds of queue rather than for resident VRAM, and it
+    abandons itself rather than waiting. Refusing an operator the score
+    on a take they are about to publish, for that, would be the wrong
+    trade — the guard protects residency, not politeness.
+    """
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+
+    try:
+        resolved = validate_ace_audio_path(req.file, resolve_file=True)
+    except AceAudioPathError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    work_dir = tempfile.mkdtemp(prefix="apollo-critique-")
+    try:
+        wav_path = os.path.join(work_dir, "take.wav")
+        await _download_take(client, resolved.api_path, wav_path)
+
+        # `agent.generative.bench` is imported HERE, inside the handler,
+        # for the reason `main` is in publish: it pulls the librosa
+        # family (numpy + soundfile at module scope, librosa itself the
+        # moment a foreign sample rate needs resampling — which every
+        # 48 kHz ACE take does). That is import weight a web backend must
+        # not pay at module scope, and scoring is a rare, human-triggered
+        # action that already spent seconds downloading a WAV.
+        bench = await asyncio.to_thread(
+            importlib.import_module, "agent.generative.bench"
+        )
+        genre = _reference_genre(req.genre_folder, bench.GENRE_FOLDERS)
+        references = os.getenv(ENV_BENCH_REFERENCES) or bench.REFERENCES_PATH
+        try:
+            report, passed = await asyncio.to_thread(
+                bench.bench_wav, wav_path, genre, references_path=references
+            )
+        except bench.BenchInputError as exc:
+            # A genre nobody has extracted references for is the common
+            # case here, and it is a normal state — the catalog grows
+            # faster than the reference sweep.
+            print(f"[generator] no bench verdict for '{genre}': {exc}", flush=True)
+            return _no_verdict(genre, str(exc))
+    finally:
+        # The WAV's whole job was to be measured. The LLM read below
+        # works from numbers, so the download does not outlive the bench.
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    audio = report.get("audio") or {}
+    bands = _reference_bands(
+        report.get("reference") or {},
+        centroid_ratio=bench.CENTROID_RATIO_MAX,
+        tilt_delta=bench.TILT_DELTA_MAX,
+    )
+    return {
+        "passed": bool(passed),
+        "reference_genre": genre,
+        "reference_informed": audio.get("reference_informed"),
+        "advisory": audio.get("advisory"),
+        "bands": bands,
+        # The bench's own words, so the chips and the sentence under them
+        # cannot drift apart.
+        "failures": list(report.get("reference_informed_failures") or []),
+        "critique": await _critique_paragraph(req, report, bands),
+        "note": None,
     }

@@ -138,6 +138,41 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   stays the default, so no existing caller changed shape); form values
   are flattened by `_form_value` — bools lower-case, `None` empty,
   structured values as JSON.
+- **`POST /api/generator/critique` (G4): the bench scores, the LLM only
+  reads.** An LLM cannot hear, so the number comes from
+  `agent.generative.bench.bench_wav` — the same merge gate the generative
+  engine is judged by — imported **inside the handler** (the librosa
+  family, publish's rule) after the take is downloaded through
+  `stream_audio`. The two layers fail independently and neither is an
+  error: a genre with no committed references answers **200 with
+  `passed: null` + the bench's own `note`** (every `BenchInputError`
+  lands there — this endpoint is advisory by construction, and a 5xx
+  would read as something the operator must fix before publishing), and
+  any LLM trouble answers `critique: null`. **Scoring never gates
+  publishing** — the panel's own label says so. `genre_folder` is mapped
+  to a bench GENRE key (`_reference_genre`: `deep house`→`deep`,
+  `lofi - ambient`→`lofi` via the folder's leading text, unknown folders
+  pass through so the bench's message names them); it is deliberately
+  NOT run through `_resolve_genre`, since nothing is written and the
+  bench's refusal is the better sentence. The reported `bands` are the
+  **effective** ones — the reference range widened by the bench's own
+  margins (2.5× centroid, ±8 dB/oct tilt) — because that is the band
+  that decides `passed`, and a chip contradicting the verdict beside it
+  is worse than a wide band; the raw range rides along as
+  `reference_min`/`reference_max`. `APOLLO_BENCH_REFERENCES` overrides
+  the references file (read at CALL time; it is also how the tests inject
+  bands measured around a synthetic take). **No 409**: the bench runs on
+  the CPU and parks no VRAM. The LLM read does travel to the same
+  tunnelled gateway the live DJ uses, but it is ONE completion under
+  `CRITIQUE_TIMEOUT_SEC` (15 s, `asyncio.wait_for` over the SDK's own
+  timeout — a thread that outlives it is abandoned), never retried; the
+  guard protects GPU residency, not politeness. Provider detection is
+  `brief_parser.detect_provider()` (one definition, read at CALL time,
+  `AGENT_PROVIDER=mock` short-circuits before any SDK import); the model
+  is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, the #123
+  precedent — the critic is generative-lane work and must be free to run
+  off a different model from the tool-calling live DJ. The client is NOT
+  `brief_parser`'s: that one carries a 45 s bound and `BRIEF_MODEL`.
 - **Publishing while `--build-catalog` is running is a human-scheduling
   problem, not a lock** (same class as the VRAM rule). The builder is
   serial, takes ~1.25 min/track, and writes `tracks.json` **only at the
@@ -271,6 +306,20 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   (`variantOptionsFor`). `chainAppended` dedupes by task id, or a
   double-clicked submit would render two cards polling one task with
   separate publish state.
+- **"Score" is the read-only sibling of Publish and Edit** (G4). It sits
+  in every take row — chained takes included, since they render through
+  the same `TakeRow` — and stays enabled whatever else the row is doing:
+  it writes nothing. `canScoreTake` is as weak as `canEditTake` (audio is
+  all the bench needs), so a take whose metas never parsed is scoreable
+  though it cannot publish. The panel is pure folds in `lib/generator.ts`
+  — `bandTone` is the ONE comparison, `scoreChips` the fold over it, both
+  tested directly — so the component does no arithmetic: chips carry
+  value + band and read in/out, LUFS/LRA/crest are toned `advisory`
+  because nothing advisory can fail, and a response with no verdict folds
+  to NO chips (the note is the whole answer). `scoreStarted` keeps the
+  previous numbers on screen during a re-score — blanking would read as
+  "those were wrong". The section label, `bench score · informs, never
+  blocks`, is the UI's half of "scoring never gates publishing".
 
 ## Testing
 
@@ -288,7 +337,11 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   → chained card → edited take, so the lineage label, the nesting, the
   `variant of` default and the edit's wire body are all asserted in one
   pass; its second test pins the 409 rendering verbatim with the panel
-  left open. Locators there are scoped through
+  left open. `generator-score.spec.ts` walks take → Score → chips +
+  paragraph, and scores a SECOND take whose stubbed answer is the
+  verdict-less one, so both the band readings and the reference-less note
+  are covered in a single pass (the stub branches on the `file` it is
+  sent); it also asserts Publish stays enabled the whole way. Locators there are scoped through
   `generator-chained-card`, not the outer take — once a card nests,
   `take.getByTestId(...)` matches twice and strict mode bites.
 
