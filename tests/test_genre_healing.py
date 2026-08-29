@@ -197,15 +197,25 @@ class TestAgentToolsParity:
             == GENRE_THEMES["healing"]["title_color"]
         )
 
-    def test_shared_genres_do_not_disagree(self):
-        """Where both files know a genre, the ranges must be identical.
+    def test_bpm_ranges_are_fully_in_sync(self):
+        """``_BPM_GENRE_RANGES`` must equal ``BPM_GENRE_RANGES`` exactly.
 
-        The two dicts have already drifted once (tools.py is missing
-        several genres main.py knows). This guards the overlap so a future
-        edit to one side cannot silently contradict the other.
+        This used to only check the overlap, which guarded against a
+        value disagreeing but not against a genre going missing entirely
+        — and that's exactly how the two dicts drifted: tools.py silently
+        lost "lofi", "cocktail house", and "soul jazz" (measured
+        2026-08-29) without a single test failing, because the old
+        assertion iterated only the shared keys. Pin full equality — same
+        key set, same values — so any future drift (missing genre or
+        disagreeing window) fails loudly in CI instead of degrading the
+        web generator's bpm default silently.
         """
         from agent.tools import _BPM_GENRE_RANGES
 
-        shared = set(_BPM_GENRE_RANGES) & set(BPM_GENRE_RANGES)
-        for genre in shared:
-            assert _BPM_GENRE_RANGES[genre] == BPM_GENRE_RANGES[genre], genre
+        assert set(_BPM_GENRE_RANGES) == set(BPM_GENRE_RANGES), (
+            "key sets differ — only in agent.tools: "
+            f"{sorted(set(_BPM_GENRE_RANGES) - set(BPM_GENRE_RANGES))}; "
+            f"only in main: {sorted(set(BPM_GENRE_RANGES) - set(_BPM_GENRE_RANGES))}"
+        )
+        for genre, window in BPM_GENRE_RANGES.items():
+            assert _BPM_GENRE_RANGES[genre] == window, genre
