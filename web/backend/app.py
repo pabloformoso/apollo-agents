@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
 from . import db, auth, pipeline, youtube_auth
+from .generator import router as generator_router
 from .render import router as render_router
 from .models import (
     CreateSessionRequest,
@@ -67,6 +68,9 @@ app.add_middleware(
 # v2.6.0 — async render endpoints + downloads. Lives in its own module
 # because the SSE generator + in-memory _jobs registry are sizeable.
 app.include_router(render_router)
+
+# G0 — ACE-Step generator feature flag (+ the VRAM guard G1 enforces).
+app.include_router(generator_router)
 
 
 # --- beatmatch feedback loop (W1) ------------------------------------------

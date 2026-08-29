@@ -20,6 +20,20 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   small models are markedly better at emitting JSON than at
   function-calling, and `_normalize` treats the payload as untrusted
   either way.
+- **Generator module (`generator.py` + `acestep_client.py`, G0)** —
+  ACE-Step lives behind its own router (one `include_router` line in
+  `app.py`, the `render.py` precedent). `GET /api/generator/health`
+  returns `{available, blocked_by_live, stats}`; "unavailable" is a
+  NORMAL answer, never a 5xx — `ACESTEP_BASE_URL` unset disables the
+  feature with zero HTTP, and the box is off most of the time by
+  design. Env is read at CALL time (the `brief_parser` lesson below).
+  `live_session_active()` is Apollo's half of the **VRAM protocol**:
+  ACE-Step retains ~12.5 GB of the shared 16 GB once loaded, so
+  generating during a broadcast starves the DJ's LM Studio model. It
+  reads the REAL registry — `ws_manager`'s `live`-channel entries,
+  written by the primary live WS handler — never log output. G1's
+  generation endpoints import this helper and refuse to release tasks
+  while it is true; keep one definition of "a set is on air".
 - **Live WS roles**: `/live/stream` = PRIMARY (drives playback, sends
   `playback_pos` every ~250 ms and `track_ended`); `/live/viewer` =
   read-only follower (OBS). Viewers never send. A wrongly-primary OBS
