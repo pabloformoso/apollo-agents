@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>ApolloAgents · algorave spike · deephouse</title>
+
+    <!--
+      One engine instance for everybody.
+
+      @strudel/web ships a prebuilt bundle that already contains core + mini +
+      tonal + transpiler + webaudio. If the page loaded that bundle and the
+      pattern module separately loaded @strudel/core from node_modules, there
+      would be TWO Pattern classes and .play() would only be patched onto one of
+      them. Pointing every @strudel/* specifier at the same bundle keeps it to one.
+    -->
+    <script type="importmap">
+      {
+        "imports": {
+          "@strudel/web": "/vendor/strudel/index.mjs",
+          "@strudel/core": "/vendor/strudel/index.mjs",
+          "@strudel/mini": "/vendor/strudel/index.mjs",
+          "@strudel/tonal": "/vendor/strudel/index.mjs",
+          "@strudel/webaudio": "/vendor/strudel/index.mjs"
+        }
+      }
+    </script>
+
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0d10;
+        --panel: #12161b;
+        --line: #232b34;
+        --fg: #d7dee6;
+        --dim: #7d8b99;
+        --accent: #38e8b0;
+        --accent2: #ff5f9e;
+        --warn: #ffcc55;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font: 14px/1.5 ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+        display: flex;
+        flex-direction: column;
+      }
+      header {
+        display: flex;
+        align-items: baseline;
+        gap: 16px;
+        flex-wrap: wrap;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel);
+      }
+      h1 { font-size: 15px; margin: 0; letter-spacing: 0.08em; text-transform: uppercase; }
+      h1 b { color: var(--accent); }
+      .meta { color: var(--dim); font-size: 12px; }
+      .meta span { color: var(--fg); }
+      main { flex: 1; display: flex; min-height: 0; }
+      #code {
+        flex: 1;
+        margin: 0;
+        padding: 18px 22px;
+        overflow: auto;
+        font-size: 13px;
+        line-height: 1.55;
+        tab-size: 2;
+        white-space: pre;
+      }
+      aside {
+        width: 320px;
+        flex: none;
+        border-left: 1px solid var(--line);
+        background: var(--panel);
+        padding: 18px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        overflow: auto;
+      }
+      button {
+        font: inherit;
+        color: var(--bg);
+        background: var(--accent);
+        border: 0;
+        border-radius: 4px;
+        padding: 10px 12px;
+        cursor: pointer;
+        text-align: left;
+      }
+      button.secondary { background: #2a3540; color: var(--fg); }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button small { display: block; font-weight: normal; opacity: 0.75; }
+      #status {
+        margin-top: auto;
+        border-top: 1px solid var(--line);
+        padding-top: 10px;
+        font-size: 12px;
+        color: var(--dim);
+        white-space: pre-wrap;
+        word-break: break-word;
+        max-height: 45vh;
+        overflow: auto;
+      }
+      #status .err { color: var(--accent2); }
+      #status .ok { color: var(--accent); }
+      #status .warn { color: var(--warn); }
+      .roles { font-size: 12px; color: var(--dim); }
+      .roles b { color: var(--fg); font-weight: normal; }
+      /* code colours */
+      .c { color: #566270; font-style: italic; }
+      .s { color: var(--accent2); }
+      .k { color: #7aa7ff; }
+      .n { color: var(--warn); }
+      .f { color: var(--accent); }
+    </style>
+  </head>
+
+  <body>
+    <header>
+      <h1>Apollo <b>algorave</b> — iteration 0</h1>
+      <div class="meta">
+        <span id="m-bpm">…</span> BPM · <span id="m-key">…</span> ·
+        <span id="m-bars">…</span> bars · <span id="m-len">…</span> s ·
+        strudel <span id="m-ver">…</span>
+      </div>
+    </header>
+
+    <main>
+      <pre id="code">loading patterns/deephouse.js …</pre>
+      <aside>
+        <button id="play">▶ Play<small>live, 16-bar loop</small></button>
+        <button id="stop" class="secondary">■ Stop</button>
+        <button id="rec" class="secondary">● Record 32 s<small>route A · MediaRecorder tap</small></button>
+        <button id="render" class="secondary">⤓ Render offline<small>route B · OfflineAudioContext → WAV</small></button>
+        <div class="roles" id="roles"></div>
+        <div id="status"></div>
+      </aside>
+    </main>
+
+    <script type="module">
+      // ---------------------------------------------------------------------
+      // Master tap (route A).
+      //
+      // superdough's SuperdoughOutput ends in `destinationGain -> ctx.destination`.
+      // Rather than reach into that private field, mirror every connection that
+      // lands on an AudioDestinationNode into our own MediaStream tap. Installed
+      // BEFORE initStrudel so it catches the graph as superdough builds it.
+      // ---------------------------------------------------------------------
+      const masterFeeds = new Set();
+      const taps = new Set();
+      const nativeConnect = AudioNode.prototype.connect;
+      AudioNode.prototype.connect = function (dest, ...rest) {
+        const result = nativeConnect.call(this, dest, ...rest);
+        if (typeof AudioDestinationNode !== 'undefined' && dest instanceof AudioDestinationNode) {
+          masterFeeds.add(this);
+          for (const tap of taps) {
+            if (tap.context === this.context) {
+              try { nativeConnect.call(this, tap); } catch { /* already connected */ }
+            }
+          }
+        }
+        return result;
+      };
+      const addTap = (tap) => {
+        taps.add(tap);
+        for (const node of masterFeeds) {
+          if (tap.context === node.context) {
+            try { nativeConnect.call(node, tap); } catch { /* already connected */ }
+          }
+        }
+      };
+      const removeTap = (tap) => {
+        taps.delete(tap);
+        for (const node of masterFeeds) {
+          try { node.disconnect(tap); } catch { /* was not connected */ }
+        }
+      };
+
+      // NB: there is no module-level `setcps` export. In the strudel.cc REPL that
+      // name reaches your code through evalScope, injected by repl(); here we
+      // hold the repl object initStrudel resolves with and call repl.setCps().
+      import { initStrudel, samples, getAudioContext, renderPatternAudio } from '@strudel/web';
+      import { pattern, description } from '/patterns/deephouse.js';
+
+      // ---------------------------------------------------------------------
+      // Sample banks. @strudel/web's defaultPrebake only registers the built-in
+      // synth waveforms — the drum machines are NOT bundled, so bank('RolandTR909')
+      // resolves to nothing unless we register the map ourselves. These are the
+      // URLs the strudel.cc REPL itself prebakes (website/src/repl/prebake.mjs).
+      // Network is required at play/record time; self-hosting is an integration-slice
+      // job, per the plan's §7 risk list.
+      // ---------------------------------------------------------------------
+      const CDN = 'https://strudel.b-cdn.net';
+      const DRUM_MACHINES = `${CDN}/tidal-drum-machines.json`;
+      const DRUM_MACHINES_BASE = `${CDN}/tidal-drum-machines/machines/`;
+
+      const statusEl = document.getElementById('status');
+      const log = (msg, cls = '') => {
+        const line = document.createElement('div');
+        if (cls) line.className = cls;
+        line.textContent = `${new Date().toISOString().slice(11, 19)}  ${msg}`;
+        statusEl.append(line);
+        statusEl.scrollTop = statusEl.scrollHeight;
+        (cls === 'err' ? console.error : console.log)('[spike]', msg);
+      };
+
+      // ---------------------------------------------------------------------
+      // The code IS the visual: show the exact file the engine just imported and
+      // the tests query — fetched, not duplicated, so it can never drift.
+      // ---------------------------------------------------------------------
+      const TOKENS = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*)|('(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(import|export|from|const|as|default)\b|\b(\d+(?:\.\d+)?)\b|\.([a-zA-Z_$][\w$]*)(?=\()/g;
+      const esc = (t) => t.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[c]);
+      fetch('/patterns/deephouse.js')
+        .then((r) => r.text())
+        .then((src) => {
+          document.getElementById('code').innerHTML = esc(src).replace(
+            TOKENS,
+            (m, comment, str, kw, num, fn) =>
+              comment ? `<span class="c">${m}</span>`
+              : str ? `<span class="s">${m}</span>`
+              : kw ? `<span class="k">${m}</span>`
+              : num ? `<span class="n">${m}</span>`
+              : `.<span class="f">${fn}</span>`,
+          );
+        })
+        .catch((e) => log(`could not display source: ${e.message}`, 'err'));
+
+      fetch('/vendor/strudel-pkg/package.json')
+        .then((r) => r.json())
+        .then((pkg) => (document.getElementById('m-ver').textContent = pkg.version))
+        .catch(() => (document.getElementById('m-ver').textContent = '?'));
+
+      document.getElementById('m-bpm').textContent = description.bpm;
+      document.getElementById('m-key').textContent = `${description.key} (${description.camelot})`;
+      document.getElementById('m-bars').textContent = description.bars;
+      document.getElementById('m-len').textContent = (description.bars / description.cps).toFixed(1);
+      document.getElementById('roles').innerHTML = description.roles
+        .map((r) => `<div><b>${r.name}</b> — ${r.sound}, bars ${r.fromBar}–${r.toBar}</div>`)
+        .join('');
+
+      // ---------------------------------------------------------------------
+      // Engine
+      // ---------------------------------------------------------------------
+      let ready = null;
+      const boot = () => {
+        if (!ready) {
+          log('initStrudel + registering RolandTR909 bank…');
+          ready = initStrudel({
+            prebake: () =>
+              samples(DRUM_MACHINES, DRUM_MACHINES_BASE, { prebake: true, tag: 'drum-machines' }),
+          }).then((repl) => {
+            repl.setCps(description.cps);
+            log(`ready · cps ${description.cps.toFixed(5)} (${description.bpm} BPM)`, 'ok');
+            return repl;
+          });
+        }
+        return ready;
+      };
+
+      const play = async () => {
+        const repl = await boot();
+        repl.setCps(description.cps);
+        pattern.play();
+        log('playing', 'ok');
+      };
+      const stop = async () => {
+        const repl = await boot();
+        repl.stop();
+        log('stopped');
+      };
+
+      // -------------------------- route A ----------------------------------
+      // MediaStreamAudioDestinationNode + MediaRecorder. Opus-compressed, real
+      // time, but it works with any output the browser can make audible.
+      const recordWebm = async (ms = 32_000) => {
+        const repl = await boot();
+        const ctx = getAudioContext();
+        if (ctx.state !== 'running') await ctx.resume();
+        const tap = ctx.createMediaStreamDestination();
+        addTap(tap);
+        const mimeType = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'].find(
+          (t) => MediaRecorder.isTypeSupported(t),
+        );
+        if (!mimeType) throw new Error('no MediaRecorder audio mime type supported');
+        const rec = new MediaRecorder(tap.stream, { mimeType, audioBitsPerSecond: 192_000 });
+        const chunks = [];
+        rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+        const done = new Promise((resolve) => (rec.onstop = resolve));
+
+        repl.setCps(description.cps);
+        pattern.play();
+        // Let the scheduler and the first samples settle before the tape rolls.
+        await new Promise((r) => setTimeout(r, 600));
+        rec.start(1000);
+        log(`route A recording ${(ms / 1000).toFixed(0)} s as ${mimeType}…`);
+        await new Promise((r) => setTimeout(r, ms));
+        rec.stop();
+        await done;
+        removeTap(tap);
+        const blob = new Blob(chunks, { type: mimeType });
+        log(`route A captured ${(blob.size / 1024).toFixed(0)} KiB`, 'ok');
+        return { blob, container: 'webm' };
+      };
+
+      // -------------------------- route B ----------------------------------
+      // @strudel/webaudio 1.3.0 ships renderPatternAudio(): a real
+      // OfflineAudioContext render that returns 16-bit PCM at whatever sample
+      // rate you ask for. It hands the result to the user by clicking a
+      // synthetic <a download>, so we borrow the Blob on its way past
+      // URL.createObjectURL and swallow the click.
+      // One-shot: it closes the live AudioContext first, so the page cannot go
+      // back to playing afterwards without a reload.
+      const renderOffline = async (
+        endBar = description.bars + 0.25,
+        sampleRate = 48_000,
+        maxPolyphony = 100_000,
+      ) => {
+        // boot() first: the offline render still resolves sounds through the same
+        // global registry, so the synth waveforms and the TR909 map have to be
+        // registered before the context is swapped for the offline one.
+        await boot();
+        const originalCreateObjectURL = URL.createObjectURL;
+        const originalClick = HTMLAnchorElement.prototype.click;
+        let captured = null;
+        URL.createObjectURL = function (blob) {
+          captured = blob;
+          return originalCreateObjectURL.call(URL, blob);
+        };
+        HTMLAnchorElement.prototype.click = function () {};
+        log(`route B rendering bars 0–${endBar} offline at ${sampleRate} Hz…`);
+        try {
+          await renderPatternAudio(pattern, description.cps, 0, endBar, sampleRate, maxPolyphony, false, 'deephouse');
+        } finally {
+          URL.createObjectURL = originalCreateObjectURL;
+          HTMLAnchorElement.prototype.click = originalClick;
+        }
+        if (!captured) throw new Error('renderPatternAudio produced no blob');
+        log(`route B rendered ${(captured.size / 1024 / 1024).toFixed(2)} MiB WAV`, 'ok');
+        return { blob: captured, container: 'wav' };
+      };
+
+      // ---------------------------------------------------------------------
+      // Playwright surface. record.mjs drives these; a human uses the buttons.
+      // ---------------------------------------------------------------------
+      const toBase64 = async (blob) => {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 0x8000) {
+          binary += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        }
+        return btoa(binary);
+      };
+
+      window.__spike = {
+        description,
+        errors: [],
+        capture: null, // { base64, container, bytes }
+        play,
+        stop,
+        async run(route, options = {}) {
+          const { blob, container } =
+            route === 'a' ? await recordWebm(options.ms ?? 32_000) : await renderOffline(options.endBar, options.sampleRate);
+          this.capture = { base64: await toBase64(blob), container, bytes: blob.size };
+          return { container, bytes: blob.size, base64Length: this.capture.base64.length };
+        },
+        slice(offset, length) {
+          return this.capture.base64.slice(offset, offset + length);
+        },
+      };
+      window.addEventListener('error', (e) => window.__spike.errors.push(String(e.message)));
+      window.addEventListener('unhandledrejection', (e) => window.__spike.errors.push(String(e.reason)));
+
+      const save = (blob, name) => {
+        const url = URL.createObjectURL(blob);
+        const a = Object.assign(document.createElement('a'), { href: url, download: name });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      };
+
+      document.getElementById('play').onclick = () => play().catch((e) => log(e.message, 'err'));
+      document.getElementById('stop').onclick = () => stop().catch((e) => log(e.message, 'err'));
+      document.getElementById('rec').onclick = async (e) => {
+        e.target.disabled = true;
+        try {
+          const { blob } = await recordWebm(32_000);
+          save(blob, 'deephouse-32s.webm');
+          log('saved deephouse-32s.webm — convert with: ffmpeg -i in.webm -ar 48000 -ac 2 out.wav', 'ok');
+        } catch (err) {
+          log(err.message, 'err');
+        } finally {
+          e.target.disabled = false;
+        }
+      };
+      document.getElementById('render').onclick = async (e) => {
+        e.target.disabled = true;
+        document.getElementById('play').disabled = true;
+        try {
+          const { blob } = await renderOffline();
+          save(blob, 'deephouse-30s.wav');
+          log('saved deephouse-30s.wav · reload the page before playing again', 'warn');
+        } catch (err) {
+          log(err.message, 'err');
+          document.getElementById('play').disabled = false;
+        } finally {
+          e.target.disabled = false;
+        }
+      };
+
+      log('page loaded · press Play (audio needs a click to start)');
+    </script>
+  </body>
+</html>

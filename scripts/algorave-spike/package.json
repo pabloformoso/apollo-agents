@@ -1,0 +1,24 @@
+{
+  "name": "apollo-algorave-spike",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Iteration 0 of the ApolloAgents algorave lane: a Strudel deep-house pattern, a page that shows the code while it plays, and a 30 s WAV recorded out of it.",
+  "scripts": {
+    "serve": "node serve.mjs",
+    "record": "node record.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@strudel/core": "1.2.6",
+    "@strudel/mini": "1.2.6",
+    "@strudel/tonal": "1.2.6",
+    "@strudel/transpiler": "1.2.6",
+    "@strudel/web": "1.3.0",
+    "@strudel/webaudio": "1.3.0"
+  },
+  "devDependencies": {
+    "playwright-core": "1.60.0",
+    "vitest": "3.2.4"
+  }
+}
