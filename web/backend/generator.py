@@ -31,11 +31,29 @@ blip degrades to ``{status: "pending", degraded: true}`` rather than
 
 ``GET /api/generator/audio`` (G1) proxies take audio. The browser never
 talks to :8001 — auth and LAN isolation live here.
+
+``POST /api/generator/publish`` (G2b) lands one take in the catalog. It
+downloads the take's WAV and hands it to G2a's ``main.ingest_track`` —
+the SAME code path ``python main.py --ingest`` runs, imported lazily
+inside the handler. It carries no ``task_id`` on purpose: ACE's job
+records are mortal, its result files are not, so the page supplies the
+take's decoded path and metas from its own state.
+
+``GET /api/generator/audio`` and ``POST /api/generator/publish`` share
+one path validator (:func:`validate_ace_audio_path`) so "what counts as
+a take's audio" has a single definition.
 """
 from __future__ import annotations
 
 import asyncio
+import importlib
+import os
+import posixpath
+import shutil
+import tempfile
+from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -353,6 +371,83 @@ def _release_payload(req: GenerationRequest, bpm: int | None) -> dict[str, Any]:
     return payload
 
 
+# ── Publish body (G2b) ───────────────────────────────────────────────
+
+
+class PublishMetas(BaseModel):
+    """ACE's ``metas`` for the take being published.
+
+    ``extra="ignore"`` — deliberately looser than the body around it.
+    This block's shape belongs to ACE (it also carries ``genres`` and
+    ``timesignature``), and the ingest only ever reads these three; an
+    ACE upgrade that adds a field must not start 422-ing publishes.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    bpm: float = Field(..., ge=MIN_BPM, le=MAX_BPM)
+    keyscale: str = Field(..., min_length=1, max_length=64)
+    #: Advisory. The authoritative duration is probed off the downloaded
+    #: file by the ingest; this only buys an early refusal (below).
+    duration: float | None = Field(None, gt=0)
+
+
+class PublishRequest(BaseModel):
+    """Publish one take into the catalog (plan: G2b).
+
+    No ``task_id``: the backend never re-queries an old ACE task. Their
+    job records are in-memory, expire after 24 h and die with the
+    process (which the VRAM protocol stops between batches), while the
+    result FILES are never reaped. So the page persists each take's
+    decoded path + metas the moment a poll returns them, and hands that
+    back here — the plan's persistence rule.
+
+    ``extra="forbid"`` for the same reason ``GenerationRequest`` uses
+    it: a silently ignored field would surface hours later as a track
+    with the wrong name in the catalog.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: The take's URL-DECODED ACE path, as persisted by the page.
+    file: str = Field(..., min_length=1, max_length=4096)
+    metas: PublishMetas
+    #: Carried for the log/provenance only — tracks.json has no prompt
+    #: slot, and inventing one here would fork the catalog schema.
+    prompt: str | None = Field(None, max_length=4000)
+    #: TEXT, not a filename — the same semantics as the ingest sidecar's
+    #: ``lyrics`` key. Lands as a ``.lrc`` beside the WAV.
+    lyrics: str | None = Field(None, max_length=20000)
+    display_name: str = Field(..., min_length=1, max_length=120)
+    genre_folder: str = Field(..., min_length=1, max_length=120)
+    #: Base take's catalog id or display_name (the ingest resolves an id
+    #: to its display_name, which is what links the two as one piece).
+    variant_of: str | None = Field(None, max_length=120)
+
+    @field_validator("display_name", "genre_folder")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+#: Appended to every successful publish. The ingest is deliberately
+#: madmom-free, so the entry lands without duration, beatgrid, waveform
+#: peaks or an MP3 sibling — everything the live engine's beatmatching
+#: wants. Saying so in the payload is the only thing standing between a
+#: fresh take and a contrabombo on air.
+FIX_INCOMPLETE_NOTE = (
+    "Ingested without madmom: duration, beatgrid, waveform peaks and the MP3 "
+    "sibling are still missing. Run `python main.py --fix-incomplete` (in the "
+    "main checkout, in Docker) before this track goes into a set."
+)
+
+#: Streaming chunk for the take download. A 3-minute 48 kHz WAV is
+#: ~35 MB — never buffered whole, same rule as the proxy.
+PUBLISH_CHUNK_BYTES = 1 << 20
+
+
 # ── Audio proxy helpers ──────────────────────────────────────────────
 
 
@@ -373,35 +468,187 @@ def _authorize_audio(request: Request, token: str | None) -> dict:
     return user
 
 
-def _validate_proxy_path(path: str) -> str:
-    """Reject anything that is not a relative ACE-Step API path.
+# ── ACE-Step audio paths: ONE validator, two call sites ──────────────
+#
+# The audio proxy (G1) and the publisher (G2b) both receive "a take's
+# audio location" from the browser, and both have to decide whether it
+# is safe to act on. They used to be able to drift apart; they now share
+# :func:`validate_ace_audio_path` and the shape table below, so flipping
+# the decision (a new ACE deployment, a different tmp root) is a
+# constant change rather than a refactor.
+#
+# Confirmed with the ACE session (2026-08-29, read from their server):
+# a result's ``file`` is ``/v1/audio?path=<quote(p, safe="")>`` where
+# ``p`` is an ABSOLUTE POSIX path on the ACE box, under its
+# ``tmp_root``/``api_audio`` directory, named ``<uuid>_<take>.wav``.
+# The encoding is total — slashes travel as ``%2F`` — so never look for
+# literal ``/`` inside the query parameter.
 
-    The value is a take's ``file`` field — ``/v1/audio?path=<encoded>``
-    — and stays OPAQUE here: the inner filesystem path is ACE-Step's
-    business, url-encoded inside the query string. What must not get
-    through is a host (``http://…``, ``//host/…``), which would turn the
-    proxy into an open redirector/SSRF hop, or a bare absolute path
-    (``/tmp/out/take0.wav``, ``C:\\…``), which is a filesystem location
-    rather than an endpoint.
-    """
-    raw = (path or "").strip()
+#: Where ACE-Step's result files live on its own disk. Override per
+#: deployment (comma-separated for more than one). Read at CALL time,
+#: never cached at import: the backend runs under ``--reload`` with a
+#: late-loaded ``.env`` (the ``brief_parser`` lesson, web/CLAUDE.md).
+ENV_AUDIO_ROOT = "ACESTEP_AUDIO_ROOT"
+
+#: The current box's root, as confirmed by the ACE session.
+DEFAULT_AUDIO_ROOTS = ("/home/pablo/code/ACE-Step-1.5/.cache/acestep/tmp/api_audio",)
+
+#: ACE's audio endpoint. A take's ``file`` is this plus ``?path=``.
+ACE_AUDIO_ENDPOINT = "/v1/audio"
+
+
+def ace_audio_roots() -> tuple[str, ...]:
+    """Accepted filesystem prefixes for a take's audio, newest env wins."""
+    raw = (os.getenv(ENV_AUDIO_ROOT) or "").strip()
     if not raw:
-        raise HTTPException(status_code=400, detail="path is required")
+        roots = DEFAULT_AUDIO_ROOTS
+    else:
+        roots = tuple(part.strip() for part in raw.split(",") if part.strip())
+    # posixpath: the ACE box is Linux even when Apollo runs on Windows,
+    # so ntpath's backslash rules must not get a vote here.
+    return tuple(posixpath.normpath(r) for r in roots if r) or DEFAULT_AUDIO_ROOTS
+
+
+@dataclass(frozen=True)
+class AceAudioPath:
+    """A validated take-audio location.
+
+    ``api_path`` is what to hand :meth:`AceStepClient.stream_audio`;
+    ``file_path`` is the DECODED path on the ACE box, known only for the
+    shapes that name a filesystem location.
+    """
+
+    shape: str                 # "api" | "absolute" | "relative"
+    api_path: str
+    file_path: str | None = None
+
+
+class AceAudioPathError(ValueError):
+    """A take-audio path Apollo refuses to act on.
+
+    Raised shape-neutral so each call site can pick its own status: the
+    proxy answers 400 (a bad query parameter), publish answers 422 (a
+    bad body field).
+    """
+
+
+def _is_under_a_root(path: str) -> bool:
+    norm = posixpath.normpath(path)
+    return any(
+        norm == root or norm.startswith(root + "/") for root in ace_audio_roots()
+    )
+
+
+def _inner_path_of(api_path: str) -> str | None:
+    """The ``?path=`` parameter of an ACE API path, decoded exactly once.
+
+    Hand-rolled rather than ``parse_qs``: that helper also turns ``+``
+    into a space, and ACE encodes with ``quote(p, safe="")``, which
+    leaves a literal ``+`` in a filename as ``+``. One wrong character
+    and the download 404s.
+    """
+    _, _, query = api_path.partition("?")
+    for field in query.split("&"):
+        name, sep, value = field.partition("=")
+        if sep and name == "path":
+            return unquote(value)
+    return None
+
+
+def validate_ace_audio_path(value: str, *, resolve_file: bool = False) -> AceAudioPath:
+    """Validate one take-audio location. **The single source of truth.**
+
+    Three shapes are accepted, and they are not equally trusted:
+
+    ``api`` — ``/v1/audio?path=<encoded>``, a take's ``file`` field
+        verbatim. This names an ACE *endpoint*, so the inner filesystem
+        path stays opaque when merely proxying: ACE's own validator is
+        the authority on what it will serve, and Apollo only screens for
+        hosts and traversal.
+    ``absolute`` — a bare ``/home/.../api_audio/<uuid>_0.wav``, the
+        decoded path the wizard persists per the plan's persistence rule.
+        This names a FILESYSTEM LOCATION, so it must sit under
+        :func:`ace_audio_roots`.
+    ``relative`` — ``api_audio/x.wav``. Forwarded to ACE (which resolves
+        it against its own root) but never enough for a publish.
+
+    ``resolve_file=True`` is the publisher's mode: it needs a concrete
+    file to download and write into the catalog, so it unwraps the
+    ``api`` shape, refuses ``relative``, and root-checks whatever it
+    ends up with. Downloading is the moment the value stops being
+    someone else's problem, which is why the strict check lives there
+    and not on the read-only proxy.
+
+    Raises :class:`AceAudioPathError` naming what was wrong.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise AceAudioPathError("path is required")
+
     lowered = raw.lower()
-    if "://" in lowered or raw.startswith("//"):
-        raise HTTPException(
-            status_code=400, detail="path must be relative to the ACE-Step base URL"
-        )
+    if "://" in lowered or raw.startswith("//") or lowered.startswith(("http:", "https:")):
+        # A host would turn the proxy into an open redirector / SSRF hop.
+        raise AceAudioPathError("path must be relative to the ACE-Step base URL")
     if "\\" in raw or (len(raw) > 1 and raw[1] == ":"):
-        raise HTTPException(status_code=400, detail="path must not be a local file path")
-    if raw.startswith("/") and not raw.startswith("/v1/"):
-        raise HTTPException(
-            status_code=400,
-            detail="path must be an ACE-Step API path (/v1/audio?path=...)",
-        )
+        raise AceAudioPathError("path must not be a local file path")
     if ".." in raw.split("?")[0].split("/"):
-        raise HTTPException(status_code=400, detail="path must not traverse directories")
-    return raw
+        raise AceAudioPathError("path must not traverse directories")
+
+    if raw.startswith("/v1/"):
+        inner = _inner_path_of(raw)
+        if inner is not None and ".." in inner.split("/"):
+            raise AceAudioPathError("path must not traverse directories")
+        resolved = AceAudioPath(
+            shape="api",
+            api_path=raw,
+            file_path=inner if inner and inner.startswith("/") else None,
+        )
+    elif raw.startswith("/"):
+        # Already decoded by contract — do NOT unquote again, a literal
+        # '%' in a filename would be silently mangled.
+        if not _is_under_a_root(raw):
+            raise AceAudioPathError(
+                f"path must be an ACE-Step result file under "
+                f"{' or '.join(ace_audio_roots())} (set {ENV_AUDIO_ROOT} if the "
+                f"generator writes elsewhere)"
+            )
+        resolved = AceAudioPath(
+            shape="absolute",
+            api_path=f"{ACE_AUDIO_ENDPOINT}?path={quote(raw, safe='')}",
+            file_path=raw,
+        )
+    else:
+        resolved = AceAudioPath(shape="relative", api_path=raw)
+
+    if not resolve_file:
+        return resolved
+
+    if resolved.file_path is None:
+        raise AceAudioPathError(
+            "file must be the take's decoded ACE-Step path (an absolute path "
+            f"under {' or '.join(ace_audio_roots())}), as the page persisted it "
+            "when the take arrived — ACE's job records expire, its result files "
+            "do not"
+        )
+    if not _is_under_a_root(resolved.file_path):
+        raise AceAudioPathError(
+            f"file '{resolved.file_path}' is not under "
+            f"{' or '.join(ace_audio_roots())} (set {ENV_AUDIO_ROOT} if the "
+            f"generator writes elsewhere)"
+        )
+    return AceAudioPath(
+        shape=resolved.shape,
+        api_path=f"{ACE_AUDIO_ENDPOINT}?path={quote(resolved.file_path, safe='')}",
+        file_path=resolved.file_path,
+    )
+
+
+def _validate_proxy_path(path: str) -> str:
+    """The proxy's half of :func:`validate_ace_audio_path` — 400 on refusal."""
+    try:
+        return validate_ace_audio_path(path).api_path
+    except AceAudioPathError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 router = APIRouter()
@@ -646,3 +893,152 @@ async def proxy_take_audio(
         headers=headers,
         media_type=upstream.headers.get("content-type") or "audio/wav",
     )
+
+
+# ── POST /api/generator/publish (G2b) ────────────────────────────────
+
+
+async def _download_take(client: acestep_client.AceStepClient, api_path: str, dest: str):
+    """Stream one take's audio to ``dest``. Typed refusals, no buffering."""
+    stream = client.stream_audio(api_path)
+    try:
+        upstream = await stream.__aenter__()
+    except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
+    except acestep_client.AceStepError as exc:
+        status = 404 if exc.status_code == 404 else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        with open(dest, "wb") as fh:
+            async for chunk in upstream.aiter_bytes(PUBLISH_CHUNK_BYTES):
+                fh.write(chunk)
+    finally:
+        await stream.__aexit__(None, None, None)
+
+
+@router.post("/api/generator/publish")
+async def publish_take(
+    req: PublishRequest,
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Land one take in the catalog: download → G2a's ingest → entry.
+
+    Refusal ladder:
+
+    * **503** — the generator is disabled or the box is unreachable.
+      Unlike every other refusal here this one is structural: the take's
+      audio only exists on the ACE box, so without it there is nothing
+      to publish.
+    * **422** — a bad body, a ``file`` that is not an ACE result path,
+      or an INGEST refusal (short track, unknown genre, out-of-window
+      bpm, unparseable keyscale, id collision). Ingest refusals are
+      passed through **verbatim**: they already name the window, the
+      floor or the colliding id, which is exactly what the user has to
+      act on, and paraphrasing them would fork the wording from the CLI.
+    * **404 / 502** — the result file is gone, or ACE broke serving it.
+
+    **No 409 here, deliberately.** The VRAM guard exists because
+    releasing a task loads ~12.5 GB of model onto a GPU shared with the
+    live DJ. Publishing touches the disk, not the GPU: it downloads a
+    file ACE rendered earlier (its result files survive restarts) and
+    writes a WAV plus a tracks.json entry. Refusing it during a set
+    would cost the operator a take for no VRAM saved.
+
+    Concurrency, on the other hand, is real but not enforceable here —
+    see the ``--build-catalog`` note in ``web/CLAUDE.md``. The cheap
+    freshness the ingest already provides is that it re-reads
+    tracks.json inside the same call that appends to it and backs the
+    file up first, so the loser of a race loses one entry, not the
+    catalog.
+    """
+    client = _client()
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+
+    try:
+        resolved = validate_ace_audio_path(req.file, resolve_file=True)
+    except AceAudioPathError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Cheap pre-flight: refuse a take that could never be selected into a
+    # session BEFORE pulling 35 MB across the LAN. The ingest re-checks
+    # against the probed duration — this only trusts ACE's own number.
+    from agent.eligibility import MIN_TRACK_DURATION_SEC  # noqa: PLC0415
+
+    if req.metas.duration is not None and req.metas.duration < MIN_TRACK_DURATION_SEC:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"the take is {req.metas.duration:.1f}s long — shorter than the "
+                f"{MIN_TRACK_DURATION_SEC:.0f}s minimum for session eligibility, "
+                f"so it could never be selected into a session"
+            ),
+        )
+
+    if req.prompt:
+        # tracks.json has no prompt column; keep the provenance in the log
+        # rather than dropping it silently or forking the catalog schema.
+        print(
+            f"[generator] publishing '{req.display_name}' from prompt: "
+            f"{req.prompt.strip()[:160]}",
+            flush=True,
+        )
+
+    work_dir = tempfile.mkdtemp(prefix="apollo-publish-")
+    try:
+        wav_path = os.path.join(work_dir, "take.wav")
+        await _download_take(client, resolved.api_path, wav_path)
+
+        lyrics_path = None
+        if req.lyrics and req.lyrics.strip():
+            # The ingest takes lyrics as a FILE (its `--lyrics` flag); the
+            # wire carries TEXT, matching the sidecar's `lyrics` key. One
+            # temp file bridges the two without a second ingest entry point.
+            lyrics_path = os.path.join(work_dir, "lyrics.txt")
+            with open(lyrics_path, "w", encoding="utf-8") as fh:
+                fh.write(req.lyrics)
+
+        # `main` is imported HERE, inside the handler, and never at module
+        # scope: it costs a measured 2.61 s and ~1800 modules (librosa,
+        # numba, moviepy, pedalboard). That is unacceptable on the import
+        # path of a web backend — it is the G1 rule that keeps
+        # `_genre_bpm_windows` bound to `agent.tools` instead. Publishing
+        # is a rare, human-triggered action that already spends seconds
+        # downloading a WAV and running ffmpeg, so paying it once here is
+        # the right trade, and it is the ONLY way to run the identical
+        # ingest the CLI runs (`--ingest`) rather than reimplementing the
+        # catalog conventions and drifting from them.
+        main = await asyncio.to_thread(importlib.import_module, "main")
+
+        try:
+            entry = await asyncio.to_thread(
+                main.ingest_track,
+                wav_path,
+                req.genre_folder,
+                display_name=req.display_name,
+                bpm=req.metas.bpm,
+                keyscale=req.metas.keyscale,
+                variant_of=req.variant_of,
+                lyrics=lyrics_path,
+            )
+        except main.IngestRefused as exc:
+            raise HTTPException(status_code=422, detail=exc.message) from exc
+        except SystemExit as exc:  # pragma: no cover — defensive
+            raise HTTPException(
+                status_code=500, detail=f"ingest exited unexpectedly: {exc}"
+            ) from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    return {
+        "track_id": entry["id"],
+        "file": entry["file"],
+        "display_name": entry["display_name"],
+        "camelot_key": entry["camelot_key"],
+        "bpm": entry["bpm"],
+        "variant_of": entry["variant_of"],
+        "note": FIX_INCOMPLETE_NOTE,
+    }

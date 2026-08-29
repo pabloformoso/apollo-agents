@@ -16,16 +16,24 @@
  *
  * Refusals are rendered, never swallowed. A 409 (the VRAM protocol: a set is
  * on air) shows the server's message VERBATIM — paraphrasing a protocol
- * refusal is how it stops being understood.
+ * refusal is how it stops being understood. The same rule carries the
+ * publisher's 422s, which arrive in the ingest's own words ("bpm 90 is
+ * outside the 'techno' window 120-160 BPM") and are the whole value of it.
  *
- * Publishing to the catalog is G2. The button exists, disabled, to mark the
- * seam.
+ * G2b — a take publishes into the catalog from its own row: confirm the
+ * genre and the title (the title becomes the WAV's filename forever), send
+ * the path the page PERSISTED when the poll landed, and the row keeps the
+ * new track id. Publishing is one-way per take, so the button goes inert.
  */
 import * as React from "react";
 import { getCatalog } from "@/lib/api";
 import {
+  buildPublishRequest,
+  canPublishTake,
+  suggestDisplayName,
   takeAudioUrl,
   useGeneratorTask,
+  useTakePublish,
   type Take,
 } from "@/lib/generator";
 import { usePlayer, type Playable } from "@/lib/player";
@@ -111,16 +119,31 @@ function playableFor(take: Take, taskId: string, genre: string): Playable {
   };
 }
 
+const NO_METADATA_TITLE =
+  "This take came back without a BPM or a key, so the catalog would have to " +
+  "guess them — and guessed metadata is how it acquired its poisoned BPMs.";
+
 function TakeRow({
   take,
   playable,
   queue,
+  genres,
+  defaultGenre,
+  publishedNames,
+  onPublished,
 }: {
   take: Take;
   playable: Playable;
   queue: Playable[];
+  /** Real genre folders — a take lands in one of them, never a new one. */
+  genres: string[];
+  defaultGenre: string;
+  /** Names already published from THIS batch, offered as `variant of`. */
+  publishedNames: string[];
+  onPublished: (displayName: string) => void;
 }) {
   const { play, pause, currentTrack, isPlaying } = usePlayer();
+  const { state: pub, open, cancel, publish } = useTakePublish();
   const active = currentTrack?.id === playable.id;
   const playingThis = active && isPlaying;
   const metas = take.metas ?? {};
@@ -131,56 +154,224 @@ function TakeRow({
     take.seed_value != null ? `seed ${take.seed_value}` : "seed —",
   ];
 
+  const [name, setName] = React.useState("");
+  const [genreFolder, setGenreFolder] = React.useState(defaultGenre);
+  const [variantOf, setVariantOf] = React.useState("");
+
+  const publishable = canPublishTake(take);
+  const busy = pub.phase === "publishing";
+  const confirming =
+    pub.phase === "confirm" || pub.phase === "publishing" || pub.phase === "failed";
+
+  // Defaults are computed when the panel OPENS, not at mount: a take
+  // published from an earlier row changes what this one should suggest.
+  const startConfirm = () => {
+    const base = publishedNames[0] ?? null;
+    setName(base ?? suggestDisplayName(take.prompt));
+    setGenreFolder(defaultGenre);
+    setVariantOf(base ?? "");
+    open();
+  };
+
+  const onPublish = async () => {
+    const result = await publish(
+      buildPublishRequest(take, {
+        displayName: name,
+        genreFolder,
+        variantOf: variantOf || null,
+      }),
+    );
+    if (result) onPublished(result.display_name);
+  };
+
   return (
     <li
       data-testid="generator-take"
-      className="flex items-center gap-3 py-3 border-b border-line"
+      className="flex flex-col border-b border-line"
     >
-      <button
-        type="button"
-        onClick={() => (playingThis ? pause() : play(playable, queue))}
-        data-testid="generator-take-play"
-        aria-label={`${playingThis ? "Pause" : "Play"} take ${take.index + 1}`}
-        className={
-          "w-9 h-9 flex-shrink-0 flex items-center justify-center border text-sm " +
-          (active
-            ? "border-ember text-ember"
-            : "border-line2 text-ember-text hover:border-ember hover:text-ember")
-        }
-      >
-        {playingThis ? "❚❚" : "▶"}
-      </button>
+      <div className="flex items-center gap-3 py-3">
+        <button
+          type="button"
+          onClick={() => (playingThis ? pause() : play(playable, queue))}
+          data-testid="generator-take-play"
+          aria-label={`${playingThis ? "Pause" : "Play"} take ${take.index + 1}`}
+          className={
+            "w-9 h-9 flex-shrink-0 flex items-center justify-center border text-sm " +
+            (active
+              ? "border-ember text-ember"
+              : "border-line2 text-ember-text hover:border-ember hover:text-ember")
+          }
+        >
+          {playingThis ? "❚❚" : "▶"}
+        </button>
 
-      <div className="min-w-0 flex-1">
-        <div className="font-display italic text-lg leading-tight">
-          Take {take.index + 1}
-        </div>
-        <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-          {chips.map((c, i) => (
-            <span
-              key={i}
-              className="font-mono text-[10px] text-mute border border-line2 px-1.5 py-0.5"
-            >
-              {c}
-            </span>
-          ))}
-        </div>
-        {take.result_parse_error && (
-          <div className="font-mono text-[10px] text-warn mt-1">
-            metadata unreadable — audio still plays
+        <div className="min-w-0 flex-1">
+          <div className="font-display italic text-lg leading-tight">
+            Take {take.index + 1}
           </div>
+          <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+            {chips.map((c, i) => (
+              <span
+                key={i}
+                className="font-mono text-[10px] text-mute border border-line2 px-1.5 py-0.5"
+              >
+                {c}
+              </span>
+            ))}
+          </div>
+          {take.result_parse_error && (
+            <div className="font-mono text-[10px] text-warn mt-1">
+              metadata unreadable — audio still plays
+            </div>
+          )}
+        </div>
+
+        {pub.phase === "published" ? (
+          <Btn
+            kind="ghost"
+            disabled
+            data-testid="generator-publish"
+            title="Already in the catalog."
+            className="px-3 py-[7px] text-[11px] flex-shrink-0"
+          >
+            Published
+          </Btn>
+        ) : (
+          <Btn
+            kind="ghost"
+            onClick={startConfirm}
+            disabled={!publishable || pub.phase !== "idle"}
+            data-testid="generator-publish"
+            title={
+              publishable
+                ? "Add this take to the catalog."
+                : NO_METADATA_TITLE
+            }
+            className="px-3 py-[7px] text-[11px] flex-shrink-0"
+          >
+            Publish to catalog
+          </Btn>
         )}
       </div>
 
-      <Btn
-        kind="ghost"
-        disabled
-        data-testid="generator-publish"
-        title="Publishing to the catalog lands in G2."
-        className="px-3 py-[7px] text-[11px] flex-shrink-0"
-      >
-        Publish to catalog (G2)
-      </Btn>
+      {confirming && (
+        <div
+          data-testid="generator-publish-confirm"
+          className="flex flex-col gap-3 border border-line2 p-3 mb-3"
+        >
+          {pub.error && (
+            <Banner tone="error">
+              <span
+                data-testid="generator-publish-error"
+                className="normal-case tracking-normal font-sans text-[12px]"
+              >
+                {pub.error}
+              </span>
+            </Banner>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field
+              label="display name"
+              hint="Becomes the WAV's filename and the track's name in every set."
+            >
+              <input
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                data-testid="generator-publish-name"
+                className={FIELD_CLS}
+                disabled={busy}
+              />
+            </Field>
+            <Field label="genre folder">
+              <select
+                value={genreFolder}
+                onChange={(e) => setGenreFolder(e.target.value)}
+                data-testid="generator-publish-genre"
+                className={FIELD_CLS}
+                disabled={busy}
+              >
+                {genres.length === 0 && <option value="">No genres found</option>}
+                {genres.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          </div>
+
+          {publishedNames.length > 0 && (
+            <Field
+              label="variant of"
+              hint="A second take of the same piece links to the first, so the no-repeat rules treat them as one."
+            >
+              <select
+                value={variantOf}
+                onChange={(e) => setVariantOf(e.target.value)}
+                data-testid="generator-publish-variant"
+                className={FIELD_CLS}
+                disabled={busy}
+              >
+                <option value="">a new piece</option>
+                {publishedNames.map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+            </Field>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <Btn
+              kind="ghost"
+              type="button"
+              onClick={cancel}
+              disabled={busy}
+              data-testid="generator-publish-cancel"
+              className="px-3 py-1.5 text-[11px]"
+            >
+              Cancel
+            </Btn>
+            <Btn
+              type="button"
+              onClick={() => void onPublish()}
+              disabled={busy || !name.trim() || !genreFolder}
+              data-testid="generator-publish-submit"
+              className="px-4 py-[7px] text-[11px]"
+            >
+              {busy ? (
+                <>
+                  <Spinner /> Publishing
+                </>
+              ) : (
+                "Publish"
+              )}
+            </Btn>
+          </div>
+        </div>
+      )}
+
+      {pub.phase === "published" && pub.result && (
+        <div
+          data-testid="generator-published"
+          className="flex flex-col gap-1 border border-line2 p-3 mb-3"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-[10px] text-ember border border-ember px-1.5 py-0.5">
+              {pub.result.track_id}
+            </span>
+            <span className="font-mono text-[10px] text-mute">
+              {pub.result.camelot_key} · {pub.result.bpm} BPM
+              {pub.result.variant_of ? ` · take of ${pub.result.variant_of}` : ""}
+            </span>
+          </div>
+          <span className="text-[11px] text-mute leading-[1.45]">
+            {pub.result.note}
+          </span>
+        </div>
+      )}
     </li>
   );
 }
@@ -213,6 +404,9 @@ export function GeneratorDialog({
   const [seed, setSeed] = React.useState("");
   const [keyScale, setKeyScale] = React.useState("");
   const [timeSig, setTimeSig] = React.useState("");
+  // Names published from THIS batch, in publish order — the first one is
+  // what a second take is offered as a variant OF.
+  const [publishedNames, setPublishedNames] = React.useState<string[]>([]);
 
   // Genres are the catalog's — ACE writes into a real genre folder, so the
   // list must be the folders that exist (same fetch TrackPicker makes).
@@ -273,6 +467,19 @@ export function GeneratorDialog({
       state.takes.map((t) => playableFor(t, state.taskId ?? "task", genre)),
     [state.takes, state.taskId, genre],
   );
+
+  const onPublished = React.useCallback((displayName: string) => {
+    setPublishedNames((prev) =>
+      prev.includes(displayName) ? prev : [...prev, displayName],
+    );
+  }, []);
+
+  // "Generate another" starts a new batch, so the variant-of offers from
+  // the old one must not follow it across.
+  const startOver = React.useCallback(() => {
+    setPublishedNames([]);
+    reset();
+  }, [reset]);
 
   // A refused submit keeps the user on the form with the server's words.
   // 409 is the VRAM protocol and 503 is "the box is off" — neither is a
@@ -589,6 +796,10 @@ export function GeneratorDialog({
                   take={t}
                   playable={playables[i]}
                   queue={playables}
+                  genres={genres ?? []}
+                  defaultGenre={genre}
+                  publishedNames={publishedNames}
+                  onPublished={onPublished}
                 />
               ))}
             </ul>
@@ -598,7 +809,7 @@ export function GeneratorDialog({
             {state.phase !== "pending" && (
               <Btn
                 kind="ghost"
-                onClick={reset}
+                onClick={startOver}
                 data-testid="generator-again"
                 className="px-3 py-1.5 text-[11px]"
               >

@@ -185,6 +185,18 @@ wizard).
 - Repaint: `repainting_start/end` in SECONDS of the source audio,
   `end=-1` = to the end; `chunk_mask_mode: "explicit"` applies the range
   as an exact mask; `thinking` is auto-ignored in repaint.
+- **Path shape (ACE session, code-verified 2026-08-29)**: the decoded
+  `path` param is an ABSOLUTE POSIX path on ACE's disk, prefix
+  `/home/pablo/code/ACE-Step-1.5/.cache/acestep/tmp/api_audio/` in this
+  deployment (UUID-ish name + take-index suffix + extension), encoded with
+  `quote(path, safe="")` — TOTAL percent-encoding, slashes as `%2F`.
+  Apollo validates by decoding once and prefix-matching a CONFIGURED base
+  dir (env `ACESTEP_AUDIO_ROOT`); `http(s)`-prefixed values are rejected.
+- **G3 fallback caveat**: ACE validates `src_audio_path` against ITS
+  process's `gettempdir()`, which a foreign `TMPDIR` in the launch env
+  could point elsewhere — the server would then 400 its own result paths.
+  G3's client treats a 400 "absolute audio file paths are not allowed" as
+  DEGRADE TO MULTIPART (upload the downloaded take), never a fatal error.
 - **Frontend**: per-take "Editar" → mode selector + a range control over
   the take's duration for repaint (+ strength for cover); the edited result
   renders as a CHAINED task card under its source (lineage visible — on

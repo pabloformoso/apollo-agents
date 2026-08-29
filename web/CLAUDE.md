@@ -70,6 +70,52 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   range headers are mirrored, so `<audio>` seeking works as it does on
   `FileResponse` without buffering a 35 MB WAV. Auth accepts a bearer
   header OR `?token=`, the same escape hatch as `stream_track`.
+- **One validator decides what "a take's audio" is** (G2b):
+  `validate_ace_audio_path` — the proxy and the publisher both call it,
+  so flipping the accepted location is a constant, not a refactor. Three
+  shapes, deliberately unequal in trust: `/v1/audio?path=<encoded>` is an
+  ACE *endpoint*, so proxying it leaves the inner path opaque (ACE's own
+  validator is the authority, and Apollo only screens for hosts and
+  traversal); a bare absolute path and everything **publish** resolves
+  name a FILESYSTEM location and must sit under `ACESTEP_AUDIO_ROOT`
+  (default `/home/pablo/code/ACE-Step-1.5/.cache/acestep/tmp/api_audio`,
+  comma-separated for several, read at CALL time). Confirmed with the ACE
+  session 2026-08-29: the encoding is `quote(p, safe="")`, so slashes
+  arrive as `%2F` and there are **no literal `/` in the query param** —
+  decode once, then prefix-match. Decoding uses `unquote`, never
+  `parse_qs`, which would turn a `+` in a filename into a space. A
+  relative path still streams (ACE resolves it) but can never publish.
+- **`POST /api/generator/publish` (G2b) runs the CLI's ingest, not a
+  copy.** It downloads the take through `stream_audio` and calls
+  `main.ingest_track` — the same function `python main.py --ingest`
+  runs — with `main` imported **inside the handler** (~2.61 s, ~1800
+  modules: unacceptable at module scope per the G1 rule, fine as a
+  one-off for a rare human action, and the only way not to fork the
+  catalog's id/filename conventions). Body carries the take's
+  DECODED path + metas from the PAGE (`extra="forbid"`): ACE's job
+  records expire but its result files never do, so the backend never
+  re-queries an old task and there is no `task_id` in the contract.
+  `lyrics` is TEXT (the sidecar's semantics), bridged to the ingest's
+  file-taking `--lyrics` through one temp file. **Ingest refusals pass
+  through as 422 with the message verbatim** — "bpm 90 is outside the
+  'techno' window 120-160 BPM" is what the user has to act on, and
+  paraphrasing it would fork the wording from the CLI; `main.IngestRefused`
+  (a `SystemExit` subclass carrying `.message`) is what makes that
+  possible without changing the CLI's behaviour. There is **no 409**:
+  publishing touches the disk, not the GPU, so the VRAM protocol has
+  nothing to protect here.
+- **Publishing while `--build-catalog` is running is a human-scheduling
+  problem, not a lock** (same class as the VRAM rule). The builder is
+  serial, takes ~1.25 min/track, and writes `tracks.json` **only at the
+  very end** — so a publish that lands mid-build is silently discarded
+  when the builder overwrites the file. The backend deliberately does
+  NOT introspect Docker to detect it: that check would be unreliable,
+  untestable and one more thing to keep true. What the ingest path does
+  give for free is that it re-reads `tracks.json` inside the same call
+  that appends to it and backs it up first (`tracks.json.<stamp>.bak`),
+  so the loser of a race loses one entry and the backup is the way back.
+  Rule: don't publish while a catalog build is in flight — check with
+  `docker ps | grep apollo-build` first.
 - **Live WS roles**: `/live/stream` = PRIMARY (drives playback, sends
   `playback_pos` every ~250 ms and `track_ended`); `/live/viewer` =
   read-only follower (OBS). Viewers never send. A wrongly-primary OBS
@@ -155,6 +201,23 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   fills the centre of the genre's window. A third copy of
   `BPM_GENRE_RANGES` in TS is exactly the drift the root CLAUDE.md warns
   about.
+- **Publish is per-take, confirmed, and one-way** (G2b). The G1
+  placeholder is now a real button: `idle → confirm → publishing →
+  published | failed`, all pure folds in `lib/generator.ts` so the
+  machine is testable without a DOM. The confirm step exists because
+  `display_name` becomes the WAV's filename and the track's name in
+  every set forever — it is prefilled from the prompt
+  (`suggestDisplayName`) and the genre from the form, both editable.
+  A take that came back without `metas.bpm`/`keyscale` cannot publish at
+  all (`canPublishTake`): the ingest refuses to guess, and guessed
+  metadata is how the catalog got its poisoned BPMs. `decodedTakePath`
+  is the page's half of the persistence rule — ACE's `file` is decoded
+  ONCE here (with `decodeURIComponent`, never `URLSearchParams`, which
+  would eat a `+` in a filename) and the decoded path is what publish
+  sends. After the first take publishes, later takes in the same batch
+  are offered `variant of <that name>` — the only way two takes of one
+  prompt link as a single piece for the no-repeat machinery. Server
+  refusals render VERBATIM, the same rule as the 409.
 
 ## Testing
 
@@ -165,6 +228,9 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   404→inert contract above. `generator-wizard.spec.ts` uses the same
   `addInitScript` fetch shim to script `/api/generator/*` (including two
   degraded polls), so it passes whether or not ACE is running.
+  `generator-publish.spec.ts` picks up where it stops and walks take →
+  confirm → refusal → published chip → variant, capturing the POST body
+  so the DECODED-path contract is asserted on the wire.
 
 ## Known issues
 
