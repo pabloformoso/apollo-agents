@@ -6,6 +6,9 @@
 - run_bench(): render a session, compute all metrics, compare against the
   references, write report.{json,md} + WAV. Two tiers: reference_informed
   failures gate --strict; advisory failures only print.
+- bench_wav(): same verdict for audio this bench did NOT render — the
+  algorave/Strudel lane hands us a finished WAV and no spec sequence, so
+  the symbolic half is simply absent. Same references, same margins.
 """
 
 from __future__ import annotations
@@ -40,6 +43,14 @@ REFERENCES_PATH = Path(__file__).parent / "quality_references.json"
 CENTROID_RATIO_MAX = 2.5   # render centroid within [ref_min/R, ref_max*R]
 TILT_DELTA_MAX = 8.0       # dB/oct beyond the reference range
 NOVELTY_MAX = 0.95         # consecutive phrases sharing ~nothing = mode chaos
+
+
+class BenchInputError(ValueError):
+    """Something the operator handed the bench is wrong (file, genre, refs).
+
+    Raised instead of letting soundfile/json blow up so the CLI can turn it
+    into a one-line message rather than a traceback.
+    """
 
 
 def extract_references(genre_dirs: dict[str, Path], n: int = 5, sr_limit: int | None = None) -> dict:
@@ -127,22 +138,101 @@ def run_bench(genre: str, phrases: int = 2, seed: int = 0, out_dir=None,
         out.mkdir(parents=True, exist_ok=True)
         sf.write(str(out / "session.wav"), audio, SR)
         (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        (out / "report.md").write_text(_to_markdown(report), encoding="utf-8")
+        (out / "report.md").write_text(to_markdown(report), encoding="utf-8")
     return report, not failures
 
 
-def _to_markdown(report: dict) -> str:
-    lines = [f"# Quality bench — {report['genre']} (seed {report['seed']})", ""]
+def load_wav_mono(path, sr: int = SR) -> tuple[np.ndarray, int, int]:
+    """Read any WAV as a mono buffer at the bench SR.
+
+    Stereo collapses by channel mean and a foreign rate is resampled, so
+    a 48 kHz stereo render scores on the same footing as the mono numpy
+    one. Returns (mono, source_rate, source_channels) — the CLI reports
+    what it had to convert, since that explains a surprising centroid.
+    """
+    file = Path(path)
+    if not file.is_file():
+        raise BenchInputError(f"WAV not found: {file}")
+    try:
+        audio, file_sr = sf.read(str(file), always_2d=True)
+    except RuntimeError as exc:                    # soundfile.LibsndfileError
+        raise BenchInputError(f"cannot read {file} as audio: {exc}") from exc
+    if audio.shape[0] == 0:
+        raise BenchInputError(f"{file} has no audio frames")
+    channels = audio.shape[1]
+    mono = audio.mean(axis=1).astype(np.float32)
+    if file_sr != sr:
+        import librosa                             # heavy; only the WAV path needs it
+
+        mono = librosa.resample(mono, orig_sr=file_sr, target_sr=sr).astype(np.float32)
+    return mono, int(file_sr), int(channels)
+
+
+def bench_wav(wav_path, genre: str, out_dir=None,
+              references_path=REFERENCES_PATH) -> tuple[dict, bool]:
+    """Score a WAV this bench did not render. Returns (report, passed).
+
+    The audio half is identical to run_bench's — same analyze_wav, same
+    reference bands, same margins — so an external render is judged by the
+    rule the generative engine is already judged by. The symbolic half is
+    empty: no specs, no novelty, nothing to be honest about there.
+    """
+    refs_file = Path(references_path)
+    if not refs_file.is_file():
+        raise BenchInputError(f"references file not found: {refs_file}")
+    try:
+        references = load_references(refs_file)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise BenchInputError(f"references file {refs_file} is not valid JSON: {exc}") from exc
+    genre_ref = references.get(genre)
+    if not genre_ref:
+        known = ", ".join(sorted(references)) or "none"
+        raise BenchInputError(f"no references for genre '{genre}' in {refs_file} (has: {known})")
+
+    mono, file_sr, channels = load_wav_mono(wav_path)
+    audio_metrics = analyze_wav(mono, SR)
+    failures = _check_reference_informed(genre_ref, audio_metrics, [])
+
+    report = {
+        "genre": genre,
+        "wav": str(Path(wav_path)),
+        "source_sample_rate": file_sr,
+        "source_channels": channels,
+        "duration_sec": round(len(mono) / SR, 2),
+        "phrases": [],
+        "audio": audio_metrics,
+        "reference": genre_ref,
+        "reference_informed_failures": failures,
+        "passed": not failures,
+    }
+
+    if out_dir is not None:
+        out = Path(out_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        (out / "report.md").write_text(to_markdown(report), encoding="utf-8")
+    return report, not failures
+
+
+def to_markdown(report: dict) -> str:
+    source = f"wav {Path(report['wav']).name}" if "wav" in report else f"seed {report['seed']}"
+    lines = [f"# Quality bench — {report['genre']} ({source})", ""]
     adv, ri = report["audio"]["advisory"], report["audio"]["reference_informed"]
     lines += ["## Audio",
               f"- LUFS {adv['lufs']} · LRA {adv['lra']} · crest {adv['crest_db']} dB *(advisory)*",
               f"- centroid {ri['centroid_hz']} Hz · tilt {ri['tilt_db_per_oct']} dB/oct "
-              f"*(reference_informed, normalized to {NORM_TARGET_LUFS} LUFS)*", "",
-              "## Phrases"]
-    for i, p in enumerate(report["phrases"]):
-        nov = f" · novelty {p['novelty_vs_prev']}" if "novelty_vs_prev" in p else ""
-        lines.append(f"{i + 1}. energy {p['energy']}{nov} · density {p['note_density']}")
-        lines.append(f"   {p['reason']}")
-    lines += ["", "## Verdict",
+              f"*(reference_informed, normalized to {NORM_TARGET_LUFS} LUFS)*"]
+    if "wav" in report:
+        lines.append(f"- source {report['source_channels']}ch @ {report['source_sample_rate']} Hz "
+                     f"· {report['duration_sec']}s *(downmixed/resampled to {SR} Hz mono)*")
+    lines.append("")
+    if report["phrases"]:
+        lines.append("## Phrases")
+        for i, p in enumerate(report["phrases"]):
+            nov = f" · novelty {p['novelty_vs_prev']}" if "novelty_vs_prev" in p else ""
+            lines.append(f"{i + 1}. energy {p['energy']}{nov} · density {p['note_density']}")
+            lines.append(f"   {p['reason']}")
+        lines.append("")
+    lines += ["## Verdict",
               "PASS" if report["passed"] else "FAIL: " + "; ".join(report["reference_informed_failures"])]
     return "\n".join(lines) + "\n"
