@@ -1785,10 +1785,33 @@ INGEST_SUBTYPE = "PCM_16"
 INGEST_CHANNELS = 2
 
 
+class IngestRefused(SystemExit):
+    """One of ``ingest_track``'s refusals, carrying its message.
+
+    Subclasses ``SystemExit`` with code 1 **on purpose**, so the CLI path
+    is byte-identical to the ``sys.exit(1)`` it replaced: the refusal is
+    already printed by :func:`_ingest_refuse`, an uncaught ``SystemExit``
+    subclass still exits 1 without a traceback, and callers that catch
+    ``SystemExit`` (the whole ``tests/test_ingest.py`` suite) keep
+    working unchanged.
+
+    What it adds is ``.message``. A *programmatic* caller — G2b's
+    ``POST /api/generator/publish``, which runs this same ingest for the
+    wizard — cannot read the reason off a bare exit code, and the reason
+    is the entire value of these refusals ("bpm 90 is outside the
+    'techno' window 120-160 BPM" is what the user has to act on). The
+    endpoint surfaces ``.message`` verbatim as its 422 detail.
+    """
+
+    def __init__(self, message):
+        super().__init__(1)
+        self.message = message
+
+
 def _ingest_refuse(message):
     """Print a refusal in the catalog-flow voice and exit non-zero."""
     print(f"Error: {message}")
-    sys.exit(1)
+    raise IngestRefused(message)
 
 
 def _catalog_backup_path(catalog_path):

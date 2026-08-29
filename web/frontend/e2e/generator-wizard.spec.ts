@@ -210,9 +210,11 @@ test.describe("G1 — generate a track with ACE from the editor", () => {
     await expect(first).toContainText("seed 4242");
     await expect(first.getByTestId("generator-take-play")).toBeVisible();
 
-    // G2's seam: present, disabled, honest about why.
+    // G2b brought this to life — the seam it used to mark is now the
+    // publish flow (walked in `generator-publish.spec.ts`); here it only
+    // has to be present and offered.
     const publish = page.getByTestId("generator-publish").first();
-    await expect(publish).toBeDisabled();
-    await expect(publish).toContainText(/publish to catalog \(g2\)/i);
+    await expect(publish).toBeEnabled();
+    await expect(publish).toContainText(/publish to catalog/i);
   });
 });

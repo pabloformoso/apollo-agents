@@ -92,6 +92,29 @@ export type CreateTaskResponse = {
   eta_seconds: number | null;
 };
 
+/** G2b — what the publisher sends. `file` is the take's DECODED ACE path. */
+export type PublishRequest = {
+  file: string;
+  metas: { bpm: number; keyscale: string; duration?: number | null };
+  prompt?: string;
+  /** TEXT, not a filename — lands as a `.lrc` beside the WAV. */
+  lyrics?: string;
+  display_name: string;
+  genre_folder: string;
+  variant_of?: string;
+};
+
+export type PublishResponse = {
+  track_id: string;
+  file: string;
+  display_name: string;
+  camelot_key: string;
+  bpm: number;
+  variant_of: string | null;
+  /** "run --fix-incomplete later" — rendered with the chip, not swallowed. */
+  note: string;
+};
+
 // ── Errors ────────────────────────────────────────────────────────────────
 
 /** HTTP-status-carrying error. `lib/api.ts`'s `req` throws a bare Error, so
@@ -170,6 +193,12 @@ export const createGeneratorTask = (body: CreateTaskRequest) =>
 
 export const getGeneratorTask = (taskId: string) =>
   gfetch<TaskSnapshot>(`/generator/tasks/${encodeURIComponent(taskId)}`);
+
+export const publishTake = (body: PublishRequest) =>
+  gfetch<PublishResponse>("/generator/publish", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 /**
  * Audio URL for a take. `<audio>` can't set an Authorization header, so the
@@ -398,6 +427,206 @@ export function useGeneratorTask(
   );
 
   return { state, etaCountdown, submit, reset };
+}
+
+// ── Publishing a take to the catalog (G2b) ────────────────────────────────
+
+/**
+ * The take's DECODED server-side path — what the publisher needs.
+ *
+ * ACE's `file` is `/v1/audio?path=<percent-encoded absolute path>`, encoded
+ * with `quote(p, safe="")`, so every slash arrives as `%2F`. Decoded ONCE
+ * here, deliberately with `decodeURIComponent` and not `URLSearchParams`:
+ * the latter also turns `+` into a space, and a `+` in a filename is a real
+ * character. Anything without a `path=` parameter passes through untouched.
+ *
+ * The page owns this value because ACE's job RECORDS expire (in-memory,
+ * 24 h, and the VRAM protocol powers the box down between batches) while its
+ * result FILES never do — so publish carries the path from here rather than
+ * asking the backend to re-query a task that may no longer exist.
+ */
+export function decodedTakePath(file: string): string {
+  const raw = (file ?? "").trim();
+  const q = raw.indexOf("?");
+  if (q === -1) return raw;
+  for (const field of raw.slice(q + 1).split("&")) {
+    const eq = field.indexOf("=");
+    if (eq !== -1 && field.slice(0, eq) === "path") {
+      try {
+        return decodeURIComponent(field.slice(eq + 1));
+      } catch {
+        return raw;
+      }
+    }
+  }
+  return raw;
+}
+
+/** Characters the catalog can't take: `display_name` becomes the WAV's stem. */
+const ILLEGAL_NAME_CHARS = /[<>:"/\\|?*]/g;
+
+const MAX_SUGGESTED_NAME = 48;
+
+/**
+ * A publishable title guessed from the prompt.
+ *
+ * Only a starting point — the field is editable, and the name is what the
+ * track is called in every set forever. First clause, first few words, Title
+ * Case, filesystem-safe.
+ */
+export function suggestDisplayName(prompt: string | null | undefined): string {
+  const first = (prompt ?? "").split(/[,.\n;]/)[0] ?? "";
+  const words = first
+    .replace(ILLEGAL_NAME_CHARS, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5);
+  const name = words
+    .map((w) => w[0].toUpperCase() + w.slice(1))
+    .join(" ")
+    .slice(0, MAX_SUGGESTED_NAME)
+    .trim();
+  return name || "Untitled Take";
+}
+
+/**
+ * Can this take be published at all?
+ *
+ * The ingest refuses to guess: `bpm` and `keyscale` come from the generator
+ * that already knows them (detected metadata is how the catalog acquired its
+ * poisoned BPMs). A take whose `metas` failed to parse has neither, so the
+ * button says so instead of sending a request that can only 422.
+ */
+export function canPublishTake(take: Take): boolean {
+  const metas = take.metas ?? {};
+  return (
+    Boolean(decodedTakePath(take.file)) &&
+    typeof metas.bpm === "number" &&
+    Number.isFinite(metas.bpm) &&
+    Boolean(metas.keyscale && String(metas.keyscale).trim())
+  );
+}
+
+export type PublishOptions = {
+  displayName: string;
+  genreFolder: string;
+  /** Base take's display name — set when this is a second take. */
+  variantOf?: string | null;
+};
+
+/** Build the wire body from the take the page PERSISTED plus the form. */
+export function buildPublishRequest(
+  take: Take,
+  opts: PublishOptions,
+): PublishRequest {
+  const metas = take.metas ?? {};
+  const body: PublishRequest = {
+    file: decodedTakePath(take.file),
+    metas: {
+      bpm: Number(metas.bpm),
+      keyscale: String(metas.keyscale ?? "").trim(),
+      duration: typeof metas.duration === "number" ? metas.duration : null,
+    },
+    display_name: opts.displayName.trim(),
+    genre_folder: opts.genreFolder,
+  };
+  if (take.prompt && take.prompt.trim()) body.prompt = take.prompt;
+  if (take.lyrics && take.lyrics.trim()) body.lyrics = take.lyrics;
+  if (opts.variantOf && opts.variantOf.trim()) {
+    body.variant_of = opts.variantOf.trim();
+  }
+  return body;
+}
+
+/**
+ * idle → confirm → publishing → published | failed
+ *
+ * `confirm` is a deliberate stop: publishing writes a WAV and a catalog entry
+ * under a name that can't be changed afterwards without a rename, so the
+ * genre and the title get a look before the request goes out. `failed` keeps
+ * the form up (with the server's words) so the fix is one edit away.
+ */
+export type PublishPhase =
+  | "idle"
+  | "confirm"
+  | "publishing"
+  | "published"
+  | "failed";
+
+export type PublishState = {
+  phase: PublishPhase;
+  result: PublishResponse | null;
+  error: string | null;
+};
+
+export const INITIAL_PUBLISH_STATE: PublishState = {
+  phase: "idle",
+  result: null,
+  error: null,
+};
+
+/** Pure folds, so the machine is testable without fetch or a DOM. */
+export function publishOpened(prev: PublishState): PublishState {
+  // A published take never reopens: the entry exists, and a second publish
+  // of the same take could only collide with itself.
+  if (prev.phase === "published") return prev;
+  return { ...prev, phase: "confirm", error: null };
+}
+
+export function publishCancelled(prev: PublishState): PublishState {
+  if (prev.phase === "published" || prev.phase === "publishing") return prev;
+  return INITIAL_PUBLISH_STATE;
+}
+
+export function publishStarted(prev: PublishState): PublishState {
+  if (prev.phase === "published") return prev;
+  return { ...prev, phase: "publishing", error: null };
+}
+
+export function publishSucceeded(
+  prev: PublishState,
+  result: PublishResponse,
+): PublishState {
+  return { ...prev, phase: "published", result, error: null };
+}
+
+export function publishFailed(prev: PublishState, err: unknown): PublishState {
+  return {
+    ...prev,
+    phase: "failed",
+    // Verbatim: an ingest refusal already names the window, the floor or
+    // the colliding id — the whole point of passing it through.
+    error: err instanceof Error ? err.message : "Could not publish the take.",
+  };
+}
+
+export type TakePublishApi = {
+  state: PublishState;
+  open: () => void;
+  cancel: () => void;
+  publish: (body: PublishRequest) => Promise<PublishResponse | null>;
+};
+
+/** Own one take's publish flow. One instance per take row. */
+export function useTakePublish(): TakePublishApi {
+  const [state, setState] = useState<PublishState>(INITIAL_PUBLISH_STATE);
+
+  const open = useCallback(() => setState(publishOpened), []);
+  const cancel = useCallback(() => setState(publishCancelled), []);
+
+  const publish = useCallback(async (body: PublishRequest) => {
+    setState(publishStarted);
+    try {
+      const result = await publishTake(body);
+      setState((prev) => publishSucceeded(prev, result));
+      return result;
+    } catch (err: unknown) {
+      setState((prev) => publishFailed(prev, err));
+      return null;
+    }
+  }, []);
+
+  return { state, open, cancel, publish };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────
