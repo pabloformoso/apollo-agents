@@ -219,3 +219,28 @@ class TestAgentToolsParity:
         )
         for genre, window in BPM_GENRE_RANGES.items():
             assert _BPM_GENRE_RANGES[genre] == window, genre
+
+    def test_genre_themes_are_fully_in_sync(self):
+        """agent.tools ``GENRE_THEMES`` must equal main's exactly — every field.
+
+        The theme drift was worse than the BPM one: tools.py was missing
+        the same three genres ("lofi", "cocktail house", "soul jazz") AND
+        every entry it did have carried only 2 of the 8+ theme fields
+        (measured 2026-08-29) — while the spot-checks above only ever
+        compared healing's artwork_style and title_color, so none of it
+        failed a test. Full equality matters more here than for the BPM
+        windows: this copy is written into the draft session.json's
+        "theme" block, which _get_session_theme applies as its TOP layer,
+        above main.py's own genre defaults — a value that drifts in
+        agent/tools.py doesn't merely degrade, it silently overrides the
+        canonical theme at render time.
+        """
+        from agent.tools import GENRE_THEMES as TOOLS_THEMES
+
+        assert set(TOOLS_THEMES) == set(GENRE_THEMES), (
+            "key sets differ — only in agent.tools: "
+            f"{sorted(set(TOOLS_THEMES) - set(GENRE_THEMES))}; "
+            f"only in main: {sorted(set(GENRE_THEMES) - set(TOOLS_THEMES))}"
+        )
+        for genre, theme in GENRE_THEMES.items():
+            assert TOOLS_THEMES[genre] == theme, genre

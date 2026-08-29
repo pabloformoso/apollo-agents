@@ -1043,12 +1043,94 @@ def _parse_build_progress_line(line: str) -> dict | None:
 # v2.6.0 — extracted from build_session so the async render endpoint in
 # `web/backend/render.py` can write the same draft + theme payload without
 # invoking the sync subprocess loop below.
+# Full per-genre copies, kept in sync with ``GENRE_THEMES`` in main.py — the
+# canonical table, which also carries each palette's design rationale. Full
+# matters: this dict lands in the draft session.json's "theme" block, which
+# main.py's _get_session_theme applies as its TOP layer, above main.py's own
+# genre defaults — so a value that drifts here doesn't merely degrade, it
+# silently overrides the canonical theme at render time.
 GENRE_THEMES: dict[str, dict] = {
-    "lofi - ambient": {"artwork_style": "anime", "title_color": "#E8D5B7"},
-    "deep house": {"artwork_style": "deep-house-neon", "title_color": "#6A5AFF"},
-    "techno": {"artwork_style": "dark-techno", "title_color": "#FF1744"},
-    "cyberpunk": {"artwork_style": "dark-techno", "title_color": "#00FF88"},
-    "healing": {"artwork_style": "healing-aura", "title_color": "#9FE0D0"},
+    "lofi - ambient": {
+        "artwork_style": "anime",
+        "title_color": "#E8D5B7",
+        "title_stroke_color": "#5C4A32",
+        "bg_color": [18, 15, 12],
+        "waveform_color": [180, 160, 130],
+        "particle_color": [200, 180, 150],
+        "bg_darken": 0.85,
+        "title_font_size": 36,
+    },
+    "lofi": {
+        "artwork_style": "anime",
+        "title_color": "#E8D5B7",
+        "title_stroke_color": "#5C4A32",
+        "bg_color": [18, 15, 12],
+        "waveform_color": [180, 160, 130],
+        "particle_color": [200, 180, 150],
+        "bg_darken": 0.85,
+        "title_font_size": 36,
+    },
+    "deep house": {
+        "artwork_style": "deep-house-neon",
+        "title_color": "#6A5AFF",
+        "title_stroke_color": "#1A0A3E",
+        "bg_color": [12, 8, 28],
+        "waveform_color": [106, 90, 255],
+        "particle_color": [140, 120, 255],
+        "bg_darken": 0.7,
+        "title_font_size": 32,
+    },
+    "techno": {
+        "artwork_style": "dark-techno",
+        "title_color": "#FF1744",
+        "title_stroke_color": "#4A0010",
+        "bg_color": [5, 2, 8],
+        "waveform_color": [255, 23, 68],
+        "particle_color": [255, 50, 80],
+        "bg_darken": 0.85,
+        "title_font_size": 32,
+    },
+    "cyberpunk": {
+        "artwork_style": "dark-techno",
+        "title_color": "#00FF88",
+        "title_stroke_color": "#004422",
+        "bg_color": [8, 8, 14],
+        "waveform_color": [0, 255, 136],
+        "particle_color": [0, 200, 100],
+        "bg_darken": 0.75,
+        "title_font_size": 32,
+    },
+    "cocktail house": {
+        "artwork_style": "deep-house-neon",
+        "title_color": "#E8B86C",
+        "title_stroke_color": "#3A1F1A",
+        "bg_color": [22, 10, 16],
+        "waveform_color": [232, 184, 108],
+        "particle_color": [255, 210, 140],
+        "bg_darken": 0.75,
+        "title_font_size": 32,
+    },
+    "soul jazz": {
+        "artwork_style": "organic-zen",
+        "title_color": "#D98E3B",
+        "title_stroke_color": "#2A140A",
+        "bg_color": [20, 12, 8],
+        "waveform_color": [217, 142, 59],
+        "particle_color": [240, 180, 100],
+        "bg_darken": 0.8,
+        "title_font_size": 32,
+    },
+    "healing": {
+        "artwork_style": "healing-aura",
+        "title_color": "#9FE0D0",
+        "title_stroke_color": "#0C2A2A",
+        "bg_color": [8, 18, 22],
+        "waveform_color": [159, 224, 208],
+        "particle_color": [200, 240, 230],
+        "bg_darken": 0.85,
+        "video_bg_darken": 0.45,
+        "title_font_size": 32,
+    },
 }
 
 
