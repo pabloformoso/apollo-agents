@@ -13,6 +13,17 @@
  *   - `GET  /api/generator/audio?path=` → streaming proxy
  *   - `POST /api/generator/critique`    → {passed, bands, advisory, critique}
  *
+ * G6 adds the library the wizard's own state was never going to survive —
+ * close the tab and the history was gone (ACE's files outlive our record):
+ *   - `GET   /api/generator/generations?limit&offset`        → newest-first
+ *   - `PATCH /api/generator/generations/{id}/takes/{idx}`    → discard/restore
+ *   - `POST  /api/generator/generations/{id}/refresh`        → the resume lane
+ * The listing is read through `generationsFromPayload`, which takes a bare
+ * array or a `{generations}` envelope: the plan wrote one and the router
+ * answers the other, and that difference is not worth a broken feed. The
+ * refresh refuses a TERMINAL generation with a 409 naming its status, which
+ * is why only a `pending` card is offered the button.
+ *
  * Two refusals are first-class, not crashes:
  *   - **503** the generator is off. `available: false` is a NORMAL answer
  *     (the ACE box is powered down most of the time by design), so the
@@ -27,7 +38,7 @@
  * does the same for a failed browser→Apollo hop. A degraded poll is a blip,
  * not a failed task — it must never tear the card down.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getToken } from "./auth";
 
 const BASE = `${process.env.NEXT_PUBLIC_API_BASE ?? ""}/api`;
@@ -1234,6 +1245,576 @@ export function useTakeScore(): TakeScoreApi {
   }, []);
 
   return { state, score };
+}
+
+// ── The generations library (G6) ──────────────────────────────────────────
+
+/**
+ * A stored generation's lifecycle.
+ *
+ * `stale` is TERMINAL and means something very specific: ACE **answered**
+ * and said it does not know this job any more (its record window has
+ * passed). It is not "the box is down" — that arrives as `pending` with
+ * `degraded: true`, and the two must never be conflated on screen.
+ */
+export type GenerationStatus = "pending" | "done" | "failed" | "stale";
+
+/**
+ * A stored take's disposition.
+ *
+ * `published` is only ever written by a successful publish (the PATCH
+ * refuses it), so the feed never invents one: it either sees the store's
+ * value or the result of a publish it just made.
+ */
+export type TakeState = "fresh" | "published" | "discarded";
+
+/** A take as the STORE returns it: the poll shape plus its disposition. */
+export type StoredTake = Take & {
+  state?: TakeState | null;
+  published_track_id?: string | null;
+  /** The store's own decode of `file`. Carried, but not used: publishing
+   *  still sends `decodedTakePath(file)`, which is the same string by
+   *  construction (both sides resolve it through the one validator) and
+   *  keeps one rule for a take that came straight off a poll. */
+  decoded_path?: string | null;
+};
+
+/**
+ * The outgoing release payload as it was sent, plus `genre_folder`; an edit
+ * records `task_type` and its source path here, so lineage stays queryable.
+ * Every field is optional — this is a RECORD of a request, not a form, and
+ * a generation from an older shape must still render.
+ */
+export type GenerationRequest = {
+  prompt?: string | null;
+  genre_folder?: string | null;
+  [key: string]: unknown;
+};
+
+export type Generation = {
+  id: string;
+  created_at: string;
+  status: GenerationStatus;
+  request?: GenerationRequest | null;
+  takes?: StoredTake[] | null;
+  /** Set by `/refresh` when ACE could not be reached — a blip, not a verdict. */
+  degraded?: boolean;
+  error?: string | null;
+};
+
+/** The listing, either shape. */
+export type GenerationsPayload = Generation[] | { generations?: Generation[] | null };
+
+/**
+ * One page of cards, whichever way the router spells a list.
+ *
+ * The plan wrote `{generations: [...]}`; the router that landed answers a
+ * BARE ARRAY, the way `/api/playlists` does. Both are read here rather than
+ * picked, because the difference is a spelling and the feed should not
+ * break on a router that changes its mind about an envelope.
+ */
+export function generationsFromPayload(payload: GenerationsPayload): Generation[] {
+  if (Array.isArray(payload)) return payload;
+  return payload?.generations ?? [];
+}
+
+/** One "load more" worth of cards. */
+export const GENERATIONS_PAGE_SIZE = 10;
+
+export const listGenerations = async (
+  limit: number = GENERATIONS_PAGE_SIZE,
+  offset: number = 0,
+): Promise<Generation[]> =>
+  generationsFromPayload(
+    await gfetch<GenerationsPayload>(
+      `/generator/generations?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset)}`,
+    ),
+  );
+
+/**
+ * Flip one take between `discarded` and `fresh`.
+ *
+ * The answer body is deliberately ignored: the feed has already applied the
+ * flip optimistically, and the authoritative reconciliation is the next
+ * list fetch. What matters here is only whether the store took it.
+ */
+export async function setTakeState(
+  generationId: string,
+  index: number,
+  state: Exclude<TakeState, "published">,
+): Promise<void> {
+  await gfetch<unknown>(
+    `/generator/generations/${encodeURIComponent(generationId)}/takes/${encodeURIComponent(index)}`,
+    { method: "PATCH", body: JSON.stringify({ state }) },
+  );
+}
+
+/** Re-poll ACE for a `pending` generation — the resume lane. */
+export const refreshGeneration = (generationId: string) =>
+  gfetch<Generation>(
+    `/generator/generations/${encodeURIComponent(generationId)}/refresh`,
+    { method: "POST" },
+  );
+
+// ── Folds over the feed ───────────────────────────────────────────────────
+
+/** Undated rows sort last rather than crashing the comparator. */
+function createdAtMs(gen: Generation): number {
+  const t = Date.parse(String(gen?.created_at ?? ""));
+  return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+}
+
+/**
+ * Merge a freshly-fetched page into the feed, newest-first.
+ *
+ * Deduped by id with the INCOMING row winning — a later fetch is by
+ * definition the fresher read of a generation that may have moved from
+ * `pending` to `done` since the page was first seen. Sorting is by
+ * `created_at` rather than by arrival, so a "load more" that overlaps the
+ * first page (new work landed while the feed was open) cannot interleave
+ * older cards above newer ones.
+ */
+export function generationsMerged(
+  prev: Generation[],
+  incoming: Generation[],
+): Generation[] {
+  const byId = new Map<string, Generation>();
+  for (const g of prev ?? []) if (g?.id) byId.set(g.id, g);
+  for (const g of incoming ?? []) if (g?.id) byId.set(g.id, g);
+  return [...byId.values()].sort((a, b) => {
+    const ta = createdAtMs(a);
+    const tb = createdAtMs(b);
+    // Equal (both dated the same, or both undated) keeps insertion order —
+    // Array.sort is stable, so the server's own ordering survives.
+    return ta === tb ? 0 : tb - ta;
+  });
+}
+
+/**
+ * Replace one generation in place, by id.
+ *
+ * Position is kept deliberately: a refresh does not change `created_at`, so
+ * re-sorting could only make the card the operator just clicked jump under
+ * their cursor. An id the feed does not hold is ignored — identity out, so
+ * a late answer for a card that has since scrolled out of the list cannot
+ * resurrect it.
+ */
+export function generationReplaced(
+  prev: Generation[],
+  updated: Generation,
+): Generation[] {
+  if (!updated?.id) return prev;
+  let found = false;
+  const next = prev.map((g) => {
+    if (g.id !== updated.id) return g;
+    found = true;
+    return updated;
+  });
+  return found ? next : prev;
+}
+
+/** A missing/unknown `state` reads as `fresh` — the store's default. */
+export function takeStateOf(take: StoredTake): TakeState {
+  const s = take?.state;
+  return s === "published" || s === "discarded" ? s : "fresh";
+}
+
+/**
+ * Set one take's state, optimistically.
+ *
+ * Identity when the generation or the take is not in the list, so a stale
+ * click (a card refreshed out from under it) cannot rewrite anything. Pass
+ * `trackId` only when the publish that produced this flip returned one:
+ * `undefined` leaves whatever the store already knew alone.
+ */
+export function takeStateSet(
+  prev: Generation[],
+  generationId: string,
+  index: number,
+  state: TakeState,
+  trackId?: string | null,
+): Generation[] {
+  let touched = false;
+  const next = prev.map((gen) => {
+    if (gen.id !== generationId) return gen;
+    let hit = false;
+    const takes = (gen.takes ?? []).map((t) => {
+      if (t.index !== index) return t;
+      hit = true;
+      return {
+        ...t,
+        state,
+        ...(trackId === undefined ? {} : { published_track_id: trackId }),
+      };
+    });
+    if (!hit) return gen;
+    touched = true;
+    return { ...gen, takes };
+  });
+  return touched ? next : prev;
+}
+
+/** The takes a card shows without being asked. */
+export function visibleTakes(gen: Generation): StoredTake[] {
+  return (gen.takes ?? []).filter((t) => takeStateOf(t) !== "discarded");
+}
+
+/** The takes behind the card's "N discarded" toggle. */
+export function discardedTakes(gen: Generation): StoredTake[] {
+  return (gen.takes ?? []).filter((t) => takeStateOf(t) === "discarded");
+}
+
+export function discardedLabel(count: number): string {
+  return `${count} discarded`;
+}
+
+export function isPublishedTake(take: StoredTake): boolean {
+  return takeStateOf(take) === "published" || Boolean(take?.published_track_id);
+}
+
+/** ACE answered, and no longer knows the job. Terminal, and not a fault. */
+export const STALE_NOTE =
+  "ACE no longer has a record of this job — its 24-hour window has passed. " +
+  "Whatever it wrote is still on disk, but this card cannot be resumed.";
+
+/** The box could not be reached. Still pending, still resumable. */
+export const DEGRADED_NOTE =
+  "Could not reach ACE just now, so this is still pending — try resuming " +
+  "again in a moment.";
+
+export const FAILED_NOTE = "ACE reported this one as failed.";
+
+/**
+ * What the card should say and offer.
+ *
+ * The three refusals stay distinct on purpose: `failed` is ACE's verdict,
+ * `stale` is ACE forgetting, and `degraded` is Apollo not reaching ACE at
+ * all. Only the last leaves the resume action on the card.
+ */
+export type GenerationRead = {
+  status: GenerationStatus;
+  /** Offer "resume"? Only a pending generation can be re-polled. */
+  resumable: boolean;
+  /** The last refresh could not reach ACE. Rendered quietly — it is a blip. */
+  degraded: boolean;
+  /** One line under the badge, or null when the badge says it all. */
+  note: string | null;
+  /** Nothing more happens to this generation on its own. */
+  terminal: boolean;
+};
+
+export function readGeneration(gen: Generation): GenerationRead {
+  switch (gen?.status) {
+    case "done":
+      return {
+        status: "done",
+        resumable: false,
+        degraded: false,
+        note: null,
+        terminal: true,
+      };
+    case "failed":
+      return {
+        status: "failed",
+        resumable: false,
+        degraded: false,
+        // Verbatim when ACE said why — the rule every refusal here follows.
+        note: (gen.error ?? "").trim() || FAILED_NOTE,
+        terminal: true,
+      };
+    case "stale":
+      return {
+        status: "stale",
+        resumable: false,
+        degraded: false,
+        note: STALE_NOTE,
+        terminal: true,
+      };
+    default: {
+      const degraded = Boolean(gen?.degraded);
+      return {
+        status: "pending",
+        resumable: true,
+        degraded,
+        note: degraded ? DEGRADED_NOTE : null,
+        terminal: false,
+      };
+    }
+  }
+}
+
+const MAX_CARD_TITLE = 90;
+
+/** The prompt is the card's title — it is what the operator asked for. */
+export function generationTitle(gen: Generation): string {
+  const prompt = String(gen?.request?.prompt ?? "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!prompt) return "Untitled generation";
+  return prompt.length > MAX_CARD_TITLE
+    ? `${prompt.slice(0, MAX_CARD_TITLE - 1).trimEnd()}…`
+    : prompt;
+}
+
+function chipText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function chipNumber(value: unknown): number | null {
+  const n = typeof value === "string" ? Number(value) : value;
+  return typeof n === "number" && Number.isFinite(n) ? n : null;
+}
+
+/**
+ * The request, read back as chips.
+ *
+ * Only fields that were actually recorded appear: the store keeps the
+ * payload as it went out, and a generation from before a field existed
+ * must render as the shorter row rather than as a row of blanks.
+ */
+export function generationChips(gen: Generation): string[] {
+  const req = gen?.request ?? {};
+  const chips: string[] = [];
+  const genre = chipText(req.genre_folder);
+  if (genre) chips.push(genre);
+  // An edit records what kind it was; a plain generation has no task_type.
+  const taskType = chipText(req.task_type);
+  if (taskType) chips.push(taskType);
+  const duration = chipNumber(req.audio_duration);
+  if (duration !== null) chips.push(`${Math.round(duration)}s`);
+  const bpm = chipNumber(req.bpm);
+  if (bpm !== null) chips.push(`${Math.round(bpm)} BPM`);
+  const keyScale = chipText(req.key_scale);
+  if (keyScale) chips.push(keyScale);
+  const batch = chipNumber(req.batch_size);
+  if (batch !== null) {
+    const n = Math.round(batch);
+    chips.push(`${n} take${n === 1 ? "" : "s"}`);
+  }
+  const language = chipText(req.vocal_language);
+  if (language) chips.push(language);
+  return chips;
+}
+
+/**
+ * Absolute local time, not "3 hours ago".
+ *
+ * A feed left open in a tab would keep a relative label frozen at whatever
+ * it said on mount, and the one question this line answers — which of two
+ * cards came first — is answered better by the clock anyway.
+ */
+export function formatCreatedAt(iso: string | null | undefined): string {
+  const t = Date.parse(String(iso ?? ""));
+  if (!Number.isFinite(t)) return "—";
+  return new Date(t).toLocaleString();
+}
+
+/** A short page means the end of the feed — there is no total to compare. */
+export function hasMorePages(received: number, limit: number): boolean {
+  return limit > 0 && received >= limit;
+}
+
+// ── Feed state ────────────────────────────────────────────────────────────
+
+export type FeedState = {
+  generations: Generation[];
+  /** The first load. The page shows a line, not an empty state. */
+  loading: boolean;
+  /** A "load more" is in flight. */
+  loadingMore: boolean;
+  error: string | null;
+  hasMore: boolean;
+  /** How many rows have been REQUESTED — the next page's offset. */
+  offset: number;
+};
+
+export const INITIAL_FEED_STATE: FeedState = {
+  generations: [],
+  loading: true,
+  loadingMore: false,
+  error: null,
+  hasMore: false,
+  offset: 0,
+};
+
+/** Pure folds, so the feed is testable without fetch or a DOM. */
+export function feedLanded(
+  prev: FeedState,
+  incoming: Generation[],
+  pageSize: number,
+): FeedState {
+  const list = incoming ?? [];
+  return {
+    generations: generationsMerged(prev.generations, list),
+    loading: false,
+    loadingMore: false,
+    error: null,
+    hasMore: hasMorePages(list.length, pageSize),
+    // Advance by what the SERVER sent, not by what the merge kept: the
+    // offset addresses rows in the store, and a duplicate still occupied one.
+    offset: prev.offset + list.length,
+  };
+}
+
+export function feedLoadingMore(prev: FeedState): FeedState {
+  if (prev.loading || prev.loadingMore || !prev.hasMore) return prev;
+  return { ...prev, loadingMore: true, error: null };
+}
+
+export function feedFailed(prev: FeedState, err: unknown): FeedState {
+  return {
+    ...prev,
+    loading: false,
+    loadingMore: false,
+    // Verbatim, the rule every refusal in this module follows.
+    error:
+      err instanceof Error && err.message
+        ? err.message
+        : "Could not load the generations.",
+  };
+}
+
+export type GenerationsFeedApi = {
+  state: FeedState;
+  /** Fetch the next page. No-op while one is in flight or at the end. */
+  loadMore: () => Promise<void>;
+  /** Optimistic, then PATCHed; rolled back with the server's words on a refusal. */
+  setDiscarded: (
+    generationId: string,
+    index: number,
+    discarded: boolean,
+  ) => Promise<void>;
+  /** Re-poll a pending generation and reconcile the card. */
+  resume: (generationId: string) => Promise<void>;
+  /** Ids with a refresh in flight. */
+  resuming: string[];
+  /** A publish landed: mark the take, keep the id it came back with. */
+  notePublished: (
+    generationId: string,
+    index: number,
+    trackId: string | null,
+  ) => void;
+};
+
+/**
+ * Own the feed: first page on mount, "load more" on demand, and the two
+ * writes a card can make (discard/restore, resume).
+ *
+ * The mount fetch only ever calls `setState` from its own async callbacks —
+ * the same shape as `useGeneratorTask`'s poll effect — so the loading flag
+ * lives in the INITIAL state instead of being set from inside the effect.
+ */
+export function useGenerationsFeed(
+  pageSize: number = GENERATIONS_PAGE_SIZE,
+): GenerationsFeedApi {
+  const [state, setState] = useState<FeedState>(INITIAL_FEED_STATE);
+  const [resuming, setResuming] = useState<string[]>([]);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    listGenerations(pageSize, 0)
+      .then((rows) => {
+        if (cancelled) return;
+        setState((prev) => feedLanded(prev, rows, pageSize));
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setState((prev) => feedFailed(prev, err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [pageSize]);
+
+  const { offset, hasMore, loading, loadingMore } = state;
+  const loadMore = useCallback(async () => {
+    // The rendered flags cannot stop a second click in the same tick — the
+    // button only goes disabled on the next render — and a double fetch
+    // would advance the offset twice and SKIP a page, so the ref is the
+    // real guard and the flags are the readable one.
+    if (inFlight.current || loading || loadingMore || !hasMore) return;
+    inFlight.current = true;
+    setState(feedLoadingMore);
+    try {
+      const rows = await listGenerations(pageSize, offset);
+      setState((prev) => feedLanded(prev, rows, pageSize));
+    } catch (err: unknown) {
+      setState((prev) => feedFailed(prev, err));
+    } finally {
+      inFlight.current = false;
+    }
+  }, [pageSize, offset, hasMore, loading, loadingMore]);
+
+  const setDiscarded = useCallback(
+    async (generationId: string, index: number, discarded: boolean) => {
+      const next: Exclude<TakeState, "published"> = discarded
+        ? "discarded"
+        : "fresh";
+      const back: Exclude<TakeState, "published"> = discarded
+        ? "fresh"
+        : "discarded";
+      setState((prev) => ({
+        ...prev,
+        error: null,
+        generations: takeStateSet(prev.generations, generationId, index, next),
+      }));
+      try {
+        await setTakeState(generationId, index, next);
+      } catch (err: unknown) {
+        // Put it back exactly where it was and say why — a row that stayed
+        // hidden after a refused PATCH would be a lie about the store.
+        setState((prev) => ({
+          ...feedFailed(prev, err),
+          generations: takeStateSet(prev.generations, generationId, index, back),
+        }));
+      }
+    },
+    [],
+  );
+
+  const resume = useCallback(async (generationId: string) => {
+    setResuming((prev) =>
+      prev.includes(generationId) ? prev : [...prev, generationId],
+    );
+    try {
+      const updated = await refreshGeneration(generationId);
+      setState((prev) => ({
+        ...prev,
+        error: null,
+        // The id is filled in from the request when the answer omits it:
+        // the card that was clicked is the card that must reconcile.
+        generations: generationReplaced(prev.generations, {
+          ...updated,
+          id: updated?.id || generationId,
+        }),
+      }));
+    } catch (err: unknown) {
+      setState((prev) => feedFailed(prev, err));
+    } finally {
+      setResuming((prev) => prev.filter((id) => id !== generationId));
+    }
+  }, []);
+
+  const notePublished = useCallback(
+    (generationId: string, index: number, trackId: string | null) => {
+      setState((prev) => ({
+        ...prev,
+        generations: takeStateSet(
+          prev.generations,
+          generationId,
+          index,
+          "published",
+          trackId,
+        ),
+      }));
+    },
+    [],
+  );
+
+  return { state, loadMore, setDiscarded, resume, resuming, notePublished };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────

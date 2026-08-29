@@ -1,6 +1,7 @@
 """SQLite user store."""
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -71,6 +72,48 @@ def init_db() -> None:
         # rest with a key derived from JWT_SECRET (see
         # web/backend/youtube_auth._fernet); the access_token cache is
         # also stored so we avoid a refresh round-trip when it's fresh.
+        # G6 — the Generations Library. ACE-Step's job records are mortal
+        # (in-memory, 24 h, gone with the process the VRAM protocol stops
+        # between batches) while its result FILES are not, so this is the
+        # only durable record that a generation ever happened. `id` IS the
+        # ACE task_id: there is no second identity to keep in sync, and it
+        # is what the poll/refresh lanes already hold.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS generations (
+                id           TEXT    PRIMARY KEY,
+                user_id      INTEGER NOT NULL,
+                created_at   TEXT    NOT NULL,
+                status       TEXT    NOT NULL,
+                request_json TEXT    NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+        # The feed's one query: newest-first for ONE user.
+        c.execute(
+            "CREATE INDEX IF NOT EXISTS idx_generations_user "
+            "ON generations(user_id, created_at)"
+        )
+        # No separate index on generation_takes(generation_id): the
+        # PRIMARY KEY's own index is (generation_id, idx), whose leading
+        # column already serves every lookup this table gets. A second
+        # index on the same prefix would only cost writes.
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS generation_takes (
+                generation_id      TEXT    NOT NULL,
+                idx                INTEGER NOT NULL,
+                file               TEXT,
+                decoded_path       TEXT,
+                metas_json         TEXT,
+                prompt             TEXT,
+                lyrics             TEXT,
+                seed_value         TEXT,
+                state              TEXT    NOT NULL DEFAULT 'fresh',
+                published_track_id TEXT,
+                PRIMARY KEY (generation_id, idx),
+                FOREIGN KEY (generation_id) REFERENCES generations(id)
+                    ON DELETE CASCADE
+            )
+        """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS oauth_tokens (
                 user_id       INTEGER NOT NULL,
@@ -468,3 +511,287 @@ def delete_oauth_token(user_id: int, provider: str) -> bool:
         )
         c.commit()
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# G6 — the Generations Library (docs/acestep-wizard-plan.md §"G6 contract").
+#
+# Generations live only in the wizard page's state until this store: close
+# the tab and the history is gone, while ACE-Step's result files sit on its
+# disk forever. Every write here is a HOOK on an existing generator endpoint,
+# so the page stays dumb and the record survives it.
+#
+# Two rules the callers depend on:
+#
+# * **Every mutation is user-scoped in the SQL itself**, not in the caller.
+#   A poll or a publish carries a task id the browser supplied; matching on
+#   ``user_id`` here is what stops one user's poll from rewriting another's
+#   row. The "unknown to the store" answer (a task released before G6, or
+#   someone else's) is a plain ``False``/``0``, never an exception — the
+#   poll endpoint must keep answering either way.
+# * **A re-poll is a no-op.** ``save_generation_takes`` upserts by
+#   ``(generation_id, idx)`` and deliberately leaves ``state`` and
+#   ``published_track_id`` alone, so a second done-poll of a take the user
+#   already published or discarded cannot reset it to ``fresh``.
+#
+# JSON columns are parsed on the way out (``request``, ``metas``): the
+# encoding is this module's business, and a corrupt value degrades to an
+# empty object rather than breaking the feed.
+# ---------------------------------------------------------------------------
+
+#: ``generations.status`` vocabulary. ``stale`` is "ACE answered and does
+#: not know this task" — distinct from a transport blip, which leaves the
+#: row ``pending`` (never conflate the two: one is terminal, one is not).
+GENERATION_STATUSES = ("pending", "done", "failed", "stale")
+
+#: ``generation_takes.state``. ``published`` is reachable ONLY through a
+#: successful publish (:func:`mark_take_published`), never through the
+#: PATCH endpoint.
+TAKE_STATES = ("fresh", "published", "discarded")
+
+#: Feed page size guards, shared with the endpoint's query params.
+DEFAULT_GENERATIONS_LIMIT = 20
+MAX_GENERATIONS_LIMIT = 100
+
+
+def _loads(raw: object) -> dict:
+    """Parse a JSON column into a dict; anything else becomes ``{}``."""
+    if not isinstance(raw, str) or not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _take_row(row: sqlite3.Row) -> dict:
+    """One stored take in the poll endpoint's vocabulary.
+
+    ``index`` rather than ``idx``: that is what the wizard's poll response
+    calls it, and the library renders through the same take components.
+    """
+    return {
+        "index": row["idx"],
+        "file": row["file"],
+        "decoded_path": row["decoded_path"],
+        "metas": _loads(row["metas_json"]),
+        "prompt": row["prompt"],
+        "lyrics": row["lyrics"],
+        "seed_value": row["seed_value"],
+        "state": row["state"],
+        "published_track_id": row["published_track_id"],
+    }
+
+
+def _generation_row(row: sqlite3.Row, takes: list[dict]) -> dict:
+    return {
+        "id": row["id"],
+        "user_id": row["user_id"],
+        "created_at": row["created_at"],
+        "status": row["status"],
+        "request": _loads(row["request_json"]),
+        "takes": takes,
+    }
+
+
+def _takes_for(
+    c: sqlite3.Connection, generation_ids: list[str]
+) -> dict[str, list[dict]]:
+    """Takes for a page of generations in ONE query (no N+1 on the feed)."""
+    if not generation_ids:
+        return {}
+    marks = ",".join("?" * len(generation_ids))
+    rows = c.execute(
+        f"""
+        SELECT generation_id, idx, file, decoded_path, metas_json, prompt,
+               lyrics, seed_value, state, published_track_id
+        FROM generation_takes
+        WHERE generation_id IN ({marks})
+        ORDER BY generation_id, idx
+        """,
+        generation_ids,
+    ).fetchall()
+    out: dict[str, list[dict]] = {gid: [] for gid in generation_ids}
+    for row in rows:
+        out[row["generation_id"]].append(_take_row(row))
+    return out
+
+
+def record_generation(
+    generation_id: str,
+    user_id: int,
+    request: dict,
+    *,
+    status: str = "pending",
+) -> bool:
+    """Insert one generation. Returns False if the id is already recorded.
+
+    ``ON CONFLICT DO NOTHING`` rather than an upsert: the id is ACE's task
+    id, so a collision means "already recorded" and the existing row —
+    with its takes and its created_at — is the one worth keeping.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            """
+            INSERT INTO generations (id, user_id, created_at, status, request_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (generation_id, user_id, _now_iso(), status, json.dumps(request)),
+        )
+        c.commit()
+        return cur.rowcount > 0
+
+
+def get_generation(generation_id: str) -> dict | None:
+    """One generation with its takes, or None. Caller checks ``user_id``.
+
+    Ownership is the caller's call here, exactly as with
+    :func:`get_playlist`, so the endpoint can answer 404 for "unknown" and
+    "someone else's" with one sentence.
+    """
+    with _conn() as c:
+        row = c.execute(
+            "SELECT id, user_id, created_at, status, request_json "
+            "FROM generations WHERE id = ?",
+            (generation_id,),
+        ).fetchone()
+        if not row:
+            return None
+        takes = _takes_for(c, [row["id"]])
+        return _generation_row(row, takes[row["id"]])
+
+
+def list_generations_by_user(
+    user_id: int,
+    *,
+    limit: int = DEFAULT_GENERATIONS_LIMIT,
+    offset: int = 0,
+) -> list[dict]:
+    """The feed: newest first, takes embedded, one user only.
+
+    ``rowid`` breaks ties on ``created_at``: the stamp has second
+    resolution, and a batch released in the same second must still come
+    back in a stable, insertion-ordered sequence.
+    """
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT id, user_id, created_at, status, request_json
+            FROM generations
+            WHERE user_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, int(limit), int(offset)),
+        ).fetchall()
+        takes = _takes_for(c, [r["id"] for r in rows])
+        return [_generation_row(r, takes.get(r["id"], [])) for r in rows]
+
+
+def set_generation_status(generation_id: str, user_id: int, status: str) -> bool:
+    """Move one generation to ``status``. False = unknown or not this user's."""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE generations SET status = ? WHERE id = ? AND user_id = ?",
+            (status, generation_id, user_id),
+        )
+        c.commit()
+        return cur.rowcount > 0
+
+
+def save_generation_takes(
+    generation_id: str,
+    user_id: int,
+    takes: list[dict],
+    *,
+    status: str = "done",
+) -> bool:
+    """Persist a finished generation's takes + status. **Idempotent.**
+
+    Returns False without writing anything when the id is unknown or
+    belongs to another user — that is the "polling a task the store never
+    saw" case, which must stay a normal poll.
+
+    The upsert rewrites the CONTENT columns only. ``state`` and
+    ``published_track_id`` are the user's, not ACE's: a second done-poll
+    of a take that has since been published or discarded must not walk it
+    back to ``fresh``.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE generations SET status = ? WHERE id = ? AND user_id = ?",
+            (status, generation_id, user_id),
+        )
+        if cur.rowcount == 0:
+            return False
+        for take in takes:
+            c.execute(
+                """
+                INSERT INTO generation_takes
+                    (generation_id, idx, file, decoded_path, metas_json,
+                     prompt, lyrics, seed_value, state)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'fresh')
+                ON CONFLICT(generation_id, idx) DO UPDATE SET
+                    file         = excluded.file,
+                    decoded_path = excluded.decoded_path,
+                    metas_json   = excluded.metas_json,
+                    prompt       = excluded.prompt,
+                    lyrics       = excluded.lyrics,
+                    seed_value   = excluded.seed_value
+                """,
+                (
+                    generation_id,
+                    int(take.get("index", 0)),
+                    take.get("file"),
+                    take.get("decoded_path"),
+                    json.dumps(take.get("metas") or {}),
+                    take.get("prompt"),
+                    take.get("lyrics"),
+                    take.get("seed_value"),
+                ),
+            )
+        c.commit()
+        return True
+
+
+def set_take_state(generation_id: str, idx: int, state: str) -> bool:
+    """Set one take's ``state``. False when there is no such take.
+
+    ``published_track_id`` is deliberately left in place: it records that
+    this take WAS published as that track, which stays true after the user
+    discards the row from their feed.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE generation_takes SET state = ? WHERE generation_id = ? AND idx = ?",
+            (state, generation_id, idx),
+        )
+        c.commit()
+        return cur.rowcount > 0
+
+
+def mark_take_published(
+    user_id: int, decoded_path: str, published_track_id: str
+) -> int:
+    """Mark the take at ``decoded_path`` published. Returns rows matched.
+
+    Publish carries no task id (ACE's records expire, its files do not),
+    so the take is found by the one thing both sides hold: the DECODED
+    path the page persisted when the take arrived. ``0`` means "no take of
+    this user's has that path" — a normal outcome for a take generated
+    before G6, and the caller logs it rather than failing the publish.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            """
+            UPDATE generation_takes
+            SET state = 'published', published_track_id = ?
+            WHERE decoded_path = ?
+              AND generation_id IN (SELECT id FROM generations WHERE user_id = ?)
+            """,
+            (published_track_id, decoded_path, user_id),
+        )
+        c.commit()
+        return cur.rowcount

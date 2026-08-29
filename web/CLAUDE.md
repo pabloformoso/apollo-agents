@@ -184,6 +184,48 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   precedent — the critic is generative-lane work and must be free to run
   off a different model from the tool-calling live DJ. The client is NOT
   `brief_parser`'s: that one carries a 45 s bound and `BRIEF_MODEL`.
+- **The generations library (G6) is written by HOOKS, never by the
+  page.** Two tables (`generations` + `generation_takes`, `db.init_db`,
+  the playlists precedent) whose primary key IS ACE's `task_id` — there
+  is no second identity to keep in sync. The existing endpoints record
+  as they succeed, with **zero contract change**: `/tasks` inserts
+  `pending` with the ACTUAL outgoing payload as `request_json`
+  (server-pinned `bpm`/`audio_format` included, plus the `genre_folder`
+  ACE never sees); the first done-poll upserts the takes; `/publish`
+  marks one take `published` + `published_track_id`; `/edit` opens its
+  own row, whose `task_type` + `src_audio_path` ARE the lineage. **A
+  store failure logs and returns — it can never break the endpoint it
+  hangs off** (`_store`), the 3-second poll least of all: a SQLite
+  hiccup is even less of a reason to 5xx than an ACE blip. The upsert is
+  idempotent and deliberately does NOT touch `state` /
+  `published_track_id`: a re-poll must not resurrect a discarded take.
+  Publish still carries no `task_id`, so the take is found by the one
+  value both sides hold — the DECODED path, resolved through the SAME
+  `validate_ace_audio_path` the publisher uses, so the two strings are
+  equal by construction; an unmatched path is a log line, not a refusal.
+  **Every mutation is user-scoped in the SQL itself**, not in the
+  caller: task ids come from the browser, so `WHERE user_id = ?` is what
+  stops one user's poll from rewriting another's row (and "unknown to
+  the store" stays a normal poll — tasks predating G6 still work).
+  The three read/repair routes: `GET /api/generator/generations` (a bare
+  array like `/api/playlists`, newest first, `limit` 1–100 default 20,
+  takes POLL-SHAPED plus `decoded_path`/`state`/`published_track_id`);
+  `PATCH .../takes/{idx}` with `{state: "discarded"|"fresh"}` — a
+  `Literal`, so asking for `published` is a 422, because published is
+  earned by publishing and a track id no catalog entry backs is worse
+  than a refusal (patching an already-published take is allowed and
+  KEEPS its `published_track_id`: the catalog entry is a fact about the
+  past, not a state the feed owns); and `POST .../refresh`, the resume
+  lane for a tab that died mid-flight. **`stale` and `degraded` are
+  different answers and must never be conflated** — ACE *answering*
+  without the task means its 24 h record window closed, which is
+  terminal (`stale`), while ACE not answering says nothing about the job
+  (stays `pending`, `degraded: true`, the poll's own word). Note this
+  inverts the poll endpoint's rule for the same input: an id ACE has not
+  registered YET must not tear the wizard's card down, but a refresh is
+  asked about a generation old enough to have been abandoned. A
+  terminal generation answers **409** naming its status: `done`,
+  `failed` and `stale` all have nothing left to poll for.
 - **Publishing while `--build-catalog` is running is a human-scheduling
   problem, not a lock** (same class as the VRAM rule). The builder is
   serial, takes ~1.25 min/track, and writes `tracks.json` **only at the
@@ -331,6 +373,39 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   previous numbers on screen during a re-score — blanking would read as
   "those were wrong". The section label, `bench score · informs, never
   blocks`, is the UI's half of "scoring never gates publishing".
+- **`/generations` reuses the take row, it does not re-implement it**
+  (G6). `TakeRow` + `ChainedTaskCard` moved out of `GeneratorDialog` into
+  `components/ember/GeneratorTakes.tsx` unchanged; the feed and the wizard
+  import the SAME component, so play / Score / Edit / Publish behave
+  identically in both and an edit still chains inside its source's row.
+  The move added exactly two OPTIONAL props the dialog never passes —
+  `actions` (the feed's Discard / Restore, left of Score) and
+  `published` + `publishedTrackId` (the store's word that a take is
+  already in the catalog, which the wizard cannot know: it only ever sees
+  its own publishes). A take this row published itself still renders the
+  full `pub.result` block — key, BPM, the ingest note — and the stored
+  chip only fills in when there is no local result.
+  **Every state the feed shows is a pure fold** (`generationsMerged`,
+  `takeStateSet`, `generationReplaced`, `readGeneration`, the `feed*`
+  trio), so the page does no reasoning: it renders `readGeneration`'s
+  answer. That fold is where **`failed` ≠ `stale` ≠ `degraded`** is
+  enforced on screen — ACE's verdict, ACE having forgotten (terminal,
+  quiet, no resume), and Apollo not reaching ACE at all (still pending,
+  keeps its Resume) are three different sentences, and only `pending`
+  gets the button, which is also what keeps the refresh's 409-on-terminal
+  out of reach. Discard is optimistic and rolled back VERBATIM when the
+  PATCH refuses it — a row left hidden after a refusal would be a lie
+  about the store — and a publish reconciles through `notePublished`
+  rather than a re-fetch. `generationsFromPayload` reads the listing as a
+  bare array OR a `{generations}` envelope: the plan wrote one and the
+  router answers the other, and that is a spelling, not a feed worth
+  breaking. Merge is by `created_at` (not arrival) so an overlapping
+  "load more" cannot interleave an older card above a newer one, and the
+  offset advances by what the SERVER sent, not by what the merge kept.
+  Pagination is a plain "load more" guarded by a ref, since the button
+  only goes disabled on the next render and a double fetch would skip a
+  page. Nav lives in `Shell`'s `ROUTES` — the one place pages register —
+  and the wizard dialog carries a `view all generations` link.
 
 ## Testing
 
