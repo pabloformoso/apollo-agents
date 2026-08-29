@@ -11,6 +11,7 @@
  *   - `POST /api/generator/tasks`       → {task_id, queue_position, eta_seconds}
  *   - `GET  /api/generator/tasks/{id}`  → {status, takes[], eta_seconds, degraded?}
  *   - `GET  /api/generator/audio?path=` → streaming proxy
+ *   - `POST /api/generator/critique`    → {passed, bands, advisory, critique}
  *
  * Two refusals are first-class, not crashes:
  *   - **503** the generator is off. `available: false` is a NORMAL answer
@@ -113,6 +114,64 @@ export type PublishResponse = {
   variant_of: string | null;
   /** "run --fix-incomplete later" — rendered with the chip, not swallowed. */
   note: string;
+};
+
+/** G4 — one metric's band. `min`/`max` are the EFFECTIVE band (the
+ *  reference range widened by the bench's own margins) — the one that
+ *  decides the verdict, so a chip can never contradict it. The raw
+ *  catalog range rides along as `reference_*`. */
+export type CritiqueBand = {
+  min: number;
+  max: number;
+  reference_min: number;
+  reference_max: number;
+};
+
+export type CritiqueBands = {
+  centroid_hz?: CritiqueBand | null;
+  tilt_db_per_oct?: CritiqueBand | null;
+  advisory_lufs?: CritiqueBand | null;
+};
+
+/** G4 — what the scorer sends. `file` is the take's DECODED ACE path. */
+export type CritiqueRequest = {
+  file: string;
+  metas: {
+    bpm?: number | null;
+    keyscale?: string | null;
+    duration?: number | null;
+  };
+  /** What the take was asked to be — the half the bench knows nothing of. */
+  prompt?: string;
+  genre_folder: string;
+};
+
+/**
+ * The score, and the read of it.
+ *
+ * `passed` is `null` when the bench had nothing to compare against (a genre
+ * with no committed references yet) — a normal answer carrying a `note`, not
+ * a failure. `critique` is `null` whenever the LLM layer was off or did not
+ * answer in time. Neither ever blocks publishing.
+ */
+export type CritiqueResponse = {
+  passed: boolean | null;
+  /** The bench genre the folder resolved to ("lofi - ambient" → "lofi"). */
+  reference_genre: string;
+  reference_informed: {
+    centroid_hz?: number | null;
+    tilt_db_per_oct?: number | null;
+  } | null;
+  advisory: {
+    lufs?: number | null;
+    lra?: number | null;
+    crest_db?: number | null;
+  } | null;
+  bands: CritiqueBands | null;
+  /** The bench's own words for each out-of-band metric. */
+  failures: string[];
+  critique: string | null;
+  note: string | null;
 };
 
 /** G3 — the three edits the wizard offers (API spec §3.3). */
@@ -222,6 +281,15 @@ export const publishTake = (body: PublishRequest) =>
  *  source, which only the page remembers. */
 export const editGeneratorTake = (body: EditRequest) =>
   gfetch<CreateTaskResponse>("/generator/edit", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+/** G4 — score one take. Read-only: it downloads the take server-side, runs
+ *  the quality bench over it and (when a provider is wired) asks one LLM
+ *  for a paragraph. It writes nothing and gates nothing. */
+export const critiqueTake = (body: CritiqueRequest) =>
+  gfetch<CritiqueResponse>("/generator/critique", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -947,6 +1015,225 @@ export function useTakeEdit(): TakeEditApi {
   }, []);
 
   return { state, open, cancel, change, submit };
+}
+
+// ── Scoring a take against its genre's references (G4) ────────────────────
+
+/**
+ * Can this take be scored at all?
+ *
+ * As weak as `canEditTake` and for the same reason: the bench measures
+ * AUDIO. A take whose `metas` never parsed has no bpm and no key, which
+ * stops it publishing but not being listened to — and it is exactly the
+ * take an operator most wants a second opinion on.
+ */
+export function canScoreTake(take: Take): boolean {
+  return Boolean(decodedTakePath(take.file));
+}
+
+export type ScoreOptions = {
+  /** Picks which reference bands the take is compared against. */
+  genreFolder: string;
+};
+
+/** Build the wire body from the take the page PERSISTED plus the form. */
+export function buildCritiqueRequest(
+  take: Take,
+  opts: ScoreOptions,
+): CritiqueRequest {
+  const metas = take.metas ?? {};
+  const body: CritiqueRequest = {
+    file: decodedTakePath(take.file),
+    metas: {},
+    genre_folder: opts.genreFolder,
+  };
+  if (typeof metas.bpm === "number" && Number.isFinite(metas.bpm)) {
+    body.metas.bpm = metas.bpm;
+  }
+  if (metas.keyscale && String(metas.keyscale).trim()) {
+    body.metas.keyscale = String(metas.keyscale).trim();
+  }
+  if (typeof metas.duration === "number" && Number.isFinite(metas.duration)) {
+    body.metas.duration = metas.duration;
+  }
+  if (take.prompt && take.prompt.trim()) body.prompt = take.prompt;
+  return body;
+}
+
+/**
+ * `in` / `out` are the bench's verdict for that metric; `advisory` is
+ * measured-and-reported, never a failure; `unknown` is a metric the bench
+ * could not measure or had no band for.
+ */
+export type ChipTone = "in" | "out" | "advisory" | "unknown";
+
+export type ScoreChip = {
+  key: string;
+  label: string;
+  /** Formatted with its unit, or "—" when the metric came back empty. */
+  value: string;
+  /** Formatted band, or null when there is nothing to compare against. */
+  band: string | null;
+  tone: ChipTone;
+};
+
+/** Where a value sits relative to its band. Pure — the whole chip fold
+ *  hangs off this one comparison, so it is worth testing on its own. */
+export function bandTone(
+  value: number | null | undefined,
+  band: CritiqueBand | null | undefined,
+): "in" | "out" | "unknown" {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "unknown";
+  if (!band || !Number.isFinite(band.min) || !Number.isFinite(band.max)) {
+    return "unknown";
+  }
+  return value >= band.min && value <= band.max ? "in" : "out";
+}
+
+function fmtValue(
+  value: number | null | undefined,
+  digits: number,
+  unit: string,
+): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(digits)}${unit ? ` ${unit}` : ""}`;
+}
+
+function fmtBand(band: CritiqueBand | null | undefined, digits: number): string | null {
+  if (!band || !Number.isFinite(band.min) || !Number.isFinite(band.max)) return null;
+  return `${band.min.toFixed(digits)}–${band.max.toFixed(digits)}`;
+}
+
+/** label · digits · unit, per metric. Centroid in whole Hz — a decimal of a
+ *  hertz is noise at four figures. */
+const REFERENCE_METRICS: ReadonlyArray<
+  [keyof CritiqueBands & string, string, number, string]
+> = [
+  ["centroid_hz", "centroid", 0, "Hz"],
+  ["tilt_db_per_oct", "tilt", 1, "dB/oct"],
+];
+
+const ADVISORY_METRICS: ReadonlyArray<[string, string, number, string]> = [
+  ["lufs", "loudness", 1, "LUFS"],
+  ["lra", "range", 1, "LRA"],
+  ["crest_db", "crest", 1, "dB"],
+];
+
+/**
+ * Fold one score into the chips the row renders.
+ *
+ * Pure, and the reason the UI has no arithmetic in it: reference-informed
+ * metrics carry their band and read in/out of it, advisory ones carry their
+ * number and say so. A response with no verdict (no references for the
+ * genre) folds to NO chips — the note is the whole answer there.
+ */
+export function scoreChips(res: CritiqueResponse): ScoreChip[] {
+  const ri = res.reference_informed;
+  const adv = res.advisory;
+  if (!ri && !adv) return [];
+
+  const chips: ScoreChip[] = [];
+  for (const [key, label, digits, unit] of REFERENCE_METRICS) {
+    const value = ri?.[key as keyof typeof ri] as number | null | undefined;
+    const band = res.bands?.[key] ?? null;
+    chips.push({
+      key,
+      label,
+      value: fmtValue(value, digits, unit),
+      band: fmtBand(band, digits),
+      tone: bandTone(value, band),
+    });
+  }
+  for (const [key, label, digits, unit] of ADVISORY_METRICS) {
+    const value = adv?.[key as keyof typeof adv] as number | null | undefined;
+    // Only loudness has a reference range, and even that one is advisory.
+    const band = key === "lufs" ? (res.bands?.advisory_lufs ?? null) : null;
+    chips.push({
+      key,
+      label,
+      value: fmtValue(value, digits, unit),
+      band: fmtBand(band, digits),
+      tone: "advisory",
+    });
+  }
+  return chips;
+}
+
+/**
+ * The one-line verdict above the chips.
+ *
+ * Deliberately not a pass/fail badge: the bench informs, the human decides,
+ * and a take that reads "outside the references" is still perfectly
+ * publishable — an unusual centroid is how half the good ones sound.
+ */
+export function scoreVerdict(res: CritiqueResponse): string {
+  if (res.passed === null) return "No reference bands for this genre yet.";
+  if (res.passed) return `Sits inside the ${res.reference_genre} references.`;
+  const why = res.failures.length ? `: ${res.failures.join("; ")}.` : ".";
+  return `Outside the ${res.reference_genre} references${why}`;
+}
+
+/** idle → scoring → scored | failed. Re-scoring is allowed: nothing is
+ *  written, and a take can be measured again after an edit. */
+export type ScorePhase = "idle" | "scoring" | "scored" | "failed";
+
+export type ScoreState = {
+  phase: ScorePhase;
+  result: CritiqueResponse | null;
+  error: string | null;
+};
+
+export const INITIAL_SCORE_STATE: ScoreState = {
+  phase: "idle",
+  result: null,
+  error: null,
+};
+
+/** Pure folds, so the machine is testable without fetch or a DOM. */
+export function scoreStarted(prev: ScoreState): ScoreState {
+  // The previous result stays on screen while a re-score is in flight —
+  // blanking the panel would read as "the numbers were wrong".
+  return { ...prev, phase: "scoring", error: null };
+}
+
+export function scoreSucceeded(
+  prev: ScoreState,
+  result: CritiqueResponse,
+): ScoreState {
+  return { ...prev, phase: "scored", result, error: null };
+}
+
+export function scoreFailed(prev: ScoreState, err: unknown): ScoreState {
+  return {
+    ...prev,
+    phase: "failed",
+    // Verbatim, the rule every refusal in this module follows.
+    error: err instanceof Error ? err.message : "Could not score the take.",
+  };
+}
+
+export type TakeScoreApi = {
+  state: ScoreState;
+  score: (body: CritiqueRequest) => Promise<CritiqueResponse | null>;
+};
+
+/** Own one take's score. One instance per take row. */
+export function useTakeScore(): TakeScoreApi {
+  const [state, setState] = useState<ScoreState>(INITIAL_SCORE_STATE);
+
+  const score = useCallback(async (body: CritiqueRequest) => {
+    setState(scoreStarted);
+    try {
+      const result = await critiqueTake(body);
+      setState((prev) => scoreSucceeded(prev, result));
+      return result;
+    } catch (err: unknown) {
+      setState((prev) => scoreFailed(prev, err));
+      return null;
+    }
+  }, []);
+
+  return { state, score };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────

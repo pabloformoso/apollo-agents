@@ -255,6 +255,56 @@ LLM adds the read. Two layers, one endpoint:
   genre + name prefilled from the form; first-batch validation handshake
   with the Apollo session stays the agreed manual step.
 
+## G5 runbook (draft 2026-08-29) — the first real batch, end to end
+
+The definition-of-done of the whole lane. Split so the risky half stays
+gated:
+
+### G5a — headless real batch (autonomous, no deploy)
+
+Drives the REAL flow with the merged code, without touching the prod
+containers: a script/session using `acestep_client` + `main.py --ingest`
+directly. The GPU-sharing constraint SELF-SEQUENCES thanks to the
+persistence rule — result files are immortal, so each phase can run with
+the GPU in a different hands:
+
+1. **Coordinate** with the ACE session: server up on :8001, no live set
+   (`live-ws` check), GPU handed to ACE.
+2. **Generate**: one release per target genre (deep house first),
+   `bpm` = window center, `audio_duration ≥ 150`, `thinking: true`,
+   `batch_size 2`, `audio_format wav`. Poll to done; PERSIST decoded
+   paths + metas (the rule). **Lazy-load warning (ACE session)**: the
+   FIRST release after server start pays the model load (DiT + the 5 Hz
+   LM for thinking) — several extra minutes on that first poll, and
+   `/health` answers before models are loaded. A slow first poll is the
+   load, not a failure; `avg_job_seconds` only means something after it.
+   Both takes of the batch share the piece → the keeper publishes first,
+   the sibling as `variant_of` its display name.
+3. **ACE unloads** (the VRAM protocol; they ping when free).
+4. **Score with the GPU back**: download takes; `quality_bench --wav`
+   per take vs the genre references; optional LLM critique now that LM
+   Studio can load.
+5. **Publish the keeper**: `main.py --ingest` with the generation metas
+   (backup automatic); second take as `variant_of`. **The Apollo session
+   validates the first tracks.json entry before anything else** — the
+   agreed handshake.
+6. `--fix-incomplete` (detached Docker) backfills duration/beatgrid/MP3.
+7. **Prove the loop closed**: the eligibility screen accepts it and
+   `pick_next_track` can surface it (a dry selection check, not a live
+   set).
+
+Writes to the real catalog (main checkout) with the ingest's automatic
+backup — reversible; scheduled to avoid any catalog build.
+
+### G5b — deploy the wizard to prod (GATED on Pablo's explicit OK)
+
+The sanctioned path, nothing new: merge `origin/main` into the deploy
+branch in the main checkout (live-ws check first — never mid-broadcast),
+set `ACESTEP_BASE_URL` (+ optionally `ACESTEP_AUDIO_ROOT`,
+`GENERATIVE_MODEL`) in `.env`, recreate backend (`up -d backend` — a
+restart keeps old env), verify `/api/generator/health` from the wizard.
+After G5b the whole G1–G4 surface is live in the editor.
+
 ## Ops notes
 
 - Port map: ACE API :8001 (LAN) — no conflict with 4010/4020 (prod),

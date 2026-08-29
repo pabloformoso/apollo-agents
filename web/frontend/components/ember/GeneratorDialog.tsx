@@ -33,27 +33,42 @@
  * lineage: an edit of an edit sits one level deeper, and a chained take is
  * offered `variant of` its SOURCE's published name, which is the only way
  * the no-repeat machinery learns that the two are one piece.
+ *
+ * G4 — a take can be SCORED from the same row: the backend measures it with
+ * the project's own quality bench and (when an LLM is wired) adds a
+ * paragraph reading those numbers against the prompt. It renders as chips —
+ * each reference-informed metric in or out of its band, the loudness tier
+ * marked advisory — and the panel says so in its own label: scoring informs
+ * the decision, it never blocks a publish. A genre with no committed
+ * references answers with a note instead of a verdict, which is a normal
+ * state, not an error.
  */
 import * as React from "react";
 import { getCatalog } from "@/lib/api";
 import {
   POLL_INTERVAL_MS,
+  buildCritiqueRequest,
   buildEditRequest,
   buildPublishRequest,
   canEditTake,
   canPublishTake,
+  canScoreTake,
   chainAppended,
   chainedTaskFor,
   editRangeError,
   editSourceLabel,
+  scoreChips,
+  scoreVerdict,
   suggestDisplayName,
   takeAudioUrl,
   useGeneratorTask,
   useTakeEdit,
   useTakePublish,
+  useTakeScore,
   variantOptionsFor,
   type ChainedTask,
   type EditMode,
+  type ScoreChip,
   type Take,
 } from "@/lib/generator";
 import { usePlayer, type Playable } from "@/lib/player";
@@ -171,6 +186,46 @@ const EDIT_TITLE =
   "Repaint, cover or continue this take. The result arrives as its own card " +
   "under this one, and can be published or edited again.";
 
+const SCORE_TITLE =
+  "Measure this take against the genre's reference tracks, and read what " +
+  "the numbers say. Nothing is written, and nothing is blocked.";
+
+/** Chip colours: the bench's verdict for a metric, or its quieter
+ *  advisory tier, which is reported and never fails. */
+const CHIP_TONE: Record<ScoreChip["tone"], string> = {
+  in: "text-ember border-ember",
+  out: "text-warn border-warn",
+  advisory: "text-mute border-line2",
+  unknown: "text-faint border-line2",
+};
+
+function ScoreChips({ chips }: { chips: ScoreChip[] }) {
+  return (
+    <div className="flex flex-wrap gap-x-2 gap-y-1">
+      {chips.map((chip) => (
+        <span
+          key={chip.key}
+          data-testid="generator-score-chip"
+          data-tone={chip.tone}
+          title={
+            chip.band
+              ? `${chip.label} ${chip.value} · reference band ${chip.band}`
+              : `${chip.label} ${chip.value}`
+          }
+          className={
+            "font-mono text-[10px] border px-1.5 py-0.5 " + CHIP_TONE[chip.tone]
+          }
+        >
+          {chip.label} {chip.value}
+          {chip.band ? (
+            <span className="text-faint"> · band {chip.band}</span>
+          ) : null}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function TakeRow({
   take,
   playable,
@@ -205,6 +260,7 @@ function TakeRow({
     change,
     submit: submitEdit,
   } = useTakeEdit();
+  const { state: sc, score } = useTakeScore();
   const active = currentTrack?.id === playable.id;
   const playingThis = active && isPlaying;
   const metas = take.metas ?? {};
@@ -233,6 +289,10 @@ function TakeRow({
   const rangeError = editRangeError(ed.form, duration);
   const publishedName = pub.result?.display_name ?? null;
 
+  const scorable = canScoreTake(take);
+  const scoring = sc.phase === "scoring";
+  const bandChips = sc.result ? scoreChips(sc.result) : [];
+
   // Defaults are computed when the panel OPENS, not at mount: a take
   // published from an earlier row changes what this one should suggest.
   const startConfirm = () => {
@@ -253,6 +313,9 @@ function TakeRow({
     );
     if (result) onPublished(result.display_name);
   };
+
+  const onScore = () =>
+    void score(buildCritiqueRequest(take, { genreFolder: defaultGenre }));
 
   const onEdit = async () => {
     // Read the form BEFORE awaiting: a successful submit closes the panel
@@ -308,6 +371,31 @@ function TakeRow({
           )}
         </div>
 
+        {/* Score is the read-only sibling: it measures, it never writes,
+            and it stays available whatever else the row is doing. */}
+        <Btn
+          kind="ghost"
+          onClick={onScore}
+          disabled={!scorable || scoring}
+          data-testid="generator-score"
+          title={
+            scorable
+              ? SCORE_TITLE
+              : "This take carries no audio path, so there is nothing to measure."
+          }
+          className="px-3 py-[7px] text-[11px] flex-shrink-0"
+        >
+          {scoring ? (
+            <>
+              <Spinner /> Scoring
+            </>
+          ) : sc.result ? (
+            "Score again"
+          ) : (
+            "Score"
+          )}
+        </Btn>
+
         {/* Edit is a sibling of Publish, and steps aside while that take
             is being written to the catalog — one take, one request. */}
         <Btn
@@ -352,6 +440,67 @@ function TakeRow({
           </Btn>
         )}
       </div>
+
+      {sc.phase !== "idle" && (
+        <div
+          data-testid="generator-score-panel"
+          className="flex flex-col gap-2 border border-line2 p-3 mb-3"
+        >
+          {/* The label carries the contract: this panel informs a
+              decision, it does not stand in front of one. */}
+          <Crumb tone="ember">bench score · informs, never blocks</Crumb>
+
+          {sc.error && (
+            <Banner tone="error">
+              <span
+                data-testid="generator-score-error"
+                className="normal-case tracking-normal font-sans text-[12px]"
+              >
+                {sc.error}
+              </span>
+            </Banner>
+          )}
+
+          {/* First score only: a bordered box with nothing in it would
+              read as a result, and this one takes a download. */}
+          {scoring && !sc.result && (
+            <span className="text-[12px] text-mute leading-[1.45]">
+              Measuring this take against the {defaultGenre} references…
+            </span>
+          )}
+
+          {sc.result && (
+            <>
+              <span
+                data-testid="generator-score-verdict"
+                className="text-[12px] text-ember-text leading-[1.45]"
+              >
+                {scoreVerdict(sc.result)}
+              </span>
+
+              {bandChips.length > 0 && <ScoreChips chips={bandChips} />}
+
+              {sc.result.note && (
+                <span
+                  data-testid="generator-score-note"
+                  className="text-[11px] text-mute leading-[1.45]"
+                >
+                  {sc.result.note}
+                </span>
+              )}
+
+              {sc.result.critique && (
+                <p
+                  data-testid="generator-score-critique"
+                  className="text-[12px] text-mute leading-[1.5] m-0"
+                >
+                  {sc.result.critique}
+                </p>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {editing && (
         <div
