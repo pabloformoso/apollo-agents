@@ -22,7 +22,6 @@ from unittest.mock import patch
 
 import numpy as np
 
-import main
 from main import (
     ARTWORK_PROMPTS,
     BPM_GENRE_RANGES,
