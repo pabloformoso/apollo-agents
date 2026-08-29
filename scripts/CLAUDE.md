@@ -65,6 +65,26 @@
     at the pre-tunnel LAN host and 20 trials of timeouts were reported
     as a clean "0% append rate, silent=10". A dead endpoint and a mute
     model land in the SAME bucket. Pass `--base-url` explicitly.
+- `bench_strudel_mind.py` — **the same gate for the algorave lane**
+  (docs/algorave-livecoding-plan.md §8.3): can a model write valid
+  Strudel, and how fast? It drives the real `agent/generative/
+  strudel_mind.py`, so the system prompt, the `node validate.mjs`
+  verdict and the one-retry reject-and-hold are measured as they will
+  run live. Trials alternate generate-from-empty / mutate-the-committed
+  -pattern over a fixed intent rotation. Gotchas:
+  - **Two** preflights, both refusing rather than reporting: the Node
+    validator (`npm install` in `scripts/algorave-spike`) and the
+    endpoint (reachable + models actually served). With no validator
+    every trial buckets identically, which reads like a model verdict
+    and is not one.
+  - Warm-up call per model, excluded from the stats (LM Studio JIT).
+  - The finding is the breakdown, not the pass line: `invalid_js`,
+    `no_events`, `palette` and `token_screen` are four different bugs
+    (dialect, structure, prompt palette, prompt hygiene). Latency is
+    reported over all attempts AND over valid ones only — a model that
+    is fast only when it fails is not fast.
+  - The number to beat is the JSON mind's: ~50% invalid, warm 8.6 s
+    (gemma-4-e4b) / 12.5 s (qwen3.5-9b), measured 2026-08-28.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
 
 Convention: scripts are operator-facing and safe to run against the

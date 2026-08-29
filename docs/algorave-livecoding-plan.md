@@ -149,3 +149,170 @@ Mandatory (repo rule: no function/endpoint without tests):
   lossless path if we ever need one.
 - Web Audio synthesis ceiling (bass/keys character) — the ear test on this WAV
   decides whether phase-2 (SuperDirt) accelerates.
+
+---
+
+## 8. S2 spec — the mind writes Strudel (iteration 1, 2026-08-29)
+
+**Thesis:** the slow plane emits Strudel REPL-dialect code — the language LLMs
+already know — instead of the private JSON spec. Same safety philosophy as
+`mind.py`: nothing the LLM writes can touch audio until it has been validated;
+reject-and-hold; one retry carrying the validator's error.
+
+### 8.1 Validator (Node, lives in the spike)
+
+`scripts/algorave-spike/validate.mjs` — plain `node validate.mjs [--cycles N]
+[--key "A:minor"]`, code on **stdin**, ONE JSON line on **stdout**.
+
+- Evaluates REPL dialect (@strudel/transpiler + core/mini/tonal evalScope — no
+  webaudio, no network, no audio). Known hazard: importing the `@strudel/core`
+  package root breaks in plain Node (the `@kabelsalat/web` IIFE issue in the
+  spike README); the vitest alias fix does not apply outside vitest — importing
+  the package's dist file directly by path is the expected workaround. Verify.
+- **Code contract for the LLM:** a single expression evaluating to a Pattern
+  (typically `stack(...)`), double-quoted mini strings, optional first line
+  `// reason: <one sentence>`. No imports, no `setcps` (the harness owns
+  tempo). The validator REJECTS code containing `import`/`require`/`fetch`/
+  `eval`/`process` tokens — hygiene against a confused model, not a security
+  boundary against attackers.
+- **Verdict JSON:** `{"valid": bool, "error": str|null, "reason": str|null,
+  "stats": {"events": int, "cycles_checked": int, "sounds": [str],
+  "kick_four_on_floor": bool, "out_of_key": [str]}}`. Exit 0 whenever a
+  verdict was computed — valid OR invalid; nonzero only on harness breakage.
+- **Validity:** evaluates without throwing; `queryArc(0, cycles)` yields ≥ 1
+  event; every event's `s` ∈ the palette {bd, sd, hh, oh, cp, rim, triangle,
+  sawtooth, square, sine} (`bank()` free-form). `out_of_key` (vs `--key`) is
+  reported, NOT gating in v1 — Tidal idiom leans on `.scale()`.
+- vitest tests: valid stack, syntax error, zero events, palette violation,
+  token screen, reason extraction, `--cycles`.
+
+### 8.2 Mind (Python)
+
+`agent/generative/strudel_mind.py`, mirroring `mind.py`'s shape:
+`StrudelMind(llm=None, genre="deep")` with
+`next_code(state: dict, intent: str) -> StrudelCode`
+(dataclass: `code`, `reason`, `stats`).
+
+- Model: `GENERATIVE_MODEL` env > `AGENT_MODEL` (the BRIEF_MODEL precedent,
+  #123). Provider detection as in `mind.py`; the ollama path sets an explicit
+  completion budget (default 4096, env `GENERATIVE_MAX_TOKENS`) — the
+  token-budget lesson.
+- Prompt: Strudel-REPL system prompt with the deep idiom (tempo is the
+  harness's, key via `.scale("A:minor")`, the palette above, few-shot = a
+  condensed committed deephouse pattern); state carries `current_code` (empty →
+  generate; non-empty → **mutate it** per the intent — the algorave move),
+  `bars_elapsed`, `recent_reasons`.
+- Validation: subprocess `node validate.mjs`, cwd = `scripts/algorave-spike`
+  resolved from the repo root; a missing `node_modules` produces an error that
+  says `npm install`, not a traceback. Reject → one retry with the validator
+  error appended → `StrudelMindError` (caller holds the current code).
+- pytest: mock-llm/mock-subprocess unit tests (happy, retry-recovers,
+  double-fail, env precedence, validator-missing message, token-screen
+  propagation) + ONE real-validator integration test, skipped cleanly when
+  node or the spike `node_modules` is absent (backend CI has neither).
+
+### 8.3 bench_mind (the gate BEFORE anything goes live)
+
+`scripts/bench_strudel_mind.py` — the `bench_extend_set.py` lessons verbatim:
+
+- PREFLIGHT the endpoint (models actually served) and refuse to run otherwise;
+  `--base-url` explicit (default the tunnel `http://100.68.5.104:1234/v1`);
+  `--models` list; `--trials N` (≥ 10 for a real read); one warm-up call per
+  model excluded from stats (LM Studio JIT); raw per-trial JSONL under
+  `output/quality/strudel-mind-bench/`.
+- Trial mix: generate-from-empty and mutate-the-committed-pattern, alternating,
+  over a fixed intent rotation ("darker", "build to a peak", "strip it back",
+  "more swing").
+- Report per model: valid-rate, breakdown {invalid_js, no_events, palette,
+  token_screen, timeout}, latency p50/p95, a sample of reasons. The symptom is
+  a RATE — read the breakdown, never just the pass line.
+
+### 8.4 Non-goals (iteration 1)
+
+Playing mind-written code on the spike page or /live; chat intake;
+self-hosted samples; any change to `patterns/deephouse.js`.
+
+---
+
+## 9. Playground, human-in-the-loop, and B2B (design, 2026-08-29)
+
+The load-bearing fact: **hot-swapping code without stopping audio is native to
+Strudel** — `evaluate()` replaces the playing pattern at a cycle boundary;
+that IS livecoding. So "who holds the pen" is pure UI/state on top of a
+mechanism the framework already gives us, and the mind's mutation path
+(`state.current_code` in §8.2) already accepts code written by ANYONE — it
+never needs to know whether the last edit came from itself or from Pablo.
+
+Three stages, each daily-cycle sized, each subsuming the previous:
+
+1. **Playground** — the spike page grows an *editable* editor (the Strudel
+   REPL component, or CodeMirror driving `@strudel/web`): edit → re-evaluate
+   on the next cycle, plus a **"mind" button** that POSTs `{current_code,
+   intent}` to a tiny local endpoint running `StrudelMind` and offers the
+   mutation back as a diff (apply = evaluate). Local, detached from the
+   stream: a jam/practice surface, and the audition bench for §10's packs.
+2. **Human-in-the-loop (the pen)** — one control token: `pen ∈ {mind, human}`.
+   Human takes the pen → the phrase scheduler stops asking the mind and the
+   mind becomes an observer (state keeps accumulating, `recent_reasons` gains
+   `"human: <what they changed>"` entries — diffed automatically, no typing).
+   Hand back → the next scheduled call is simply
+   `next_code(state.current_code = the human's code)` — the architecture from
+   §8.2, unchanged. On stream, the pen holder is displayed: that moment of
+   "the human grabs the code" is *content*.
+3. **B2B** — a scheduler flips the pen every N bars (8/16): Apollo and Pablo
+   alternating edits on the same running code, each answering the other's
+   last move. Needs one prompt paragraph ("you are in a back-to-back;
+   acknowledge your partner's last change and answer it, don't undo it") and
+   a bar-counter — nothing structural. The audience (S3 chat intake) later
+   becomes a third voice whispering intents to whoever holds the pen.
+
+Sequencing: playground first (it is S3's editor panel built local-first),
+then the pen, then the B2B scheduler on top.
+
+## 10. Pattern packs — collections of banks / roles / sections
+
+Today the vocabulary is hardcoded in two places (the §8.1 palette in the
+validator, `strudel_mind.PALETTE` + the genre brief in Python). To scale to
+collections, ONE registry both sides read — the `genres.py`/`patches.py`
+precedent, now for the Strudel lane:
+
+- **Pack = data, not code**: per genre — allowed drum **banks** (which
+  machines fit: 909/707 for deep, 808 for lofi…), **roles** with synth voice
+  + register (bass `A1`, stabs octave 3–4…), gain lanes, **section
+  templates** (16-bar arcs as per-bar mask strings — the committed
+  `deephouse.js` idiom: `'<0 0 0 0 1 1 …>'`), and a seed pattern per pack.
+- **Camelot bridge**: `tracks.json` speaks Camelot; Strudel speaks
+  `"root:type"` (`.scale("A1:minor")`, root octave defaults to 3). A helper
+  next to `scales.py` — `camelot_to_strudel("8A", octave=1) -> "A1:minor"` —
+  makes every pack key-agnostic and lets a session inherit the key of the
+  WAV set it interleaves with.
+- **Pitch-mapped sample collections** (later): Strudel sample maps support a
+  base pitch per file (`"g3": "path.wav"`), so melodic collections — including
+  slices of Apollo's own catalog stems — can be played through `note()`
+  correctly tuned. That is the door to "the mix quotes its own catalog".
+
+### Reading list (URLs verified alive 2026-08-29)
+
+- **The REPL itself** — https://strudel.cc — its *sounds* panel lists every
+  registered bank/sound live: the fastest browser of what exists. Workshop
+  ("getting started") linked from the front page.
+- **Sounds & synths basics** — https://strudel.cc/learn/sounds/ (s(),
+  note+s) and its sibling *Synths* page.
+- **Sample maps** — https://strudel.cc/learn/samples/ — `samples()` with
+  JSON maps, the `github:user/repo` shortcut, `@strudel/sampler` for serving
+  your own folder locally, and per-sample base pitch. This page is the
+  foundation of §10's collections.
+- **Scales / tonal helpers** — https://strudel.cc/learn/tonal/ —
+  `scale("root:type")`, `transpose`, `scaleTranspose`, `voicing()` (chord
+  voicings with modes) and `rootNotes()`. `voicing()` is the upgrade path
+  for the stabs.
+- **Mini-notation** — https://strudel.cc/learn/mini-notation/ — the string
+  language itself.
+- **Full function reference** — https://strudel.cc/functions/intro/ — time
+  modifiers, signals, random/conditional modifiers, LFOs, tonal, stepwise.
+- **Drum machine banks** — https://github.com/ritchse/tidal-drum-machines
+  (the collection: machines × drum types); the registered map is
+  https://strudel.b-cdn.net/tidal-drum-machines.json. Browse the repo's
+  `machines/` tree to pick banks per genre pack.
+- **Upstream source** — https://codeberg.org/uzu/strudel (moved off GitHub;
+  GitHub raw URLs 404 — spike finding).

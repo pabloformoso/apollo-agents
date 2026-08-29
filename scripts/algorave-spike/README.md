@@ -43,6 +43,8 @@ The pattern tests need neither network nor a browser.
 | `vitest.config.mjs` | test config + the `@kabelsalat/web` alias (see below). |
 | `test/pattern.test.mjs` | spec §5.1 — 18 deterministic tests, CI-safe. |
 | `test/wav.test.mjs` | spec §5.2 — 7 tests, `describe.skipIf` when the WAV is absent. |
+| `validate.mjs` | spec §8.1 (iteration 1, S2) — the mind's validator: `node validate.mjs` takes Strudel code on stdin, prints one verdict JSON line on stdout. See "S2 validator" below. |
+| `test/validate.test.mjs` | spec §8.1 — 18 tests, CI-safe (no audio, no network, no browser). |
 
 ## Pinned versions
 
@@ -411,6 +413,130 @@ pass. Two things are worth saying plainly:
   which *renders its own audio* from a `PatternSpec` over `GENRE_PACKS`. Feeding
   it this file needs a new `--wav` ingestion path. Worth deciding before the gate
   is meant to bind — and a worktree has no `tracks/` for the references anyway.
+
+## S2 validator — `validate.mjs` (§8.1)
+
+The mind's out-of-process judge for LLM-written Strudel
+(docs/algorave-livecoding-plan.md §8.1) — already shelled out to by
+`agent/generative/strudel_mind.py`'s `validate_code()`.
+
+### Usage
+
+```bash
+node validate.mjs [--cycles N] [--key "A:minor"] < pattern.js
+```
+
+Code goes in on stdin — a single expression, typically `stack(...)`,
+optionally prefixed with a `// reason: <sentence>` line — the same dialect
+`patterns/deephouse.js` writes minus the ES-module imports and `setcps` (the
+harness owns tempo). Exactly one verdict comes out on stdout:
+
+```json
+{"valid":true,"error":null,"reason":"...","stats":{"events":172,
+ "cycles_checked":4,"sounds":["bd","cp","hh","oh","sawtooth","triangle"],
+ "kick_four_on_floor":true,"out_of_key":[]}}
+```
+
+Exit code is **0** for every computed verdict, `valid:true` or `valid:false`
+alike — both are answers. Nonzero exit means the harness itself is broken
+(`@strudel/core` failed to load, almost always a missing `npm install`), and
+stdout is left empty on that path. That distinction is what lets
+`strudel_mind.py` tell "retry the model" (a verdict) apart from "raise
+`StrudelMindError`" (not the model's fault).
+
+```bash
+printf 's("bd*4").bank("RolandTR909")' | node validate.mjs --key "A:minor"
+printf 's("gm_epiano1")' | node validate.mjs        # palette violation
+printf 'stack(s("bd*4"' | node validate.mjs         # syntax error
+```
+
+### The import workaround
+
+Same root cause as the vitest alias above (`@strudel/core` -> the broken
+`@kabelsalat/web` IIFE build), different fix, because there is no Vite in a
+plain `node validate.mjs` process for a `resolve.alias` to apply to. Verified
+against the installed tree, not assumed: `@strudel/core/dist/index.mjs` line 2
+is `import { SalatRepl as Ge } from "@kabelsalat/web"`, so importing core's
+dist file **by path** does not sidestep it either — the broken specifier lives
+inside that file, not in how you reach it.
+
+The fix is Node's own `module.registerHooks()` (stable, synchronous, in-thread
+— no `--experimental-loader` flag; confirmed against the Node 24.12 on this
+box): it intercepts ESM resolution and redirects the bare specifier
+`@kabelsalat/web` to that package's own real ESM build,
+`@kabelsalat/web/dist/index.mjs`, registered inline in `loadStrudel()` before
+anything imports `@strudel/core` — no extra file, nothing for Vitest to also
+know about. The one constraint it imposes: the `@strudel/*` packages must be
+reached through **dynamic** `import()`, not static top-of-file imports —
+statics are hoisted and would execute before the hook is registered.
+
+Evaluation is `@strudel/core`'s own `evalScope(core, mini, tonal)` (populates
+`globalThis` with `stack`/`s`/`n`/`note`/`mini`/`m`/etc., which is what lets
+the dialect use bare identifiers) followed by `@strudel/transpiler`'s
+`evaluate(code)`. No `@strudel/webaudio` or `@strudel/web` anywhere in this
+file — `s()`/`.scale()`/`queryArc()` are core+mini+tonal; nothing here needs an
+audio graph to query a pattern's events.
+
+`console.log` is patched to a no-op for the whole process, not just around the
+imports — `@strudel/core` prints its "🌀 loaded 🌀" banner through it on load
+and logs through the same throttled logger on some pattern errors. The verdict
+itself goes out through `process.stdout.write`, bypassing `console.log`
+entirely, so stdout carries exactly one line regardless of what Strudel or the
+evaluated pattern does. Verified: `1>out 2>err` splits cleanly — `out` is one
+line, the harmless `cannot use window: not in browser?` load-time warning
+lands in `err`.
+
+### Contract deviations, and other judgment calls
+
+- **`--cycles` default is 4**, undocumented in §8.1's own text — taken from
+  `agent/generative/strudel_mind.py`'s own `VALIDATE_CYCLES` so the two agree
+  on the number that actually ships. Four cycles exercises `<a b>`-style
+  per-cycle alternation (the few-shot's bass root and stab chord both change
+  every cycle) without making a rejection slow.
+- **Error wording was chosen to match `scripts/bench_strudel_mind.py`'s
+  already-existing `classify_error()`**, which greps validator error text
+  into `invalid_js`/`no_events`/`palette`/`token_screen` buckets. This changed
+  actual wording choices, not just phrasing: the palette message reads
+  `"...not in the palette — x"`, **not** "...not allowed — x" — `not allowed`
+  is one of `classify_error`'s `token_screen` phrases, checked *before*
+  `palette`, so that wording would have silently misclassified every palette
+  rejection as a token-screen one. Zero-events says `"...zero events..."`
+  verbatim for the same reason. Any transpile/eval throw, and a value that
+  isn't a Pattern at all, are uniformly prefixed `"syntax error: ..."` — looser
+  than the strict JS sense (a `ReferenceError` isn't technically one), but
+  `classify_error` has no separate keyword for "runtime error" and all three
+  are the same bug class (the model's dialect, not its music).
+- **`kick_four_on_floor` is containment, not exact-set equality**: true iff
+  `bd` fires at {0, .25, .5, .75} of every checked cycle. §8.1's wording
+  doesn't say "and nowhere else", and an extra `bd` (a fill, an accent)
+  shouldn't flip an otherwise-solid four-on-the-floor kick to `false`. Tested
+  both ways in `validate.test.mjs`: `s("bd*4")` → `true`, `s("bd*2")` →
+  `false`.
+- **An event with no `s` at all is also a palette violation**, reported as
+  `(missing sound)`. §8.1 says "every event's `s` ∈ the palette" but is silent
+  on an absent one; a note-only pattern that never calls `.s(...)` (verified:
+  `note("a3").scale(...)` alone has no `s` key on the hap value) can't reach
+  superdough either way, so counting "no sound" as outside the palette seemed
+  more honest than a silent pass.
+- **`out_of_key` dedupes by pitch class**, reporting the canonical sharp
+  spelling (`pcName`, same table as `agent/generative/scales.py`'s `pc_name`)
+  rather than the raw note text as typed — `cs4` and `cs5` both report once,
+  as `"C#"`, since octave doesn't change whether a pitch is in key.
+- **A malformed `--cycles`/`--key` degrades to the default/"no key" instead of
+  failing the process.** Neither is LLM-controlled — `strudel_mind.py` always
+  passes both explicitly — so a bad value is a caller bug, not a verdict about
+  the pattern, and §8.1's exit-code contract is about pattern validity, not
+  CLI usage. Both print a one-line note to stderr and continue.
+- **`// reason:` extraction is strict to line 1**, exactly as §8.1 says
+  ("optional FIRST line") — a reason comment anywhere else is `null` here
+  (`validate.test.mjs` case 6). This is deliberately narrower than
+  `strudel_mind.py`'s own `_leading_reason`, which `.search()`es the whole
+  reply as a fallback specifically for what this stricter rule won't catch.
+- **The harness-breakage (nonzero exit) path isn't in the automated suite** —
+  verified manually instead (an isolated copy of `validate.mjs` with no
+  `node_modules` sibling exits 1, empty stdout, `npm install`-shaped stderr),
+  because reproducing it in `validate.test.mjs` would mean hiding this
+  project's real `node_modules` out from under every other test in the suite.
 
 ## What to try next (the `/live` slice)
 
