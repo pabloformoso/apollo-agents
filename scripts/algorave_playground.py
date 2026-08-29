@@ -72,6 +72,23 @@ DEFAULT_PORT = 4032
 # typed, and they are different origins to the same server.
 SPIKE_ORIGINS = ("http://127.0.0.1:4031", "http://localhost:4031")
 
+
+def resolve_allowed_origins(extra: list[str] | None) -> tuple[str, ...]:
+    """SPIKE_ORIGINS plus any --allow-origin values, deduped, order kept.
+
+    Origins compare byte-exact in `cors_headers`, so each value is normalized
+    the one way a browser sends them: scheme://host[:port], no trailing slash.
+    This is what lets the page be served over the tailnet (serve.mjs with
+    HOST set) — the mind then runs with e.g.
+    `--allow-origin http://100.68.5.104:4031` and nothing else changes.
+    """
+    seen: dict[str, None] = dict.fromkeys(SPIKE_ORIGINS)
+    for origin in extra or []:
+        cleaned = origin.strip().rstrip("/")
+        if cleaned:
+            seen.setdefault(cleaned, None)
+    return tuple(seen)
+
 # Same defaults as scripts/bench_strudel_mind.py: the tunnel, explicit.
 DEFAULT_BASE_URL = "http://100.68.5.104:1234/v1"
 # The bench picks the final answer; this is the current live-DJ default, which
@@ -518,6 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Default idiom brief; a request may override it.")
     parser.add_argument("--key", default=DEFAULT_KEY,
                         help="Default musical key; a request may override it.")
+    parser.add_argument(
+        "--allow-origin", action="append", default=[], metavar="ORIGIN",
+        help="Extra page origin the browser may read /mind from (repeatable). "
+             "Needed when serve.mjs runs with HOST set — e.g. the jam served "
+             "from tunel: --allow-origin http://100.68.5.104:4031.",
+    )
     return parser
 
 
@@ -525,9 +548,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     factory = build_mind_factory(args)
 
+    allowed_origins = resolve_allowed_origins(args.allow_origin)
     server = make_server(
         factory, args.host, args.port,
         default_genre=args.genre, default_key=args.key,
+        allowed_origins=allowed_origins,
     )
     host, port = server.server_address[0], server.server_address[1]
 
@@ -535,6 +560,9 @@ def main(argv: list[str] | None = None) -> int:
         f"playground: http://{host}:{port}/mind  (POST)",
         f"mode      : {'MOCK — canned mutation, no LLM client built' if args.mock else args.model}",
     ]
+    extra_origins = [o for o in allowed_origins if o not in SPIKE_ORIGINS]
+    if extra_origins:
+        banner.append(f"origins   : + {', '.join(extra_origins)}")
     if not args.mock:
         banner.append(f"endpoint  : {args.base_url}")
     banner += [
