@@ -375,9 +375,24 @@ raw, and `samples(json, base)` resolves `base || map._base`, so the explicit
 base is what keeps the samples on the CDN). The pages needed no change: they
 register every entry of `sources` generically.
 
-Still §10 backlog: roles with voice+register, gain lanes,
-section templates, seed-per-pack, the Camelot bridge, pitch-mapped
-collections. The original sketch:
+**Shipped 2026-08-30 (`roles` — voice + register):** the melodic role table.
+`"roles": {bass|stabs|pads|leads: {"voices": [...], "octaves": [lo, hi]}}`,
+top-level REQUIRED / per-genre optional with per-field inheritance (the
+`instruments` rule; both loaders shape-check the field so the two sides stay
+one registry). `voices` is ordered — first is the role's home sound — and the
+deep values are lifted from the committed idiom: bass sawtooth 1–2, stabs
+triangle/piano 3–4, pads supersaw/sawtooth 2–3, leads pulse/square/supersaw
+4–5. Prompt-side data ONLY: `roles_block()` renders it between the palette
+and the genre brief (the voice is the layer's `.s()`, the register the octave
+digit on its scale root or note names); the validator gates none of it — an
+event cannot be attributed to a role. What IS fenced, in CI on both suites,
+is resolution: every voice must live in the same scope's synths ∪
+instruments, because a role teaching a voice the sound gate rejects would be
+a scripted 502. An explicitly empty per-genre table drops the section from
+the prompt (the instruments-line precedent).
+
+Still §10 backlog: gain lanes, section templates, seed-per-pack, the Camelot
+bridge, pitch-mapped collections. The original sketch:
 
 Before the registry the vocabulary was hardcoded in two places (the §8.1
 palette in the validator, `strudel_mind.PALETTE` + the genre brief in

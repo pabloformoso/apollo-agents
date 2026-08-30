@@ -124,6 +124,15 @@
     genre entry without it inherits the registry-wide list (both
     `paletteFor()` and `genre_palette()` read it per-field), which is
     what keeps adding an instrument a pure-data move.
+  - `roles` (2026-08-30) is the melodic role table — per role, `voices`
+    (ordered, first = the role's home sound) and `octaves` `[lo, hi]`,
+    its register. Same REQUIRED-top-level / optional-per-genre /
+    per-field-inheritance rule as `instruments`. Prompt-side ONLY:
+    `roles_block()` renders it; the validator requires the field (shape
+    parity between the two loaders) but gates nothing — an event cannot
+    be attributed to a role. The fence is CI consistency in BOTH suites:
+    every voice must resolve in the same scope's synths ∪ instruments,
+    or the prompt teaches exactly what the sound gate rejects.
   - The VCSL map has 128 instruments and the live mind is a 4B, so the
     registry carries a curated handful (plan §10 "curation rationale"),
     not the map. Widen it by picking names, never by pasting the map.

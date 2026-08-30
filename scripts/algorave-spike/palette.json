@@ -1,5 +1,5 @@
 {
-  "_doc": "The algorave lane's ONE sound registry (docs/algorave-livecoding-plan.md par.10: pack = data, not code). Read by validate.mjs (the gate: sound must be listed, and a .bank() must both exist here and carry that sound - a pair this matrix lacks plays SILENCE live), by agent/generative/strudel_mind.py (the palette and bank matrix in the prompt, per genre), and by the spike pages (sample registration from `sources`). Add sounds/banks HERE, never in code. To self-host samples, point `sources` at your own mirror - no code change. `banks` rows are extracted from the registered tidal-drum-machines.json (verified 2026-08-29). Three sound categories: `drums` (sample-backed, bank-prefixed - they REQUIRE the right .bank()), `synths` (oscillators, no samples at all) and `instruments` (sample-backed but NOT bank-prefixed: their map keys the sound name directly, so a .bank() on one resolves to nothing and plays silence). All three are equally 'a sound name that exists'; only the .bank() rule differs. Mirror gotcha: the b-cdn path for the VCSL map is case-sensitive - /VCSL/ resolves, /vcsl/ 404s, while the map itself is lowercase vcsl.json (verified 2026-08-30).",
+  "_doc": "The algorave lane's ONE sound registry (docs/algorave-livecoding-plan.md par.10: pack = data, not code). Read by validate.mjs (the gate: sound must be listed, and a .bank() must both exist here and carry that sound - a pair this matrix lacks plays SILENCE live), by agent/generative/strudel_mind.py (the palette and bank matrix in the prompt, per genre), and by the spike pages (sample registration from `sources`). Add sounds/banks HERE, never in code. To self-host samples, point `sources` at your own mirror - no code change. `banks` rows are extracted from the registered tidal-drum-machines.json (verified 2026-08-29). Three sound categories: `drums` (sample-backed, bank-prefixed - they REQUIRE the right .bank()), `synths` (oscillators, no samples at all) and `instruments` (sample-backed but NOT bank-prefixed: their map keys the sound name directly, so a .bank() on one resolves to nothing and plays silence). All three are equally 'a sound name that exists'; only the .bank() rule differs. Mirror gotcha: the b-cdn path for the VCSL map is case-sensitive - /VCSL/ resolves, /vcsl/ 404s, while the map itself is lowercase vcsl.json (verified 2026-08-30). The `roles` table (top-level REQUIRED, per-genre optional, per-field inheritance - the `instruments` rule) maps each melodic role to `voices` (ordered, first = the role's home sound; every voice must be a synth or instrument of the SAME scope, CI-fenced) and `octaves` [lo, hi], its register. Prompt-side data ONLY: the mind renders it (roles_block); the validator requires the field's presence but gates none of it - an event cannot be attributed to a role.",
   "sources": [
     {
       "json": "https://strudel.b-cdn.net/tidal-drum-machines.json",
@@ -55,6 +55,12 @@
     "fmpiano",
     "balafon"
   ],
+  "roles": {
+    "bass": { "voices": ["sawtooth"], "octaves": [1, 2] },
+    "stabs": { "voices": ["triangle", "piano"], "octaves": [3, 4] },
+    "pads": { "voices": ["supersaw", "sawtooth"], "octaves": [2, 3] },
+    "leads": { "voices": ["pulse", "square", "supersaw"], "octaves": [4, 5] }
+  },
   "banks": {
     "RolandTR909": [
       "bd",
@@ -174,6 +180,12 @@
         "fmpiano",
         "balafon"
       ],
+      "roles": {
+        "bass": { "voices": ["sawtooth"], "octaves": [1, 2] },
+        "stabs": { "voices": ["triangle", "piano"], "octaves": [3, 4] },
+        "pads": { "voices": ["supersaw", "sawtooth"], "octaves": [2, 3] },
+        "leads": { "voices": ["pulse", "square", "supersaw"], "octaves": [4, 5] }
+      },
       "banks": [
         "RolandTR909",
         "RolandTR808",

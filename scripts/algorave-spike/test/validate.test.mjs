@@ -441,7 +441,7 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
   const registry = loadPaletteRegistry();
 
   it('loadPaletteRegistry returns the committed registry with every field', () => {
-    for (const field of ['sources', 'drums', 'synths', 'instruments', 'banks', 'genres']) {
+    for (const field of ['sources', 'drums', 'synths', 'instruments', 'roles', 'banks', 'genres']) {
       expect(registry).toHaveProperty(field);
     }
     expect(registry.sources.length).toBeGreaterThan(0);
@@ -475,6 +475,41 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     }
     // The genre the playground page ships with must exist by this exact name.
     expect(registry.genres).toHaveProperty('deep');
+  });
+
+  it('role voices resolve inside their own scope — a role teaching a rejected voice is a scripted 502', () => {
+    // The role table (voice + register per melodic role) is prompt-side data:
+    // nothing in this file enforces it at runtime, because an event cannot be
+    // attributed to a role. What CAN drift — and therefore is fenced — is
+    // resolution: a voice outside the same scope's synths ∪ instruments would
+    // make the prompt teach exactly what the sound gate rejects.
+    const checkTable = (table, pitched, label) => {
+      expect(Object.keys(table).length, `${label}: roles is non-empty`).toBeGreaterThan(0);
+      for (const [role, spec] of Object.entries(table)) {
+        expect(spec.voices.length, `${label}/${role}: has voices`).toBeGreaterThan(0);
+        for (const v of spec.voices) {
+          expect(pitched.has(v), `${label}/${role}: voice ${v} resolves`).toBe(true);
+        }
+        const [lo, hi] = spec.octaves;
+        expect(Number.isInteger(lo) && Number.isInteger(hi), `${label}/${role}: octave ints`).toBe(true);
+        expect(lo >= 0 && lo <= hi && hi <= 8, `${label}/${role}: octaves ${lo}-${hi}`).toBe(true);
+      }
+    };
+    checkTable(
+      registry.roles,
+      new Set([...registry.synths, ...registry.instruments]),
+      'registry',
+    );
+    for (const [genre, entry] of Object.entries(registry.genres)) {
+      // Per-field inheritance, paletteFor()'s rule: an entry without the
+      // field inherits the registry-wide table (checked above already).
+      if (!('roles' in entry)) continue;
+      checkTable(
+        entry.roles,
+        new Set([...entry.synths, ...(entry.instruments ?? registry.instruments)]),
+        genre,
+      );
+    }
   });
 
   it('instrument names collide with nothing — the categories stay tellable apart', () => {

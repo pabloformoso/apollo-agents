@@ -65,7 +65,9 @@ DEFAULT_KEY = "A:minor"
 # (bank-prefixed samples, they NEED the right bank), `synths` (oscillators, no
 # samples) and `instruments` (sample-backed but bankless — piano.json keys the
 # sound name directly, so a .bank() on one plays silence exactly like it does
-# on a synth voice).
+# on a synth voice). The `roles` table rides in the same file (voice + register
+# per melodic role): prompt-side data this module renders — the validator
+# cannot attribute an event to a role, so it only requires the field's presence.
 # ---------------------------------------------------------------------------
 PALETTE_FILE = SPIKE_DIR / "palette.json"
 
@@ -87,7 +89,7 @@ def _load_palette_registry() -> dict:
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"palette registry {PALETTE_FILE} is not valid JSON: {exc}") from exc
-    for field in ("sources", "drums", "synths", "instruments", "banks", "genres"):
+    for field in ("sources", "drums", "synths", "instruments", "roles", "banks", "genres"):
         if field not in registry:
             raise RuntimeError(f"palette registry {PALETTE_FILE} is missing {field!r}")
     return registry
@@ -107,13 +109,14 @@ def _normalize_genre(genre: str | None) -> str:
 
 
 def genre_palette(genre: str | None) -> dict:
-    """`genre` -> {"drums", "synths", "instruments": tuples, "banks": {name: roles}}.
+    """`genre` -> {"drums", "synths", "instruments": tuples, "banks": {...}, "roles": {...}}.
 
     Mirrors validate.mjs's `paletteFor()`: a genre the registry knows narrows
     the vocabulary to its entry; an unknown one gets the registry-wide sets —
-    not fatal, the `genre_brief` precedent. `instruments` is read per-FIELD (a
-    genre entry that predates the category inherits the registry-wide list
-    rather than silently losing it), which is `paletteFor()`'s rule too.
+    not fatal, the `genre_brief` precedent. `instruments` and `roles` are read
+    per-FIELD (a genre entry that predates the category inherits the
+    registry-wide table rather than silently losing it), which is
+    `paletteFor()`'s rule too.
     """
     entry = PALETTE_REGISTRY["genres"].get(_normalize_genre(genre))
     drums = entry["drums"] if entry else PALETTE_REGISTRY["drums"]
@@ -123,12 +126,17 @@ def genre_palette(genre: str | None) -> dict:
         if entry and "instruments" in entry
         else PALETTE_REGISTRY["instruments"]
     )
+    roles = entry["roles"] if entry and "roles" in entry else PALETTE_REGISTRY["roles"]
     bank_names = entry["banks"] if entry else list(PALETTE_REGISTRY["banks"])
     return {
         "drums": tuple(drums),
         "synths": tuple(synths),
         "instruments": tuple(instruments),
         "banks": {name: tuple(PALETTE_REGISTRY["banks"].get(name, ())) for name in bank_names},
+        "roles": {
+            name: {"voices": tuple(spec["voices"]), "octaves": tuple(spec["octaves"])}
+            for name, spec in roles.items()
+        },
     }
 
 
@@ -246,6 +254,34 @@ def palette_block(genre: str | None = "deep") -> str:
     return "\n".join(lines)
 
 
+def roles_block(genre: str | None = "deep") -> str:
+    """The ROLES section of the prompt — who plays where, from the registry.
+
+    Voice + register per melodic role (plan §10): the voice is the layer's
+    `.s()`, the register is the octave digit on its scale root or note names.
+    Prompt-side data ONLY — the validator cannot attribute an event to a role,
+    so nothing here is gated at runtime; the fence is CI consistency (every
+    voice must resolve in the same scope's synths ∪ instruments, because a
+    role teaching a voice the validator rejects would be a scripted 502).
+    Empty roles ("" here) drop the section, the instruments-line precedent.
+    """
+    roles = genre_palette(genre)["roles"]
+    if not roles:
+        return ""
+    lines = [
+        "ROLES — who plays where. The voice is the .s() on that layer (first listed =",
+        "the role's home sound); the register is the octave digit on its scale root or",
+        "note names. Keep each role in its register — two roles in one octave fight",
+        "for the same space:",
+    ]
+    for name, spec in roles.items():
+        voices = " or ".join(f'.s("{voice}")' for voice in spec["voices"])
+        lo, hi = spec["octaves"]
+        register = f"octave {lo}" if lo == hi else f"octaves {lo}-{hi}"
+        lines.append(f"  {name}: {voices} — {register}")
+    return "\n".join(lines)
+
+
 GENRE_BRIEFS: dict[str, str] = {
     "deep": """GENRE: deep house.
 - ~122 BPM feel, one cycle = one bar of 4/4. Kick on every beat, s("bd*4"), 909 family.
@@ -297,15 +333,19 @@ def genre_brief(genre: str | None) -> str:
 
 
 def build_system_prompt(genre: str | None = "deep", key: str = DEFAULT_KEY) -> str:
-    """Contract + palette + genre idiom + key + few-shot, in that order.
+    """Contract + palette + roles + genre idiom + key + few-shot, in that order.
 
-    The palette comes from the registry, per genre — the sounds, and each
-    bank's actual sound set, are DATA (`palette.json`), so widening the lane's
-    vocabulary never edits this module. The few-shot is appended for every
-    genre: it teaches the REPL *dialect* (what a valid single expression looks
-    like), which is not genre knowledge.
+    The palette comes from the registry, per genre — the sounds, each bank's
+    actual sound set, and the role table (voice + register) are DATA
+    (`palette.json`), so widening the lane's vocabulary never edits this
+    module. The few-shot is appended for every genre: it teaches the REPL
+    *dialect* (what a valid single expression looks like), which is not genre
+    knowledge.
     """
     parts = [SYSTEM_PROMPT, palette_block(genre)]
+    roles = roles_block(genre)
+    if roles:
+        parts.append(roles)
     brief = genre_brief(genre)
     if brief:
         parts.append(brief)
