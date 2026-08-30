@@ -179,7 +179,8 @@ OUTPUT CONTRACT — obey it exactly:
 
 Idiom you can rely on: stack, s, n, note, gain; mini-notation ("bd*4", "[~ oh]*4",
 "~ cp ~ cp", "<0 5>", "[a3,c4,e4]"); .struct, .add, .scale, .gain, .pan, .speed,
-.late, .lpf/.lpq/.hpf, .attack/.decay/.sustain/.release, .room/.roomsize,
+.late, .lpf/.lpq/.hpf, .unison/.detune/.spread, .vib,
+.attack/.decay/.sustain/.release, .room/.roomsize,
 .delay/.delaytime/.delayfeedback, .orbit, .swingBy, .every, .sometimesBy, .off,
 .mask, .range, and `.mul(gain(x))` for a master trim (a plain .gain(x) on the stack
 would overwrite every layer's own gain instead of scaling it).
@@ -231,6 +232,11 @@ GENRE_BRIEFS: dict[str, str] = {
   .s("sawtooth"), lowpassed at 400-800 Hz with a little .lpq — rolling, never busy.
 - Chords: minor-7th / maj7 stabs on offbeats, .s("triangle") with a pluck envelope,
   .delay + .room doing the character work.
+- Pads: sustained chords as note("<[a2,e3,a3] [f2,c3,f3]>") on .s("supersaw") (or
+  sawtooth) with .unison(3-5).detune(0.15-0.3).spread(0.7), slow .attack(1-2)/.release(2+),
+  .lpf(700-1200), low .gain and .room high — a bed under the groove, not a part.
+- Leads: one octave up on .s("pulse"), .s("square") or .s("supersaw"), monophonic
+  through .scale(), .vib(4-6) for character and .delay for space — sparse, never a wall.
 - Color, sparingly: a quiet 16th shaker (sh — TR727/TR808) makes the groove breathe;
   at a peak the ride (rd — 909/LinnDrum) can replace the offbeat oh; toms (ht/mt/lt)
   are a one-bar fill into a phrase change, never a running pattern; cb/tb/perc are

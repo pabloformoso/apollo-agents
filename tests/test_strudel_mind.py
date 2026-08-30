@@ -185,6 +185,36 @@ def test_deep_prompt_teaches_the_genre_palette_and_its_bank_matrix():
     assert "Never put .bank() on a synth voice" in prompt
 
 
+def test_deep_palette_offers_the_pad_and_lead_voices():
+    """`supersaw` and `pulse` are real superdough voices, so the deep entry
+    lists them and the prompt names them. The registry is the ONLY place that
+    decides: a voice the brief teaches but the palette omits is rejected by the
+    validator on every single phrase."""
+    synths = genre_palette("deep")["synths"]
+    assert "supersaw" in synths and "pulse" in synths
+    block = palette_block("deep")
+    assert "supersaw" in block and "pulse" in block
+
+
+def test_deep_brief_teaches_the_pad_and_lead_idiom():
+    """The voices alone are not the idiom: a supersaw with no .unison/.detune is
+    just a saw, and a pad with a pluck envelope is a stab. Pinned lightly — the
+    exact ranges are taste and will be retuned by ear, the vocabulary is not."""
+    prompt = build_system_prompt("deep")
+    assert "Pads:" in prompt and "Leads:" in prompt
+    for term in (".unison", ".detune", ".spread", ".vib"):
+        assert term in prompt
+
+
+def test_the_idiom_list_carries_the_oscillator_shaping_methods():
+    """A method the contract never lists is one the model avoids AND one nobody
+    checked against the validator. These four are checked: they are real
+    @strudel controls, so `.unison(4)` evaluates instead of throwing
+    "is not a function" (which the bench would bucket as invalid_js)."""
+    for method in (".unison", ".detune", ".spread", ".vib"):
+        assert method in SYSTEM_PROMPT
+
+
 def test_unknown_genre_keeps_the_dialect_lesson():
     """No brief for a genre we have no idiom for — but the few-shot stays,
     because it teaches the dialect, not the genre."""
@@ -229,7 +259,10 @@ def test_module_constants_are_derived_from_the_registry():
     assert "bd" in DRUM_SOUNDS
     assert "sh" in DRUM_SOUNDS               # the widened kit is really in
     assert "sawtooth" in SYNTH_SOUNDS
+    assert "supersaw" in SYNTH_SOUNDS        # the pad/lead voices too
+    assert "pulse" in SYNTH_SOUNDS
     assert set(DRUM_SOUNDS) == set(PALETTE_REGISTRY["drums"])
+    assert set(SYNTH_SOUNDS) == set(PALETTE_REGISTRY["synths"])
 
 
 def test_genre_palette_narrows_to_the_deep_entry():
@@ -745,6 +778,25 @@ def test_real_validator_accepts_the_few_shot_we_teach():
     out = mind.next_code(_state(), "seed the set")
     assert out.stats.get("events", 0) >= 1
     assert out.reason
+
+
+@_needs_validator
+def test_real_validator_accepts_the_supersaw_pad_the_brief_teaches():
+    """The pad idiom, through the mind's own genre-fenced path. Two things must
+    hold at once or every pad the model writes comes back rejected: `supersaw`
+    has to be `deep` vocabulary in the registry (else "palette violation"), and
+    .unison/.detune/.spread have to be real @strudel controls (else "syntax
+    error: ... is not a function")."""
+    pad = (
+        "// reason: laid a supersaw pad under the groove\n"
+        'note("<[a2,e3,a3] [f2,c3,f3]>").s("supersaw")'
+        ".unison(4).detune(0.2).spread(0.7)"
+        ".attack(1.5).release(2.5).lpf(900).gain(0.28).room(0.7)"
+    )
+    out = StrudelMind(llm=lambda system, user: pad).next_code(_state(), "bring in a pad")
+    assert out.stats.get("events", 0) >= 1
+    assert out.stats.get("sounds") == ["supersaw"]
+    assert out.reason == "laid a supersaw pad under the groove"
 
 
 @_needs_validator
