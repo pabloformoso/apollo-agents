@@ -399,6 +399,35 @@ Python). To scale to collections, ONE registry both sides read — the
   slices of Apollo's own catalog stems — can be played through `note()`
   correctly tuned. That is the door to "the mix quotes its own catalog".
 
+### Curation rationale — the VCSL instruments (2026-08-30)
+
+The second `sources` entry is https://strudel.b-cdn.net/vcsl.json (128
+instruments). Dumping 128 names into a 4B's prompt would sink it, so the
+registry adopts **eight**, chosen to answer what the TR727 cannot: six organic
+percussion voices — `conga` (34 samples), `bongo` (28), `shaker_small` (16),
+`cabasa` (6), `clave` (6), `agogo` (5), all index-only, played through `n()` —
+and two tonal colors, `fmpiano` (22 samples, note-keyed C/E/G# across C0–C7)
+and `balafon` (6, note-keyed C#3–F5), played through `note()`. Each one was
+range-probed on the mirror before adoption. Two path facts are load-bearing:
+the map's own `_base` is a **GitHub raw** URL (as tidal-drum-machines' is), so
+the registry overrides it with the b-cdn mirror, and that mirror's path is
+**case-sensitive** — `/VCSL/` serves, `/vcsl/` 404s, while the map itself is
+lowercase `vcsl.json`. VCSL keys are bare names, unlike the machine-prefixed
+`RolandTR909_bd`, so nothing collides and nothing carries a bank.
+
+Rejected: everything pitched-but-orchestral (sax, recorders, timpani,
+pipeorgan — wrong genre), the VCSL drum names that duplicate the machines at
+lower groove value (`clap`, `hihat`, `cowbell`, `snare_*`, `bassdrum*`),
+`triangles` (one plural away from the `triangle` synth voice — a name trap for
+a small model), and the second variants of what we took (`balafon_soft`,
+`shaker_large`, `tambourine2`) which buy a nuance the prompt cannot spend.
+**Dirt-Samples was skipped entirely**: the CDN's `Dirt-Samples.json` is not the
+classic SuperDirt library, it is a 2 KB nine-folder subset (casio, crow,
+insect, wind, jazz, metal, east, space, numbers) whose `_base` is GitHub raw
+with no b-cdn mirror. There is no house stab and no vocal chop in it; `jazz`
+is an acoustic kit that would shadow the machine roles and `east` is Japanese,
+not Latin, percussion. Nothing there earns a slot in a deep-house prompt.
+
 ### Reading list (URLs verified alive 2026-08-29)
 
 - **The REPL itself** — https://strudel.cc — its *sounds* panel lists every
