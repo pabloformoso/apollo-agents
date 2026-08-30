@@ -183,8 +183,10 @@ reject-and-hold; one retry carrying the validator's error.
   event; every event's `s` ∈ the registry vocabulary (`palette.json`, per
   genre with `--genre`, registry-wide otherwise) and every `.bank()` must
   exist in the registry AND carry that sound — a pair the matrix lacks
-  resolves to no sample and plays silence live. A bank on a synth voice is
-  rejected for the same reason. (Supersedes v1's {bd, sd, hh, oh, cp, rim,
+  resolves to no sample and plays silence live. A bank on a synth voice, or
+  on an `instruments` entry (sample-backed but NOT bank-prefixed — see §10),
+  is rejected for the same reason, each with its own coaching message.
+  (Supersedes v1's {bd, sd, hh, oh, cp, rim,
   triangle, sawtooth, square, sine} + free-form `bank()` — the §10 registry
   shipped 2026-08-29.) `out_of_key` (vs `--key`) is reported, NOT gating in
   v1 — Tidal idiom leans on `.scale()`.
@@ -355,7 +357,25 @@ TR909/TR808/TR707/TR727/LinnDrum/EmuSP12), and per-genre entries (`deep`:
 AND (sound, bank) pairs per `--genre`; `strudel_mind.py` builds the palette
 prompt (with the matrix — silence pairs are taught, not just rejected) and
 passes `--genre`; both pages register `sources` at boot with the b-cdn URL
-as fallback. Still §10 backlog: roles with voice+register, gain lanes,
+as fallback.
+
+**Shipped 2026-08-30 (`instruments`, the third category):** sample-backed
+sounds with NO bank. A drum is a bank-prefixed sample (`RolandTR909_bd`), a
+synth is an oscillator, and an **instrument** is a sample map that keys the
+sound name directly — `piano.json` — so `.bank()` on one resolves to nothing
+and plays silence exactly the way it does on a synth voice. There is no
+pitched-vs-percussive distinction: an instrument is simply a bankless sound.
+Registry shape: a top-level `"instruments": [...]` (required, like the other
+vocabularies) plus an optional per-genre `instruments` list; `paletteFor()`
+and `genre_palette()` read it per-FIELD, so a genre entry written before the
+category inherits the registry-wide list instead of silently having none.
+First entry: `piano` (source `https://strudel.b-cdn.net/piano.json`, base
+`https://strudel.b-cdn.net/piano/` — the map's own `_base` points at GitHub
+raw, and `samples(json, base)` resolves `base || map._base`, so the explicit
+base is what keeps the samples on the CDN). The pages needed no change: they
+register every entry of `sources` generically.
+
+Still §10 backlog: roles with voice+register, gain lanes,
 section templates, seed-per-pack, the Camelot bridge, pitch-mapped
 collections. The original sketch:
 

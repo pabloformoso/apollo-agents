@@ -13,7 +13,25 @@ const kabelsalatWebEsm = fileURLToPath(
   new URL('./node_modules/@kabelsalat/web/dist/index.mjs', import.meta.url),
 );
 
+// Second API surprise, same family: Node strips a `#!` shebang before parsing a
+// module, Vite/esbuild do NOT. `validate.mjs` keeps its shebang (it is chmod +x
+// and meant to be runnable), so `import ... from '../validate.mjs'` blew up the
+// WHOLE suite with "SyntaxError: Invalid or unexpected token" pointed at the
+// import line — a diagnosis that names neither the shebang nor the file that
+// carries it. Commenting the line out at transform time keeps the byte count
+// per line intact (no source map needed) and leaves the file on disk exactly as
+// committed: this is a test-harness fix, not a change to the validator.
+const stripShebang = {
+  name: 'apollo-strip-shebang',
+  enforce: 'pre',
+  transform(code, id) {
+    if (!id.endsWith('.mjs') || !code.startsWith('#!')) return null;
+    return { code: `//${code.slice(2)}`, map: null };
+  },
+};
+
 export default defineConfig({
+  plugins: [stripShebang],
   resolve: {
     alias: [{ find: /^@kabelsalat\/web$/, replacement: kabelsalatWebEsm }],
   },

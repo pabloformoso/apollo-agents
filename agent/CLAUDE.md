@@ -29,7 +29,8 @@
   (in an algorave the code on screen is the performance); and the model
   is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, so the lane
   can run on a different model from the live DJ (#123 precedent).
-  The sound vocabulary — drum roles, synth voices, and each bank's
+  The sound vocabulary — drum roles, synth voices, sampled instruments
+  (bankless: `piano`), and each bank's
   actual sound set — comes from `scripts/algorave-spike/palette.json`
   (ONE registry, plan §10; also read by `validate.mjs` and the spike
   pages). Add sounds/banks THERE, never in this module: it loads the

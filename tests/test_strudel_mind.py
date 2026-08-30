@@ -26,6 +26,8 @@ from agent.generative.strudel_mind import (
     B2B_USER_LINE,
     DRUM_SOUNDS,
     FEW_SHOT_DEEPHOUSE,
+    GENRE_BRIEFS,
+    INSTRUMENT_SOUNDS,
     PALETTE,
     PALETTE_REGISTRY,
     SYNTH_SOUNDS,
@@ -215,6 +217,40 @@ def test_the_idiom_list_carries_the_oscillator_shaping_methods():
         assert method in SYSTEM_PROMPT
 
 
+def test_deep_prompt_teaches_instruments_as_bankless_sounds():
+    """Instruments are sampled, so a model would reasonably reach for
+    `.bank()` — and that pair is silence. One line, naming them and the rule."""
+    prompt = build_system_prompt("deep")
+    line = "  instruments (sampled, via .s() on note()/n(), never with .bank()): piano"
+    assert line in prompt
+    for name in genre_palette("deep")["instruments"]:
+        assert name in prompt
+    # The closing rule covers both bankless categories, not just synths.
+    assert "Never put .bank() on a synth voice or an instrument" in prompt
+
+
+def test_deep_brief_carries_the_piano_house_idiom():
+    """One line of idiom, no more — the live model is 4B and the brief is the
+    part of the prompt that grows every time the palette does."""
+    brief = GENRE_BRIEFS["deep"]
+    piano_lines = [ln for ln in brief.splitlines() if "piano" in ln.lower()]
+    assert piano_lines, "the deep brief must say what a piano is FOR"
+    assert any('.s("piano")' in ln for ln in piano_lines)
+    assert brief.count("- Piano house") == 1  # one bullet, not a paragraph
+
+
+def test_palette_block_omits_the_instrument_line_when_a_genre_has_none(monkeypatch):
+    """Prompt growth stays proportional to the data: a genre with no
+    instruments gets no line about them, rather than an empty list."""
+    stripped = json.loads(json.dumps(PALETTE_REGISTRY))
+    stripped["instruments"] = []
+    stripped["genres"]["deep"]["instruments"] = []
+    monkeypatch.setattr(strudel_mind, "PALETTE_REGISTRY", stripped)
+    block = palette_block("deep")
+    assert "instruments (sampled" not in block
+    assert "drums (via s())" in block           # the rest of the block is intact
+
+
 def test_unknown_genre_keeps_the_dialect_lesson():
     """No brief for a genre we have no idiom for — but the few-shot stays,
     because it teaches the dialect, not the genre."""
@@ -255,14 +291,16 @@ def test_current_code_turns_the_call_into_a_mutation(validator):
 # ─── the palette registry (plan §10: pack = data, not code) ────────────
 
 def test_module_constants_are_derived_from_the_registry():
-    assert PALETTE == DRUM_SOUNDS + SYNTH_SOUNDS
+    assert PALETTE == DRUM_SOUNDS + SYNTH_SOUNDS + INSTRUMENT_SOUNDS
     assert "bd" in DRUM_SOUNDS
     assert "sh" in DRUM_SOUNDS               # the widened kit is really in
     assert "sawtooth" in SYNTH_SOUNDS
     assert "supersaw" in SYNTH_SOUNDS        # the pad/lead voices too
     assert "pulse" in SYNTH_SOUNDS
+    assert "piano" in INSTRUMENT_SOUNDS      # the third category is really in
     assert set(DRUM_SOUNDS) == set(PALETTE_REGISTRY["drums"])
     assert set(SYNTH_SOUNDS) == set(PALETTE_REGISTRY["synths"])
+    assert set(INSTRUMENT_SOUNDS) == set(PALETTE_REGISTRY["instruments"])
 
 
 def test_genre_palette_narrows_to_the_deep_entry():
@@ -270,6 +308,7 @@ def test_genre_palette_narrows_to_the_deep_entry():
     entry = PALETTE_REGISTRY["genres"]["deep"]
     assert list(pal["drums"]) == entry["drums"]
     assert list(pal["banks"]) == entry["banks"]
+    assert list(pal["instruments"]) == entry["instruments"]
     # Each bank resolves to its matrix row, not to an empty guess.
     for bank, roles in pal["banks"].items():
         assert list(roles) == PALETTE_REGISTRY["banks"][bank]
@@ -279,6 +318,32 @@ def test_genre_palette_falls_back_whole_for_an_unknown_genre():
     pal = genre_palette("gabber")
     assert set(pal["drums"]) == set(PALETTE_REGISTRY["drums"])
     assert set(pal["banks"]) == set(PALETTE_REGISTRY["banks"])
+    assert set(pal["instruments"]) == set(PALETTE_REGISTRY["instruments"])
+
+
+def test_genre_palette_carries_instruments_and_inherits_them_when_unlisted(monkeypatch):
+    """Instruments are read per-FIELD, mirroring validate.mjs's paletteFor().
+
+    A genre entry that lists them narrows to its list; one written before the
+    category existed inherits the registry-wide list instead of silently
+    having none — which is what keeps adding an instrument a pure-data move.
+    """
+    assert genre_palette("deep")["instruments"] == ("piano",)
+
+    widened = json.loads(json.dumps(PALETTE_REGISTRY))  # deep copy, no aliasing
+    widened["instruments"] = list(widened["instruments"]) + ["testonly_instrument"]
+    monkeypatch.setattr(strudel_mind, "PALETTE_REGISTRY", widened)
+
+    # deep lists piano only -> the extra instrument is fenced out.
+    assert genre_palette("deep")["instruments"] == ("piano",)
+    # An unknown genre narrows nothing.
+    assert "testonly_instrument" in genre_palette("gabber")["instruments"]
+
+    # Drop the field from the genre entry: it inherits, rather than emptying.
+    widened["genres"]["deep"].pop("instruments")
+    inherited = genre_palette("deep")
+    assert "testonly_instrument" in inherited["instruments"]
+    assert "misc" not in inherited["drums"]  # still narrowed on the other fields
 
 
 def test_genre_palette_normalizes_spelling_like_genre_brief():
@@ -301,6 +366,7 @@ def test_registry_is_self_consistent():
     lane vocabulary, and the genre the playground page ships must exist."""
     drums = set(PALETTE_REGISTRY["drums"])
     synths = set(PALETTE_REGISTRY["synths"])
+    instruments = set(PALETTE_REGISTRY["instruments"])
     banks = PALETTE_REGISTRY["banks"]
     for genre, entry in PALETTE_REGISTRY["genres"].items():
         for d in entry["drums"]:
@@ -309,6 +375,10 @@ def test_registry_is_self_consistent():
             assert s in synths, f"{genre}: synth {s} not in registry synths"
         for b in entry["banks"]:
             assert b in banks, f"{genre}: bank {b} has no matrix row"
+        # `instruments` is optional per genre (an entry written before the
+        # category inherits the registry-wide list) — but if listed, it resolves.
+        for i in entry.get("instruments", ()):
+            assert i in instruments, f"{genre}: instrument {i} not in registry instruments"
     for bank, roles in banks.items():
         assert roles, f"bank {bank} has an empty matrix row"
         for role in roles:
@@ -316,6 +386,25 @@ def test_registry_is_self_consistent():
     assert "deep" in PALETTE_REGISTRY["genres"]  # the page ships GENRE='deep'
     for src in PALETTE_REGISTRY["sources"]:
         assert src.get("json") and src.get("base"), "source needs json+base URLs"
+
+
+def test_instrument_names_collide_with_no_other_category():
+    """The three categories are ONE flat namespace to the validator; they
+    differ only in the `.bank()` rule. A name in two of them would make the
+    applicable rule depend on check order — silent drift, the failure mode
+    this whole registry exists to prevent."""
+    drums = set(PALETTE_REGISTRY["drums"])
+    synths = set(PALETTE_REGISTRY["synths"])
+    assert PALETTE_REGISTRY["instruments"], "the registry ships at least one instrument"
+    assert len(set(PALETTE_REGISTRY["instruments"])) == len(PALETTE_REGISTRY["instruments"])
+    for name in PALETTE_REGISTRY["instruments"]:
+        assert isinstance(name, str) and name, f"instrument {name!r} is not a name"
+        assert name not in drums, f"{name} is also a drum"
+        assert name not in synths, f"{name} is also a synth"
+    # A sampled instrument is nothing without a registered source: the pages
+    # register `sources` verbatim, so the tag is the only structural link we
+    # can assert without the network.
+    assert any(src.get("tag") == "piano" for src in PALETTE_REGISTRY["sources"])
 
 
 def test_a_missing_registry_file_raises_with_the_fix(tmp_path, monkeypatch):
@@ -334,9 +423,26 @@ def test_a_corrupt_registry_file_raises_naming_the_file(tmp_path, monkeypatch):
 
 def test_a_registry_missing_a_field_raises_naming_it(tmp_path, monkeypatch):
     partial = tmp_path / "palette.json"
-    partial.write_text(json.dumps({"sources": [], "drums": [], "synths": []}), encoding="utf-8")
+    partial.write_text(
+        json.dumps({"sources": [], "drums": [], "synths": [], "instruments": []}),
+        encoding="utf-8",
+    )
     monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
     with pytest.raises(RuntimeError, match="'banks'"):
+        strudel_mind._load_palette_registry()
+
+
+def test_a_registry_missing_instruments_raises_naming_it(tmp_path, monkeypatch):
+    """`instruments` is a REQUIRED field, not an optional extra: the validator
+    requires it too, and a registry the two sides shape-check differently is
+    exactly the drift the single-registry rule exists to stop."""
+    partial = tmp_path / "palette.json"
+    partial.write_text(
+        json.dumps({"sources": [], "drums": [], "synths": [], "banks": {}, "genres": {}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
+    with pytest.raises(RuntimeError, match="'instruments'"):
         strudel_mind._load_palette_registry()
 
 
@@ -804,3 +910,19 @@ def test_real_validator_rejects_broken_code_twice_and_the_mind_holds():
     mind = StrudelMind(llm=lambda system, user: 'stack(s("bd*4"')
     with pytest.raises(StrudelMindError, match="failed twice"):
         mind.next_code(_state(), "break it")
+
+
+@_needs_validator
+def test_real_validator_agrees_with_the_prompt_about_instruments():
+    """The two sides of the registry, checked against each other on the new
+    category: what `palette_block` teaches (a bankless sampled sound) is
+    exactly what `validate.mjs` accepts — and the bank the prompt forbids is
+    the bank the validator rejects, with the no-bank fix in the message."""
+    ok = strudel_mind.validate_code('note("c4 e4 g4").s("piano")', cycles=2, genre="deep")
+    assert ok["valid"], ok.get("error")
+    assert ok["stats"]["sounds"] == ["piano"]
+
+    banked = strudel_mind.validate_code('s("piano").bank("RolandTR909")', cycles=2, genre="deep")
+    assert not banked["valid"]
+    assert "instrument 'piano'" in banked["error"]
+    assert "not bank-prefixed" in banked["error"]
