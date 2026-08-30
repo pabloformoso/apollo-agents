@@ -405,6 +405,28 @@ describe('instruments — sample-backed sounds that take NO bank (§10)', () => 
     expect(runValidator('s("piano")', ['--genre', 'deep']).valid).toBe(true);
   });
 
+  it('the curated VCSL percussion and keys validate under --genre deep', () => {
+    // The assertions the curation PR deferred until the category landed:
+    // percussive instruments through s(), pitched ones through note().s(),
+    // and the no-bank rule applying to them exactly as it does to the piano.
+    const code = [
+      'stack(',
+      '  s("bd*4").bank("RolandTR909"),',
+      '  s("~ conga ~ [bongo bongo]").gain(0.4),',
+      '  s("clave*2").gain(0.3),',
+      '  note("<[a3,c4,e4]>").s("fmpiano").gain(0.4)',
+      ')',
+    ].join('\n');
+    const verdict = runValidator(code, ['--genre', 'deep', '--key', 'A:minor']);
+    expect(verdict.valid).toBe(true);
+    expect(verdict.stats.sounds).toEqual(['bd', 'bongo', 'clave', 'conga', 'fmpiano']);
+
+    const banked = runValidator('s("conga*4").bank("RolandTR727")', ['--genre', 'deep']);
+    expect(banked.valid).toBe(false);
+    expect(banked.error).toContain("instrument 'conga'");
+    expect(banked.error).toMatch(/plays silence/);
+  });
+
   it('a bank on a synth voice still gets the SYNTH message, not the instrument one', () => {
     // The two rules share a rationale but not a fix, so they must stay two
     // distinct messages — a regression here would coach the wrong repair.
@@ -467,6 +489,7 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     for (const name of registry.instruments) {
       expect(typeof name, `instrument ${name}`).toBe('string');
       expect(name.length).toBeGreaterThan(0);
+      expect(name.trim()).toBe(name);
       expect(seen.has(name), `instrument ${name} listed twice`).toBe(false);
       seen.add(name);
       expect(drums.has(name), `${name} is also a drum`).toBe(false);
@@ -476,6 +499,17 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     // the name and no audio. Structural only — asserting the map's KEYS would
     // need the network, and this suite makes none.
     expect(registry.sources.some((s) => s.tag === 'piano')).toBe(true);
+  });
+
+  it('the vcsl source is pinned to the case-sensitive mirror spelling', () => {
+    // The b-cdn mirror path is CASE-SENSITIVE: /VCSL/ serves, /vcsl/ 404s
+    // (probed 2026-08-30) while the map itself is lowercase vcsl.json.
+    // "Tidying" the two to match 404s every sample, silently — the layer
+    // just goes quiet.
+    const vcsl = registry.sources.filter((s) => s.tag === 'vcsl');
+    expect(vcsl.length).toBe(1);
+    expect(vcsl[0].json).toBe('https://strudel.b-cdn.net/vcsl.json');
+    expect(vcsl[0].base).toBe('https://strudel.b-cdn.net/VCSL/');
   });
 
   it('paletteFor narrows to a known genre and falls back whole otherwise', () => {

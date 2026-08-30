@@ -267,6 +267,13 @@ GENRE_BRIEFS: dict[str, str] = {
   at a peak the ride (rd — 909/LinnDrum) can replace the offbeat oh; toms (ht/mt/lt)
   are a one-bar fill into a phrase change, never a running pattern; cb/tb/perc are
   single accents, low in the mix.
+- Organic percussion (conga, bongo, cabasa, clave, agogo, shaker_small) answers the
+  TR727, it does not double it: one or two hits a bar, placed off the steps the machine
+  kit already owns, and well under it — n() there picks the sample variation, not a
+  scale degree: n("<0 3>").s("clave").gain(0.3).
+- Tonal color (fmpiano, balafon) is texture, never the lead: note("...").s("fmpiano")
+  answering the stabs on the off-phrase, or a two-note balafon motif behind them —
+  quieter than the chords, with .room doing the depth.
 - Groove is king: change ONE element per phrase and keep the rest locked. Build by
   opening the bass .lpf and lifting hat gain; strip back by removing a layer, not by
   rewriting the groove.""",

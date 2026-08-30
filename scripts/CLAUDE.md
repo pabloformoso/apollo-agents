@@ -98,17 +98,24 @@
   - **Three sound categories, told apart ONLY by the `.bank()` rule.**
     `drums` are bank-prefixed samples (they NEED the right bank),
     `synths` are oscillators, `instruments` (2026-08-30) are
-    sample-backed but bankless — `piano.json` keys the sound name
-    directly, so `.bank()` on one plays silence. No pitched-vs-percussive
-    distinction is made or needed.
+    sample-backed but bankless — `piano.json` and the VCSL map key the
+    sound name directly, so `.bank()` on one plays silence. No
+    pitched-vs-percussive distinction is made or needed.
   - **`sources[].base` is load-bearing, not decoration.** Every b-cdn
     sample map carries its own `_base` pointing at `raw.githubusercontent
     .com`; `samples(json, base)` resolves `base || map._base`, so
-    dropping `base` silently moves the samples off the CDN.
+    dropping `base` silently moves the samples off the CDN. And the
+    mirror path is **case-sensitive** — `/VCSL/` serves, `/vcsl/` 404s,
+    while the map itself is lowercase `vcsl.json`; making them agree
+    404s every sample silently (the layer just goes quiet); frozen by
+    test.
   - `instruments` is REQUIRED at the top level and OPTIONAL per genre: a
     genre entry without it inherits the registry-wide list (both
     `paletteFor()` and `genre_palette()` read it per-field), which is
     what keeps adding an instrument a pure-data move.
+  - The VCSL map has 128 instruments and the live mind is a 4B, so the
+    registry carries a curated handful (plan §10 "curation rationale"),
+    not the map. Widen it by picking names, never by pasting the map.
 - `algorave_playground.py` — the playground's mind button
   (docs/algorave-livecoding-plan.md §9 stage 1): a stdlib HTTP server on
   **4032** whose one endpoint, `POST /mind`, hands the editor's code +

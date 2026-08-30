@@ -328,14 +328,15 @@ def test_genre_palette_carries_instruments_and_inherits_them_when_unlisted(monke
     category existed inherits the registry-wide list instead of silently
     having none — which is what keeps adding an instrument a pure-data move.
     """
-    assert genre_palette("deep")["instruments"] == ("piano",)
+    deep_listed = tuple(PALETTE_REGISTRY["genres"]["deep"]["instruments"])
+    assert genre_palette("deep")["instruments"] == deep_listed
 
     widened = json.loads(json.dumps(PALETTE_REGISTRY))  # deep copy, no aliasing
     widened["instruments"] = list(widened["instruments"]) + ["testonly_instrument"]
     monkeypatch.setattr(strudel_mind, "PALETTE_REGISTRY", widened)
 
-    # deep lists piano only -> the extra instrument is fenced out.
-    assert genre_palette("deep")["instruments"] == ("piano",)
+    # deep lists its curated set -> the extra instrument is fenced out.
+    assert genre_palette("deep")["instruments"] == deep_listed
     # An unknown genre narrows nothing.
     assert "testonly_instrument" in genre_palette("gabber")["instruments"]
 
@@ -405,6 +406,61 @@ def test_instrument_names_collide_with_no_other_category():
     # register `sources` verbatim, so the tag is the only structural link we
     # can assert without the network.
     assert any(src.get("tag") == "piano" for src in PALETTE_REGISTRY["sources"])
+
+
+# ─── the sampled instruments (VCSL curation, plan §10) ─────────────────
+
+def test_instrument_names_are_non_empty_unique_strings():
+    """A blank or duplicated name costs a prompt slot and buys nothing — and a
+    name is the ONLY thing tying a registry entry to a sample folder."""
+    names = PALETTE_REGISTRY["instruments"]
+    assert names, "the registry ships a curated instrument set"
+    for name in names:
+        assert isinstance(name, str) and name.strip() == name and name
+    assert len(set(names)) == len(names), "duplicate instrument name"
+    # Bare sample-map keys, never the machine-prefixed drum-machine spelling.
+    for name in names:
+        assert "_bd" not in name and not name.startswith("Roland")
+
+
+def test_deep_entry_instruments_are_registry_instruments():
+    """genres.deep.instruments ⊆ instruments — the genre fence can only narrow
+    the registry, never smuggle a name past it."""
+    registry = set(PALETTE_REGISTRY["instruments"])
+    deep = PALETTE_REGISTRY["genres"]["deep"]["instruments"]
+    assert deep, "the deep entry curates at least one instrument"
+    assert set(deep) <= registry
+
+
+def test_genre_palette_carries_the_genre_instruments():
+    assert list(genre_palette("deep")["instruments"]) == (
+        PALETTE_REGISTRY["genres"]["deep"]["instruments"]
+    )
+    # Unknown genre degrades to the registry-wide set, like drums and synths.
+    assert set(genre_palette("gabber")["instruments"]) == set(PALETTE_REGISTRY["instruments"])
+
+
+def test_deep_prompt_teaches_every_curated_instrument():
+    """Same rule as the bank matrix: a sound the registry allows but the prompt
+    never names is a sound the model will not reach for."""
+    prompt = build_system_prompt("deep")
+    for name in PALETTE_REGISTRY["genres"]["deep"]["instruments"]:
+        assert name in prompt, f"instrument {name} missing from the deep prompt"
+    # The bank rule is the whole reason the category exists — teach it, since
+    # a .bank() on a bare sample name resolves to nothing and plays silence.
+    assert "never with .bank()" in prompt
+
+
+def test_every_instrument_source_is_registered_and_case_correct():
+    """The instruments live in the VCSL map, and the b-cdn mirror path is
+    CASE-SENSITIVE: /VCSL/ serves, /vcsl/ 404s (probed 2026-08-30) while the
+    map itself is lowercase vcsl.json. "Tidying" that to match would 404 every
+    sample silently — the page logs a load error and the layer just goes
+    quiet — so the spelling is frozen here."""
+    vcsl = [s for s in PALETTE_REGISTRY["sources"] if s.get("tag") == "vcsl"]
+    assert len(vcsl) == 1, "the curated instruments need exactly one vcsl source"
+    assert vcsl[0]["json"] == "https://strudel.b-cdn.net/vcsl.json"
+    assert vcsl[0]["base"] == "https://strudel.b-cdn.net/VCSL/"
 
 
 def test_a_missing_registry_file_raises_with_the_fix(tmp_path, monkeypatch):
