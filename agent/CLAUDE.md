@@ -30,10 +30,13 @@
   is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, so the lane
   can run on a different model from the live DJ (#123 precedent).
   The sound vocabulary — drum roles, synth voices, sampled instruments
-  (bankless: `piano`), and each bank's
-  actual sound set — comes from `scripts/algorave-spike/palette.json`
+  (bankless: `piano`), each bank's
+  actual sound set, and the melodic role table (voice + register per
+  role, rendered by `roles_block()`; prompt-side only, the validator
+  cannot attribute events to roles) — comes from
+  `scripts/algorave-spike/palette.json`
   (ONE registry, plan §10; also read by `validate.mjs` and the spike
-  pages). Add sounds/banks THERE, never in this module: it loads the
+  pages). Add sounds/banks/roles THERE, never in this module: it loads the
   registry at import and fails LOUD on a missing/corrupt file, and
   `next_code` passes `--genre` so the validator enforces the same
   per-genre fence the prompt teaches (a (sound, bank) pair the matrix

@@ -154,7 +154,10 @@ export function parseArgs(argv) {
 export function loadPaletteRegistry() {
   const file = fileURLToPath(new URL('./palette.json', import.meta.url));
   const registry = JSON.parse(readFileSync(file, 'utf8'));
-  for (const field of ['sources', 'drums', 'synths', 'instruments', 'banks', 'genres']) {
+  // `roles` is required here even though nothing below enforces it (an event
+  // cannot be attributed to a role, so the table is prompt-side data): the two
+  // sides shape-check the ONE registry identically, or they drift.
+  for (const field of ['sources', 'drums', 'synths', 'instruments', 'roles', 'banks', 'genres']) {
     if (!(field in registry)) {
       throw new Error(`palette.json is missing the "${field}" field`);
     }

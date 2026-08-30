@@ -41,6 +41,7 @@ from agent.generative.strudel_mind import (
     build_system_prompt,
     genre_palette,
     palette_block,
+    roles_block,
 )
 
 VALID_CODE = 'stack(s("bd*4"), s("[~ oh]*4"))'
@@ -384,6 +385,19 @@ def test_registry_is_self_consistent():
         assert roles, f"bank {bank} has an empty matrix row"
         for role in roles:
             assert role in drums, f"{bank}: role {role} not in registry drums"
+    # Role voices are prompt-side data, but they must still RESOLVE, inside
+    # the same scope's pitched palette (synths ∪ instruments): a role teaching
+    # a voice the validator rejects would be a scripted 502.
+    for name, spec in PALETTE_REGISTRY["roles"].items():
+        for voice in spec["voices"]:
+            assert voice in synths | instruments, f"role {name}: voice {voice} unresolvable"
+    for genre, entry in PALETTE_REGISTRY["genres"].items():
+        pitched = set(entry["synths"]) | set(entry.get("instruments", instruments))
+        for name, spec in entry.get("roles", {}).items():
+            for voice in spec["voices"]:
+                assert voice in pitched, (
+                    f"{genre}: role {name} voice {voice} outside the genre palette"
+                )
     assert "deep" in PALETTE_REGISTRY["genres"]  # the page ships GENRE='deep'
     for src in PALETTE_REGISTRY["sources"]:
         assert src.get("json") and src.get("base"), "source needs json+base URLs"
@@ -463,6 +477,88 @@ def test_every_instrument_source_is_registered_and_case_correct():
     assert vcsl[0]["base"] == "https://strudel.b-cdn.net/VCSL/"
 
 
+# ─── the melodic roles (voice + register, plan §10) ────────────────────
+
+def test_registry_roles_have_voices_and_octaves():
+    """Shape fence for the role tables, top-level and per-genre: a role is
+    {"voices": [...], "octaves": [lo, hi]} — voices ordered (first = the
+    role's home sound) and unique, octaves two ints in playable range."""
+    tables = [("registry", PALETTE_REGISTRY["roles"])] + [
+        (f"genres.{genre}", entry["roles"])
+        for genre, entry in PALETTE_REGISTRY["genres"].items()
+        if "roles" in entry
+    ]
+    for label, table in tables:
+        assert isinstance(table, dict) and table, f"{label}: roles is a non-empty table"
+        for name, spec in table.items():
+            assert isinstance(name, str) and name.strip() == name and name
+            voices = spec["voices"]
+            assert voices, f"{label}.{name}: a role needs at least one voice"
+            for voice in voices:
+                assert isinstance(voice, str) and voice, f"{label}.{name}: voice {voice!r}"
+            assert len(set(voices)) == len(voices), f"{label}.{name}: duplicate voice"
+            octaves = spec["octaves"]
+            assert len(octaves) == 2, f"{label}.{name}: octaves is [lo, hi]"
+            lo, hi = octaves
+            assert isinstance(lo, int) and isinstance(hi, int), f"{label}.{name}: octaves"
+            assert 0 <= lo <= hi <= 8, f"{label}.{name}: octaves {lo}-{hi} out of range"
+
+
+def test_genre_palette_carries_roles_and_inherits_them_when_unlisted(monkeypatch):
+    """Roles are read per-FIELD like instruments, mirroring paletteFor()'s
+    rule: a genre entry that lists them narrows to its table; one written
+    before the category inherits the registry-wide table instead of silently
+    having none."""
+    deep_listed = set(PALETTE_REGISTRY["genres"]["deep"]["roles"])
+    assert set(genre_palette("deep")["roles"]) == deep_listed
+
+    widened = json.loads(json.dumps(PALETTE_REGISTRY))  # deep copy, no aliasing
+    widened["roles"]["testonly_role"] = {"voices": ["sine"], "octaves": [3, 3]}
+    monkeypatch.setattr(strudel_mind, "PALETTE_REGISTRY", widened)
+
+    # deep lists its own table -> the extra role is fenced out.
+    assert "testonly_role" not in genre_palette("deep")["roles"]
+    # An unknown genre narrows nothing.
+    assert "testonly_role" in genre_palette("gabber")["roles"]
+
+    # Drop the field from the genre entry: it inherits, rather than emptying.
+    widened["genres"]["deep"].pop("roles")
+    inherited = genre_palette("deep")
+    assert "testonly_role" in inherited["roles"]
+    assert "misc" not in inherited["drums"]  # still narrowed on the other fields
+
+
+def test_roles_block_teaches_voice_and_register_per_role():
+    block = roles_block("deep")
+    assert block.startswith("ROLES")
+    for name, spec in PALETTE_REGISTRY["genres"]["deep"]["roles"].items():
+        line = next(
+            ln for ln in block.splitlines() if ln.strip().startswith(f"{name}:")
+        )
+        for voice in spec["voices"]:
+            assert f'.s("{voice}")' in line, f"{name}: voice {voice} untaught"
+        lo, hi = spec["octaves"]
+        register = f"octave {lo}" if lo == hi else f"octaves {lo}-{hi}"
+        assert register in line, f"{name}: register {register} untaught"
+
+
+def test_deep_prompt_carries_the_roles_block_between_palette_and_brief():
+    prompt = build_system_prompt("deep")
+    assert roles_block("deep") in prompt
+    # Sounds first (what exists), then who plays where, then the genre prose.
+    assert prompt.index("PALETTE") < prompt.index("ROLES") < prompt.index("GENRE:")
+
+
+def test_roles_block_empty_when_a_genre_has_none(monkeypatch):
+    """An explicit empty table drops the section (the instruments-line
+    precedent) rather than rendering a header over nothing."""
+    trimmed = json.loads(json.dumps(PALETTE_REGISTRY))
+    trimmed["genres"]["deep"]["roles"] = {}
+    monkeypatch.setattr(strudel_mind, "PALETTE_REGISTRY", trimmed)
+    assert roles_block("deep") == ""
+    assert "ROLES" not in build_system_prompt("deep")
+
+
 def test_a_missing_registry_file_raises_with_the_fix(tmp_path, monkeypatch):
     monkeypatch.setattr(strudel_mind, "PALETTE_FILE", tmp_path / "palette.json")
     with pytest.raises(RuntimeError, match="restore it from git"):
@@ -480,7 +576,9 @@ def test_a_corrupt_registry_file_raises_naming_the_file(tmp_path, monkeypatch):
 def test_a_registry_missing_a_field_raises_naming_it(tmp_path, monkeypatch):
     partial = tmp_path / "palette.json"
     partial.write_text(
-        json.dumps({"sources": [], "drums": [], "synths": [], "instruments": []}),
+        json.dumps(
+            {"sources": [], "drums": [], "synths": [], "instruments": [], "roles": {}}
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
@@ -499,6 +597,29 @@ def test_a_registry_missing_instruments_raises_naming_it(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
     with pytest.raises(RuntimeError, match="'instruments'"):
+        strudel_mind._load_palette_registry()
+
+
+def test_a_registry_missing_roles_raises_naming_it(tmp_path, monkeypatch):
+    """`roles` is REQUIRED top-level like the other vocabularies (the
+    instruments precedent, and the same drift argument: validate.mjs
+    shape-checks it too, so the two sides stay one registry)."""
+    partial = tmp_path / "palette.json"
+    partial.write_text(
+        json.dumps(
+            {
+                "sources": [],
+                "drums": [],
+                "synths": [],
+                "instruments": [],
+                "banks": {},
+                "genres": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strudel_mind, "PALETTE_FILE", partial)
+    with pytest.raises(RuntimeError, match="'roles'"):
         strudel_mind._load_palette_registry()
 
 
