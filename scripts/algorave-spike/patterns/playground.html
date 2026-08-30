@@ -334,7 +334,7 @@
     </main>
 
     <script type="module">
-      import { initStrudel, samples, evaluate, hush } from '@strudel/web';
+      import { initStrudel, samples, evaluate, hush, getAudioContext } from '@strudel/web';
       // The pen (§9.1) is a pure module so its decisions are unit-tested
       // without a browser — test/pen.test.mjs drives the same functions this
       // page wires to a real clock. Same file, two consumers.
@@ -350,6 +350,7 @@
         barsUntilFlip,
         decide,
         diffLines,
+        autoApplyDecision,
         mindRequest,
         modeIsB2b,
         nextBoundaryBar,
@@ -382,6 +383,12 @@
       // the pen. A blank box must not stall the jam — and "none" is what
       // StrudelMind would otherwise be told, which is not an instruction.
       const STANDING_INTENT = 'keep the groove moving — one clear change';
+      // Longer than the mind server's own --timeout (120 s), so a slow model is
+      // the SERVER's 502, never our abort — this abort exists for the hung
+      // SOCKET (wifi drop, a server killed mid-request): without it, the
+      // await never settles, `inFlight` stays true forever, and the scheduler
+      // goes mute for the rest of the session (first real practice, 2026-08-30).
+      const MIND_TIMEOUT_MS = 130_000;
 
       // Sample sources come from the palette registry (/palette.json, plan
       // §10) — the same file validate.mjs gates against and strudel_mind.py
@@ -549,6 +556,13 @@
             repl.setCps(CPS);
             log(`ready · cps ${CPS.toFixed(5)} (${BPM} BPM)`, 'ok');
             return repl;
+          }).catch((err) => {
+            // A failed boot (a CDN blink while registering sources) must not be
+            // cached forever: with the rejected promise kept, every later Play
+            // re-throws the same stale error and the page never sounds again.
+            // Reset so the NEXT Play retries from scratch.
+            ready = null;
+            throw err;
           });
         }
         return ready;
@@ -595,6 +609,15 @@
         const code = editor.value;
         if (!code.trim()) throw new Error('the editor is empty — nothing to evaluate');
         const repl = await boot();
+        // A backgrounded tab or a sleeping device suspends the AudioContext;
+        // evaluate() then schedules onto a stopped clock and the page reads
+        // "playing" in total silence (first real practice, 2026-08-30). Every
+        // run is user-gesture-driven, so resuming here is always allowed.
+        const ctx = getAudioContext();
+        if (ctx && ctx.state === 'suspended') {
+          await ctx.resume();
+          log('audio context was suspended — resumed', 'warn');
+        }
         repl.setCps(CPS);
         await evaluate(code, true);
         setState(true, new Date().toTimeString().slice(0, 8));
@@ -668,6 +691,7 @@
       // The mind button.
       // ---------------------------------------------------------------------
       let proposal = null;              // the last 200's code, or null
+      let proposalBasedOn = null;       // the buffer the mind was SHOWN for it
 
       const showError = (title, detail) => {
         proposal = null;
@@ -712,13 +736,27 @@
         }
 
         let response;
+        const abort = new AbortController();
+        const abortTimer = setTimeout(() => abort.abort(), MIND_TIMEOUT_MS);
         try {
           response = await fetch(MIND_URL, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(payload),
+            signal: abort.signal,
           });
         } catch (err) {
+          if (err?.name === 'AbortError') {
+            // The socket hung — a dropped wifi, a server killed mid-request.
+            // Without this the await never settles and `inFlight` wedges the
+            // scheduler for the rest of the session.
+            showError(
+              `the mind did not answer within ${MIND_TIMEOUT_MS / 1000}s — request dropped`,
+              'The socket hung (network drop, or the server died mid-request). ' +
+                'The scheduler keeps going; the next phrase boundary asks again.',
+            );
+            return false;
+          }
           // fetch() rejects on connection refused / CORS refusal — the two most
           // likely first-run states, so say what to run rather than "failed".
           showError(
@@ -728,6 +766,8 @@
               'It must be the one on :4032 — serve.mjs (:4031) only serves this page.',
           );
           return false;
+        } finally {
+          clearTimeout(abortTimer);
         }
 
         let body = null;
@@ -753,6 +793,7 @@
         }
 
         proposal = body.code || '';
+        proposalBasedOn = payload.code;
         const reason = body.reason || '(the mind returned no reason line)';
         $('reason-text').textContent = reason;
         $('reason').style.display = 'block';
@@ -777,6 +818,22 @@
        *  ring and on screen exactly like a hand-applied one. */
       async function applyProposal({ auto = false } = {}) {
         if (proposal == null) return;
+        if (auto) {
+          // §9.1 addendum: the human wins ties. The mutation was computed
+          // against the buffer as it was when the request fired; if a human
+          // edited during the model's 10-30s think, auto-applying would stomp
+          // their keystrokes. A hand-clicked Apply is a human decision made
+          // looking at the diff, and never passes through this gate.
+          const verdict = autoApplyDecision({ askedWith: proposalBasedOn, current: editor.value });
+          if (!verdict.apply) {
+            proposal = null;
+            $('actions').style.display = 'none';
+            $('p-src').textContent = 'proposal dropped';
+            $('proposal').innerHTML = '<span class="empty">the buffer changed while the mind was thinking — your edit wins.</span>';
+            log(verdict.why, 'warn');
+            return;
+          }
+        }
         editor.value = proposal;
         const reason = $('reason-text').textContent;
         if (reason) recentReasons = pushReason(recentReasons, reason);

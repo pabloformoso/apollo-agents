@@ -465,3 +465,29 @@ export function mindRequest({
     ...(b2b ? { b2b: true } : {}),
   };
 }
+
+/**
+ * §9.1 addendum (2026-08-30, from the first real practice session): may a
+ * SCHEDULED proposal still be auto-applied?
+ *
+ * The mind's mutation was computed against the buffer as it was when the
+ * request fired, and the model takes 10-30 s to answer — plenty of time for
+ * the human to edit meanwhile. Auto-applying over those keystrokes turns the
+ * duet into a fight (the practice report: "me pongo a editar y la mente
+ * vuelve a cambiarlo encima"), so the HUMAN wins ties: the proposal lands
+ * only when the buffer is still byte-identical to what the mind was shown.
+ * Exact equality on purpose — even a whitespace tweak is a human at the
+ * keyboard, and dropping one proposal costs a phrase, not the jam.
+ *
+ * This gates the SCHEDULER's auto-apply only. A hand-clicked Apply is a human
+ * decision made while looking at the diff, and is never blocked here.
+ */
+export function autoApplyDecision({ askedWith, current }) {
+  if (String(askedWith ?? '') === String(current ?? '')) {
+    return { apply: true, why: 'buffer unchanged since the request fired' };
+  }
+  return {
+    apply: false,
+    why: 'the buffer changed while the mind was thinking — your edit wins, proposal dropped',
+  };
+}
