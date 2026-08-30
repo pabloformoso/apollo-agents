@@ -30,7 +30,9 @@
     "triangle",
     "sawtooth",
     "square",
-    "sine"
+    "sine",
+    "supersaw",
+    "pulse"
   ],
   "banks": {
     "RolandTR909": [
@@ -136,7 +138,9 @@
         "triangle",
         "sawtooth",
         "square",
-        "sine"
+        "sine",
+        "supersaw",
+        "pulse"
       ],
       "banks": [
         "RolandTR909",

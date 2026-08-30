@@ -317,6 +317,42 @@ describe('the palette registry (palette.json) — banks by data, silence gate', 
     expect(unknown.valid).toBe(true);
   });
 
+  it('the pad/lead voices validate: a supersaw pad and a pulse lead under --genre deep', () => {
+    // The idiom agent/generative/strudel_mind.py's deep brief teaches. Two
+    // independent things have to hold or every pad the mind writes is rejected:
+    // `supersaw`/`pulse` must be registry vocabulary FOR deep (else "palette
+    // violation"), and .unison/.detune/.spread/.vib must be real @strudel
+    // controls (else "syntax error: ... is not a function" — a different bucket
+    // in bench_strudel_mind.py, and a different bug).
+    const pad = 'note("<[a2,e3,a3]>").s("supersaw").attack(1.5).gain(0.3)';
+    const verdict = runValidator(pad, ['--genre', 'deep', '--key', 'A:minor']);
+    expect(verdict.valid).toBe(true);
+    expect(verdict.error).toBeNull();
+    expect(verdict.stats.sounds).toEqual(['supersaw']);
+
+    // The same pad fully shaped, exactly as the brief spells it out.
+    const shaped = runValidator(
+      'note("<[a2,e3,a3] [f2,c3,f3]>").s("supersaw").unison(4).detune(0.2).spread(0.7)' +
+        '.attack(1.5).release(2.5).lpf(900).gain(0.28).room(0.7)',
+      ['--genre', 'deep', '--key', 'A:minor'],
+    );
+    expect(shaped.valid).toBe(true);
+    expect(shaped.stats.out_of_key).toEqual([]);
+
+    // The lead half of the brief: a monophonic pulse line with vibrato.
+    const lead = runValidator('n("0 ~ 3 ~").scale("A4:minor").s("pulse").vib(5).delay(0.4)', [
+      '--genre', 'deep', '--key', 'A:minor',
+    ]);
+    expect(lead.valid).toBe(true);
+    expect(lead.stats.sounds).toEqual(['pulse']);
+
+    // They are synth voices like any other: a .bank() on one still plays
+    // silence, so the new voices inherit that rejection rather than dodging it.
+    const banked = runValidator('note("a2").s("supersaw").bank("RolandTR909")', ['--genre', 'deep']);
+    expect(banked.valid).toBe(false);
+    expect(banked.error).toMatch(/synth voice 'supersaw' plays silence/);
+  });
+
   it('the widened kit actually plays: toms, ride, shaker and perc in one stack', () => {
     const code = [
       'stack(',
