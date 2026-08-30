@@ -17,6 +17,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  autoApplyDecision,
   DEFAULT_PHRASE_BARS,
   INITIAL_PEN,
   MAX_RECENT_REASONS,
@@ -486,5 +487,31 @@ describe('handoff: the human edits, hands over, and the mind answers THAT code',
     }
     expect(fired).toEqual([8, 16]); // 24 and 32 never happen
     expect(pen).toBe(PEN_HUMAN);
+  });
+});
+
+describe('autoApplyDecision — the human wins ties (§9.1 addendum, 2026-08-30)', () => {
+  it('applies when the buffer is byte-identical to what the mind was shown', () => {
+    const v = autoApplyDecision({ askedWith: 'stack(s("bd*4"))', current: 'stack(s("bd*4"))' });
+    expect(v.apply).toBe(true);
+  });
+
+  it('drops the proposal on ANY human edit made while the mind was thinking', () => {
+    const v = autoApplyDecision({
+      askedWith: 'stack(s("bd*4"))',
+      current: 'stack(s("bd*4"), s("hh*8"))',
+    });
+    expect(v.apply).toBe(false);
+    expect(v.why).toMatch(/your edit wins/);
+  });
+
+  it('exact equality on purpose: even whitespace counts as a human at the keyboard', () => {
+    expect(autoApplyDecision({ askedWith: 'a', current: 'a ' }).apply).toBe(false);
+    expect(autoApplyDecision({ askedWith: 'a', current: 'a\n' }).apply).toBe(false);
+  });
+
+  it('tolerates null/undefined on either side without throwing', () => {
+    expect(autoApplyDecision({ askedWith: null, current: '' }).apply).toBe(true);
+    expect(autoApplyDecision({ askedWith: undefined, current: 'x' }).apply).toBe(false);
   });
 });

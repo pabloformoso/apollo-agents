@@ -280,6 +280,11 @@
             repl.setCps(description.cps);
             log(`ready · cps ${description.cps.toFixed(5)} (${description.bpm} BPM)`, 'ok');
             return repl;
+          }).catch((err) => {
+            // A failed boot (a CDN blink while registering sources) must not be
+            // cached forever — reset so the next Play retries from scratch.
+            ready = null;
+            throw err;
           });
         }
         return ready;
@@ -287,6 +292,10 @@
 
       const play = async () => {
         const repl = await boot();
+        // A suspended AudioContext (backgrounded tab, sleeping device) plays
+        // total silence while looking alive; Play is a user gesture, so resume.
+        const ctx = getAudioContext();
+        if (ctx && ctx.state === 'suspended') await ctx.resume();
         repl.setCps(description.cps);
         pattern.play();
         log('playing', 'ok');

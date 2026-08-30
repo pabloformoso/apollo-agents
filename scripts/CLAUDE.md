@@ -85,6 +85,17 @@
     is fast only when it fails is not fast.
   - The number to beat is the JSON mind's: ~50% invalid, warm 8.6 s
     (gemma-4-e4b) / 12.5 s (qwen3.5-9b), measured 2026-08-28.
+  - **LM Studio's PARALLEL slots divide the context window** (llama.cpp
+    n_ctx per slot): parallel 4 × ctx 8192 = 2048/request, and the
+    registry-era prompt + a mutate + one retry exceeds that — the tell
+    is `400 Context size has been exceeded` bucketed as `mind_error`
+    (measured 2026-08-30: 8/10 → 10/10 after `lms load
+    google/gemma-4-e4b --context-length 8192 --parallel 1`). The
+    playground is single-caller (the page holds one request in flight),
+    so parallel 1 costs nothing. `lms load` flags are EPHEMERAL: after
+    the TTL unloads the model, the next JIT load uses the server's
+    per-model defaults — make parallel 1 the default in LM Studio's
+    model config on tunel or the ceiling quietly comes back.
 - `algorave-spike/palette.json` — the lane's ONE sound registry (plan
   §10): sample `sources`, drum/synth/instrument vocabularies, the
   bank→sounds matrix, per-genre entries. `validate.mjs` gates against it
@@ -140,6 +151,18 @@
   - `validate.mjs`'s token screen covers **comments**, so a comment
     saying "cannot import Python" rejects the whole buffer. Cost a 502
     on the seed file's own header, 2026-08-29.
+  - **Stability rules from the first real practice (2026-08-30),** all
+    three page-side: the /mind fetch aborts at 130 s (longer than the
+    server's own 120 s transport timeout, so a slow model is still the
+    server's 502 — the abort exists for the hung SOCKET, which
+    otherwise wedges `inFlight` and mutes the scheduler for the rest of
+    the session); a SCHEDULED proposal auto-applies only if the buffer
+    is byte-identical to what the mind was shown (`autoApplyDecision`
+    in pen.js — the human wins ties; hand-clicked Apply is never
+    gated); and every Play/evaluate resumes a suspended AudioContext
+    (a backgrounded tab plays total silence while looking alive) while
+    a failed `initStrudel` boot resets its cached promise so the next
+    Play retries instead of re-throwing forever.
   - **The pen** (§9.1, iteration 2) lives entirely in the page — no
     server change. `pen ∈ {mind, human}`, starts human; while the mind
     holds it a phrase scheduler POSTs every N bars (default 8) and
