@@ -86,15 +86,29 @@
   - The number to beat is the JSON mind's: ~50% invalid, warm 8.6 s
     (gemma-4-e4b) / 12.5 s (qwen3.5-9b), measured 2026-08-28.
 - `algorave-spike/palette.json` — the lane's ONE sound registry (plan
-  §10): sample `sources`, drum/synth vocabularies, the bank→sounds
-  matrix, per-genre entries. `validate.mjs` gates against it (`--genre`
-  narrows; a (sound, bank) pair its matrix lacks = silence live =
-  rejected), `strudel_mind.py` prompts from it, both spike pages fetch
-  it at boot (`serve.mjs` serves it at `/palette.json`; b-cdn fallback).
-  Add sounds/banks by editing it — self-hosting samples later is
-  editing `sources`. Consistency is CI-tested from pytest
+  §10): sample `sources`, drum/synth/instrument vocabularies, the
+  bank→sounds matrix, per-genre entries. `validate.mjs` gates against it
+  (`--genre` narrows; a (sound, bank) pair its matrix lacks = silence
+  live = rejected), `strudel_mind.py` prompts from it, both spike pages
+  fetch it at boot (`serve.mjs` serves it at `/palette.json`; b-cdn
+  fallback). Add sounds/banks by editing it — self-hosting samples later
+  is editing `sources`. Consistency is CI-tested from pytest
   (`test_registry_is_self_consistent`) because the spike's vitest does
-  not run in CI.
+  not run in CI. Gotchas:
+  - **Three sound categories, told apart ONLY by the `.bank()` rule.**
+    `drums` are bank-prefixed samples (they NEED the right bank),
+    `synths` are oscillators, `instruments` (2026-08-30) are
+    sample-backed but bankless — `piano.json` keys the sound name
+    directly, so `.bank()` on one plays silence. No pitched-vs-percussive
+    distinction is made or needed.
+  - **`sources[].base` is load-bearing, not decoration.** Every b-cdn
+    sample map carries its own `_base` pointing at `raw.githubusercontent
+    .com`; `samples(json, base)` resolves `base || map._base`, so
+    dropping `base` silently moves the samples off the CDN.
+  - `instruments` is REQUIRED at the top level and OPTIONAL per genre: a
+    genre entry without it inherits the registry-wide list (both
+    `paletteFor()` and `genre_palette()` read it per-field), which is
+    what keeps adding an instrument a pure-data move.
 - `algorave_playground.py` — the playground's mind button
   (docs/algorave-livecoding-plan.md §9 stage 1): a stdlib HTTP server on
   **4032** whose one endpoint, `POST /mind`, hands the editor's code +

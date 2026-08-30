@@ -370,11 +370,56 @@ describe('the palette registry (palette.json) — banks by data, silence gate', 
   });
 });
 
+describe('instruments — sample-backed sounds that take NO bank (§10)', () => {
+  // The third registry category: sampled like a drum, bankless like a synth.
+  // No pitched-vs-percussive distinction exists or is needed — the ONLY thing
+  // that separates an instrument from a drum is that its sample map is not
+  // bank-prefixed, so `.bank()` on one resolves to nothing.
+
+  it('an instrument plays through .s() on a note() pattern, under --genre', () => {
+    const verdict = runValidator('note("c4 e4 g4").s("piano")', ['--genre', 'deep', '--key', 'A:minor']);
+    expect(verdict.valid).toBe(true);
+    expect(verdict.error).toBeNull();
+    expect(verdict.stats.sounds).toEqual(['piano']);
+    expect(verdict.stats.events).toBeGreaterThan(0);
+
+    // And genre-less, against the registry-wide vocabulary.
+    const bare = runValidator('note("c4 e4 g4").s("piano")', []);
+    expect(bare.valid).toBe(true);
+  });
+
+  it('.bank() on an instrument is rejected with its own no-bank coaching', () => {
+    const verdict = runValidator('s("piano").bank("RolandTR909")', ['--genre', 'deep']);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toMatch(/palette violation/);
+    expect(verdict.error).toContain("instrument 'piano'");
+    expect(verdict.error).toMatch(/plays silence/);
+    // Coaching, not a bare no: the fix is dropping the bank, NOT hunting for a
+    // bank that carries it — so the message must not read like the (sound,
+    // bank) pair diagnosis, which names carrier banks instead.
+    expect(verdict.error).toMatch(/not bank-prefixed/);
+    expect(verdict.error).toContain('.s("piano")');
+    expect(verdict.error).not.toMatch(/is not in bank/);
+
+    // The same layer without the bank is simply valid.
+    expect(runValidator('s("piano")', ['--genre', 'deep']).valid).toBe(true);
+  });
+
+  it('a bank on a synth voice still gets the SYNTH message, not the instrument one', () => {
+    // The two rules share a rationale but not a fix, so they must stay two
+    // distinct messages — a regression here would coach the wrong repair.
+    const verdict = runValidator('note("a3 c4").s("triangle").bank("RolandTR909")', ['--genre', 'deep']);
+    expect(verdict.valid).toBe(false);
+    expect(verdict.error).toMatch(/synth voice 'triangle'/);
+    expect(verdict.error).not.toMatch(/instrument/);
+  });
+});
+
 describe('registry file + paletteFor (in-process, no subprocess)', () => {
   const registry = loadPaletteRegistry();
 
   it('loadPaletteRegistry returns the committed registry with every field', () => {
-    for (const field of ['sources', 'drums', 'synths', 'banks', 'genres']) {
+    for (const field of ['sources', 'drums', 'synths', 'instruments', 'banks', 'genres']) {
       expect(registry).toHaveProperty(field);
     }
     expect(registry.sources.length).toBeGreaterThan(0);
@@ -389,11 +434,18 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     // points at nothing degrades silently in prod, so the pointing is a test.
     const drums = new Set(registry.drums);
     const synths = new Set(registry.synths);
+    const instruments = new Set(registry.instruments);
     const bankNames = new Set(Object.keys(registry.banks));
     for (const [genre, entry] of Object.entries(registry.genres)) {
       for (const d of entry.drums) expect(drums.has(d), `${genre}: drum ${d}`).toBe(true);
       for (const s of entry.synths) expect(synths.has(s), `${genre}: synth ${s}`).toBe(true);
       for (const b of entry.banks) expect(bankNames.has(b), `${genre}: bank ${b}`).toBe(true);
+      // `instruments` is optional per genre (a genre written before the
+      // category inherits the registry-wide list) — but if it IS there, every
+      // name must resolve, same rule as the other three.
+      for (const i of entry.instruments ?? []) {
+        expect(instruments.has(i), `${genre}: instrument ${i}`).toBe(true);
+      }
     }
     // And every matrix role is lane vocabulary — a row can't smuggle a sound in.
     for (const [bank, roles] of Object.entries(registry.banks)) {
@@ -401,6 +453,29 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     }
     // The genre the playground page ships with must exist by this exact name.
     expect(registry.genres).toHaveProperty('deep');
+  });
+
+  it('instrument names collide with nothing — the categories stay tellable apart', () => {
+    // The three categories are one flat namespace to the validator (`sounds`),
+    // and they differ ONLY in the .bank() rule. A name in two of them would
+    // make the applicable rule depend on check order, which is exactly the
+    // kind of silent drift this file exists to prevent.
+    const drums = new Set(registry.drums);
+    const synths = new Set(registry.synths);
+    expect(registry.instruments.length).toBeGreaterThan(0);
+    const seen = new Set();
+    for (const name of registry.instruments) {
+      expect(typeof name, `instrument ${name}`).toBe('string');
+      expect(name.length).toBeGreaterThan(0);
+      expect(seen.has(name), `instrument ${name} listed twice`).toBe(false);
+      seen.add(name);
+      expect(drums.has(name), `${name} is also a drum`).toBe(false);
+      expect(synths.has(name), `${name} is also a synth`).toBe(false);
+    }
+    // A sampled instrument needs a source registered for it, or the page has
+    // the name and no audio. Structural only — asserting the map's KEYS would
+    // need the network, and this suite makes none.
+    expect(registry.sources.some((s) => s.tag === 'piano')).toBe(true);
   });
 
   it('paletteFor narrows to a known genre and falls back whole otherwise', () => {
@@ -418,6 +493,51 @@ describe('registry file + paletteFor (in-process, no subprocess)', () => {
     const none = paletteFor(registry, null);
     expect(none.genre).toBeNull();
     expect(none.sounds.has('bd')).toBe(true);
+  });
+
+  it('paletteFor exposes instruments and folds them into the allowed sounds', () => {
+    for (const genre of ['deep', 'gabber', null]) {
+      const pal = paletteFor(registry, genre);
+      expect(pal.instruments, `${genre}: instruments set`).toBeInstanceOf(Set);
+      for (const name of pal.instruments) {
+        expect(pal.sounds.has(name), `${genre}: ${name} allowed as a sound`).toBe(true);
+        // Bankless, and NOT a synth: the bank rules must not be confusable.
+        expect(pal.synths.has(name), `${genre}: ${name} is not a synth`).toBe(false);
+      }
+    }
+    expect(paletteFor(registry, 'deep').instruments.has('piano')).toBe(true);
+  });
+
+  it('a genre entry narrows instruments; one without the field inherits them', () => {
+    // Slice-proof, and independent of how many instruments the committed
+    // registry happens to have: a synthetic registry with a second instrument
+    // the genre entry does not list.
+    const widened = {
+      ...registry,
+      instruments: [...registry.instruments, 'testonly_instrument'],
+    };
+
+    const narrowed = paletteFor(widened, 'deep'); // deep lists piano only
+    expect(narrowed.instruments.has('piano')).toBe(true);
+    expect(narrowed.instruments.has('testonly_instrument')).toBe(false);
+    expect(narrowed.sounds.has('testonly_instrument')).toBe(false);
+
+    // An unknown genre narrows nothing — both are in scope.
+    const whole = paletteFor(widened, 'gabber');
+    expect(whole.instruments.has('testonly_instrument')).toBe(true);
+    expect(whole.sounds.has('testonly_instrument')).toBe(true);
+
+    // A genre entry with no `instruments` field inherits the registry-wide
+    // list rather than silently having none — that is what keeps adding an
+    // instrument a pure-data move for genres written before the category.
+    const { instruments: _dropped, ...deepWithout } = widened.genres.deep;
+    const inherited = paletteFor(
+      { ...widened, genres: { ...widened.genres, deep: deepWithout } },
+      'deep',
+    );
+    expect(inherited.genre).toBe('deep');
+    expect(inherited.instruments.has('testonly_instrument')).toBe(true);
+    expect(inherited.sounds.has('misc')).toBe(false); // still narrowed elsewhere
   });
 });
 

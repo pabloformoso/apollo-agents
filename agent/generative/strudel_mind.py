@@ -60,6 +60,12 @@ DEFAULT_KEY = "A:minor"
 # registered sample map is machine-prefixed (RolandTR909_bd), so a bank the
 # registry does not know — or a (sound, bank) pair its matrix lacks — resolves
 # to no sample and plays SILENCE live.
+#
+# Three sound categories, told apart only by the `.bank()` rule: `drums`
+# (bank-prefixed samples, they NEED the right bank), `synths` (oscillators, no
+# samples) and `instruments` (sample-backed but bankless — piano.json keys the
+# sound name directly, so a .bank() on one plays silence exactly like it does
+# on a synth voice).
 # ---------------------------------------------------------------------------
 PALETTE_FILE = SPIKE_DIR / "palette.json"
 
@@ -81,7 +87,7 @@ def _load_palette_registry() -> dict:
         ) from exc
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"palette registry {PALETTE_FILE} is not valid JSON: {exc}") from exc
-    for field in ("sources", "drums", "synths", "banks", "genres"):
+    for field in ("sources", "drums", "synths", "instruments", "banks", "genres"):
         if field not in registry:
             raise RuntimeError(f"palette registry {PALETTE_FILE} is missing {field!r}")
     return registry
@@ -90,8 +96,9 @@ def _load_palette_registry() -> dict:
 PALETTE_REGISTRY = _load_palette_registry()
 DRUM_SOUNDS = tuple(PALETTE_REGISTRY["drums"])
 SYNTH_SOUNDS = tuple(PALETTE_REGISTRY["synths"])
+INSTRUMENT_SOUNDS = tuple(PALETTE_REGISTRY["instruments"])
 # The flat registry-wide vocabulary — what a genre-less validator run accepts.
-PALETTE = DRUM_SOUNDS + SYNTH_SOUNDS
+PALETTE = DRUM_SOUNDS + SYNTH_SOUNDS + INSTRUMENT_SOUNDS
 
 
 def _normalize_genre(genre: str | None) -> str:
@@ -100,19 +107,27 @@ def _normalize_genre(genre: str | None) -> str:
 
 
 def genre_palette(genre: str | None) -> dict:
-    """`genre` -> {"drums": tuple, "synths": tuple, "banks": {name: roles}}.
+    """`genre` -> {"drums", "synths", "instruments": tuples, "banks": {name: roles}}.
 
     Mirrors validate.mjs's `paletteFor()`: a genre the registry knows narrows
     the vocabulary to its entry; an unknown one gets the registry-wide sets —
-    not fatal, the `genre_brief` precedent.
+    not fatal, the `genre_brief` precedent. `instruments` is read per-FIELD (a
+    genre entry that predates the category inherits the registry-wide list
+    rather than silently losing it), which is `paletteFor()`'s rule too.
     """
     entry = PALETTE_REGISTRY["genres"].get(_normalize_genre(genre))
     drums = entry["drums"] if entry else PALETTE_REGISTRY["drums"]
     synths = entry["synths"] if entry else PALETTE_REGISTRY["synths"]
+    instruments = (
+        entry["instruments"]
+        if entry and "instruments" in entry
+        else PALETTE_REGISTRY["instruments"]
+    )
     bank_names = entry["banks"] if entry else list(PALETTE_REGISTRY["banks"])
     return {
         "drums": tuple(drums),
         "synths": tuple(synths),
+        "instruments": tuple(instruments),
         "banks": {name: tuple(PALETTE_REGISTRY["banks"].get(name, ())) for name in bank_names},
     }
 
@@ -203,21 +218,30 @@ def palette_block(genre: str | None = "deep") -> str:
     Lists each allowed bank WITH the sounds its sample set actually has: a
     (sound, bank) pair the matrix lacks resolves to no sample and plays
     silence live — so the prompt teaches the pairing and the validator gates
-    it (the same registry on both ends, by construction).
+    it (the same registry on both ends, by construction). Instruments get
+    their own line for the same reason: they are sampled, so the model would
+    reasonably reach for `.bank()`, and that pair is silence too.
     """
     pal = genre_palette(genre)
     lines = [
         "PALETTE — the only sound names that exist:",
         f"  drums (via s()):   {', '.join(pal['drums'])}",
         f"  synth voices (via .s() on a note()/n() pattern): {', '.join(pal['synths'])}",
+    ]
+    if pal["instruments"]:
+        lines.append(
+            "  instruments (sampled, via .s() on note()/n(), never with .bank()): "
+            + ", ".join(pal["instruments"])
+        )
+    lines += [
         "`.bank(...)` picks the drum machine. The banks for this set, each with the",
         "sounds it actually has — a pair outside this table plays SILENCE, so never",
         "pair a sound with a bank that lacks it:",
     ]
     lines += [f"  {name}: {', '.join(roles)}" for name, roles in pal["banks"].items()]
     lines.append(
-        "Never put .bank() on a synth voice. Any sound or bank not listed above is "
-        "rejected — do not invent names."
+        "Never put .bank() on a synth voice or an instrument. Any sound or bank not "
+        "listed above is rejected — do not invent names."
     )
     return "\n".join(lines)
 
@@ -237,6 +261,8 @@ GENRE_BRIEFS: dict[str, str] = {
   .lpf(700-1200), low .gain and .room high — a bed under the groove, not a part.
 - Leads: one octave up on .s("pulse"), .s("square") or .s("supersaw"), monophonic
   through .scale(), .vib(4-6) for character and .delay for space — sparse, never a wall.
+- Piano house: short offbeat piano stabs, .s("piano"), pluck envelope and a touch of
+  .room — classic house; never a bank on it, and never a running line.
 - Color, sparingly: a quiet 16th shaker (sh — TR727/TR808) makes the groove breathe;
   at a peak the ride (rd — 909/LinnDrum) can replace the offbeat oh; toms (ht/mt/lt)
   are a one-bar fill into a phrase change, never a running pattern; cb/tb/perc are

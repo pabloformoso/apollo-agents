@@ -132,6 +132,12 @@ was found by reading the installed packages, not the docs.
    `agent/generative/strudel_mind.py` prompts from, and both pages fetch at
    boot (with the b-cdn source as fallback). Add sounds/banks there, never in
    code — and self-hosting samples later is editing `sources`, nothing else.
+   Sounds come in three categories, told apart ONLY by the `.bank()` rule:
+   `drums` (bank-prefixed samples — they need the right bank), `synths`
+   (oscillators, no samples) and `instruments` (sample-backed but bankless,
+   e.g. `piano` from `piano.json`, whose map keys the sound name directly, so
+   a `.bank()` on one resolves to nothing and plays silence). The pages need
+   no change to gain an instrument: they register every entry of `sources`.
 
 4. **`maxPolyphony` is a hard global cap in an offline render, and its default of
    128 silently guts anything longer than a few bars.** `renderPatternAudio`
@@ -160,6 +166,26 @@ was found by reading the installed packages, not the docs.
    pattern differ in the tail. Measured spread over repeated runs: RMS and peak
    within ±0.3 %. Structure and level are reproducible; a checksum is not, so do
    not build a golden-file test on this.
+
+8. **Vite does not strip a `#!` shebang; Node does.** `validate.mjs` keeps one
+   (it is `chmod +x`), so `import ... from '../validate.mjs'` made vitest fail
+   the ENTIRE `test/validate.test.mjs` suite with `SyntaxError: Invalid or
+   unexpected token` pointed at the import line — a diagnosis that names
+   neither the shebang nor the file carrying it, and which reads exactly like a
+   broken test file. `node --check validate.mjs` passes throughout, which is
+   the tell: the parser that objects is Vite's, not Node's. Fixed with a
+   four-line `enforce: 'pre'` transform plugin in `vitest.config.mjs` that
+   rewrites the `#!` into a `//` (same byte count, so no source map). Found
+   2026-08-30; before it, `npx vitest run` reported 88 passing tests and one
+   "failed suite", which is easy to read as a pre-existing local quirk.
+
+9. **A sample map's own `_base` points at GitHub, not the CDN that serves the
+   map.** Both `tidal-drum-machines.json` and `piano.json` on
+   `strudel.b-cdn.net` carry a `_base` into `raw.githubusercontent.com`.
+   `samples(json, base)` resolves the base as `base || map._base`, so the
+   explicit second argument WINS — which is the whole reason `palette.json`'s
+   `sources[].base` exists and must be set: omit it and the page silently pulls
+   every sample from GitHub raw instead of the CDN.
 
 ## The music (spec §4)
 

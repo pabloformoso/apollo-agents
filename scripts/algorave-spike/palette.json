@@ -1,10 +1,15 @@
 {
-  "_doc": "The algorave lane's ONE sound registry (docs/algorave-livecoding-plan.md par.10: pack = data, not code). Read by validate.mjs (the gate: sound must be listed, and a .bank() must both exist here and carry that sound - a pair this matrix lacks plays SILENCE live), by agent/generative/strudel_mind.py (the palette and bank matrix in the prompt, per genre), and by the spike pages (sample registration from `sources`). Add sounds/banks HERE, never in code. To self-host samples, point `sources` at your own mirror - no code change. `banks` rows are extracted from the registered tidal-drum-machines.json (verified 2026-08-29).",
+  "_doc": "The algorave lane's ONE sound registry (docs/algorave-livecoding-plan.md par.10: pack = data, not code). Read by validate.mjs (the gate: sound must be listed, and a .bank() must both exist here and carry that sound - a pair this matrix lacks plays SILENCE live), by agent/generative/strudel_mind.py (the palette and bank matrix in the prompt, per genre), and by the spike pages (sample registration from `sources`). Add sounds/banks HERE, never in code. To self-host samples, point `sources` at your own mirror - no code change. `banks` rows are extracted from the registered tidal-drum-machines.json (verified 2026-08-29). Three sound categories: `drums` (sample-backed, bank-prefixed - they REQUIRE the right .bank()), `synths` (oscillators, no samples at all) and `instruments` (sample-backed but NOT bank-prefixed: their map keys the sound name directly, so a .bank() on one resolves to nothing and plays silence). All three are equally 'a sound name that exists'; only the .bank() rule differs.",
   "sources": [
     {
       "json": "https://strudel.b-cdn.net/tidal-drum-machines.json",
       "base": "https://strudel.b-cdn.net/tidal-drum-machines/machines/",
       "tag": "drum-machines"
+    },
+    {
+      "json": "https://strudel.b-cdn.net/piano.json",
+      "base": "https://strudel.b-cdn.net/piano/",
+      "tag": "piano"
     }
   ],
   "drums": [
@@ -33,6 +38,9 @@
     "sine",
     "supersaw",
     "pulse"
+  ],
+  "instruments": [
+    "piano"
   ],
   "banks": {
     "RolandTR909": [
@@ -141,6 +149,9 @@
         "sine",
         "supersaw",
         "pulse"
+      ],
+      "instruments": [
+        "piano"
       ],
       "banks": [
         "RolandTR909",

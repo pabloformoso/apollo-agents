@@ -65,6 +65,14 @@ export const DEFAULT_CYCLES = 4;
 // map is machine-prefixed (`RolandTR909_bd`), so a bank the registry does not
 // know — or a (sound, bank) pair its matrix lacks — resolves to no sample and
 // plays SILENCE live, which is exactly the failure this gate exists to catch.
+//
+// The registry has THREE sound categories, and only the `.bank()` rule tells
+// them apart: `drums` are bank-prefixed samples (they need the right bank),
+// `synths` are oscillators (no samples at all), and `instruments` are
+// sample-backed sounds whose map is NOT bank-prefixed — `piano.json` keys the
+// sound name directly, so `.bank()` on one resolves to nothing exactly the way
+// it does on a synth voice. No pitched-vs-percussive distinction is made or
+// needed: an instrument is simply a bankless sound.
 
 // Word-boundary match, not an AST walk — deliberately blunt (see §8.1: "hygiene
 // against a confused model, not a security boundary against attackers"). This
@@ -146,7 +154,7 @@ export function parseArgs(argv) {
 export function loadPaletteRegistry() {
   const file = fileURLToPath(new URL('./palette.json', import.meta.url));
   const registry = JSON.parse(readFileSync(file, 'utf8'));
-  for (const field of ['sources', 'drums', 'synths', 'banks', 'genres']) {
+  for (const field of ['sources', 'drums', 'synths', 'instruments', 'banks', 'genres']) {
     if (!(field in registry)) {
       throw new Error(`palette.json is missing the "${field}" field`);
     }
@@ -157,18 +165,23 @@ export function loadPaletteRegistry() {
 /** The enforcement sets for one run: the genre's entry when the registry has
  * it, the registry-wide vocabulary otherwise (an unknown genre narrows
  * nothing — same degrade rule as a malformed --key). `genre` in the result is
- * the entry actually used, or null when it fell back. */
+ * the entry actually used, or null when it fell back.
+ *
+ * `instruments` is read per-FIELD rather than per-entry: a genre entry that
+ * does not mention instruments inherits the registry-wide list instead of
+ * silently having none. That keeps adding an instrument to the registry a
+ * pure-data move even for genres written before the category existed. */
 export function paletteFor(registry, genre) {
-  const entry =
-    genre && registry.genres && Object.prototype.hasOwnProperty.call(registry.genres, genre)
-      ? registry.genres[genre]
-      : null;
+  const has = (obj, key) => obj != null && Object.prototype.hasOwnProperty.call(obj, key);
+  const entry = genre && has(registry.genres, genre) ? registry.genres[genre] : null;
   const drums = entry ? entry.drums : registry.drums;
   const synths = entry ? entry.synths : registry.synths;
+  const instruments = has(entry, 'instruments') ? entry.instruments : registry.instruments;
   const bankNames = entry ? entry.banks : Object.keys(registry.banks);
   return {
-    sounds: new Set([...drums, ...synths]),
+    sounds: new Set([...drums, ...synths, ...instruments]),
     synths: new Set(synths),
+    instruments: new Set(instruments),
     banks: new Map(bankNames.map((name) => [name, new Set(registry.banks[name] ?? [])])),
     genre: entry ? genre : null,
   };
@@ -247,7 +260,8 @@ const roundPhase = (x) => Math.round(x * 1e6) / 1e6;
  * palette — including events with no sound at all, which cannot reach
  * superdough either) and `bankViolations` (a `.bank()` the registry does not
  * know, a (sound, bank) pair the bank's matrix row lacks, or a bank on a
- * synth voice — each of which resolves to no sample and plays silence).
+ * synth voice or an instrument — each of which resolves to no sample and
+ * plays silence).
  * Callers decide what non-empty lists mean for `valid`; this function only
  * observes. `palette` is a `paletteFor()` result. Does not import or know
  * about @strudel — `pattern` just needs a `queryArc(from, to)` returning hits
@@ -278,6 +292,15 @@ export function computeStats(pattern, cycles, keyPcs, palette) {
       if (palette.synths.has(soundName)) {
         bankViolations.add(
           `.bank("${bank}") on synth voice '${soundName}' plays silence — synth layers take no bank`,
+        );
+      } else if (palette.instruments.has(soundName)) {
+        // Same rationale as the synth case, different reason: an instrument
+        // IS sample-backed, but its map is not bank-prefixed, so the pair
+        // resolves to no sample at all. The fix is to drop the bank, not to
+        // find a bank that carries it — hence its own message.
+        bankViolations.add(
+          `.bank("${bank}") on instrument '${soundName}' plays silence — a sampled ` +
+            `instrument's map is not bank-prefixed; play it bare: .s("${soundName}")`,
         );
       } else if (!palette.banks.has(bank)) {
         bankViolations.add(
