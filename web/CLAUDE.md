@@ -298,6 +298,21 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   start time before trusting a measurement. Related: never combine the kill and
   the relaunch in one shell command — the pattern then matches the command's
   own argv and it kills itself.
+- **A non-secure origin has no AudioWorklet at all**, and this is the one that
+  will keep biting. `AudioContext.audioWorklet` is `undefined` outside a secure
+  context, so superdough's registration dies with `Cannot read properties of
+  undefined (reading 'addModule')` and every worklet-backed sound — supersaw,
+  the effects chain — throws once per event. **Samples still load and play**,
+  which is exactly what makes it read as a Strudel bug instead of a URL
+  problem. Measured 2026-08-31: `127.0.0.1:4011` → `isSecureContext: true`,
+  AudioWorklet defined; `100.68.5.104:4011` → `false`, undefined.
+  Secure contexts are HTTPS plus the `localhost`/`127.0.0.1` exception, so it
+  works on the box and fails over the tailnet by IP. `boot()` returns
+  `secureContext` and the page must say so rather than swallow it.
+  **This applies to the `:4031` playground too** — served by IP over plain
+  HTTP, its supersaw and pads (#145) have never been able to sound over the
+  tailnet. Tailscale HTTPS certs are not enabled on this tailnet
+  (`CertDomains: None`), so `tailscale serve` cannot fix it until they are.
 - **Watch for a startup race.** One run in four logged the AudioWorklet error
   even with everything served correctly, suggesting `evaluate` can beat the
   worklet registration; three consecutive clean runs followed. Not diagnosed.

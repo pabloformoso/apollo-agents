@@ -11,12 +11,21 @@
  *    exists, `addModule()` 404s, and then EVERY AudioWorkletNode construction
  *    throws "AudioWorklet does not have a valid AudioWorkletGlobalScope" —
  *    once per event, forever, while superdough still logs "[superdough] ready".
- *    So it is staged into `public/vendor/strudel/` (scripts/vendor-strudel.mjs,
- *    run from predev/prebuild) and loaded by URL, which is the same topology
- *    `scripts/algorave-spike/serve.mjs` serves and the playground has always
- *    relied on.
+ *    So it is served from node_modules by `app/vendor/strudel/[...path]` and
+ *    loaded by URL — the same topology `scripts/algorave-spike/serve.mjs`
+ *    serves and the playground has always relied on.
  *
- * 2. **Sample sources must be registered before anything plays.** `initStrudel`
+ * 2. **A non-secure origin has no AudioWorklet at all.** `AudioContext.
+ *    audioWorklet` is `undefined` outside a secure context, so superdough's
+ *    worklet registration dies with `Cannot read properties of undefined
+ *    (reading 'addModule')` and every worklet-backed sound (supersaw, the
+ *    effects chain) throws once per event. Samples still load and play, which
+ *    is what makes this look like a Strudel bug rather than a URL problem.
+ *    Secure contexts are HTTPS and the `localhost`/`127.0.0.1` exception — so
+ *    it works on the box and fails over the tailnet by IP. `boot()` reports
+ *    it; it does not pretend to fix it.
+ *
+ * 3. **Sample sources must be registered before anything plays.** `initStrudel`
  *    boots the engine but registers no sounds; `.bank("RolandTR909")` then
  *    resolves to nothing and every event logs `sound RolandTR909_bd not found!`
  *    while the transport happily runs. The playground registers the palette's
@@ -82,6 +91,13 @@ export function loadStrudel(): Promise<StrudelModule> {
 
 export interface BootResult {
   strudel: StrudelModule;
+  /**
+   * False when the page is not a secure context. Worklet-backed sounds
+   * (supersaw, effects) CANNOT work here — the browser does not expose
+   * AudioWorklet at all. Samples still play, so the failure is partial and
+   * easy to misread. Surface this to the user; do not swallow it.
+   */
+  secureContext: boolean;
   /** Tags of the sources that registered successfully. */
   registered: string[];
   /** Sources that failed, with the reason. Boot succeeds anyway. */
@@ -98,6 +114,9 @@ export interface BootResult {
 export async function boot(
   sources: SampleSource[] = FALLBACK_SOURCES,
 ): Promise<BootResult> {
+  const secureContext =
+    typeof window === "undefined" ? true : window.isSecureContext;
+
   const strudel = await loadStrudel();
   await strudel.initStrudel();
 
@@ -115,5 +134,5 @@ export async function boot(
     }),
   );
 
-  return { strudel, registered, failed };
+  return { strudel, secureContext, registered, failed };
 }
