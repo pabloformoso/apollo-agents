@@ -45,6 +45,7 @@ import {
   motion,
 } from "@/components/ember/motion";
 import { Banner, toast } from "@/components/ember/feedback";
+import { useViewerFlag } from "@/lib/viewer";
 import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 
 
@@ -87,29 +88,15 @@ function LivePageInner() {
   // overlay would keep covering the screen during the cold-start
   // window between WS open and the first track_started event.
   const [hasGestured, setHasGestured] = useState(false);
-  // v2.7.2 — viewer mode. When ``?viewer=1`` is in the URL, the page
-  // attaches to the session's engine event bus via the read-only
-  // ``/api/sessions/{id}/live/viewer`` WS. The UI stays identical to
-  // the operator's view (mode switcher, chat panel, banners, YT pill)
-  // so an OBS Browser Source captures the full ``/live`` look. The
-  // outbound rails (chat send, skip, endless toggle, quit) silently
-  // no-op in the underlying hook. We only hide two buttons here:
-  // ``Quit`` (viewers can't end the session) and the OBS feed copy
-  // (would just produce a self-referential URL).
-  // v3.6.2 — three-state: ``null`` = not yet resolved (first render,
-  // before the mount effect reads the URL). The WS hook must NOT
-  // connect until this is known: a ``?viewer=1`` page whose first
-  // connect races the flag lands on the PRIMARY ``/live/stream``
-  // endpoint, displaces the operator tab, and its own teardown then
-  // stops the engine (``finally`` → ``engine.stop()``) — an OBS
-  // Browser Source that silently kills the session it's mirroring.
-  const [viewerFlag, setViewerFlag] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    setViewerFlag(params.get("viewer") === "1");
-  }, []);
-  const isViewer = viewerFlag === true;
+  // v2.7.2 — viewer mode. `?viewer=1` attaches to the read-only
+  // `/api/sessions/{id}/live/viewer` WS; the UI stays identical to the
+  // operator's so an OBS Browser Source captures the full `/live` look. The
+  // outbound rails no-op in the hook; only Quit and the OBS-copy button are
+  // hidden here.
+  //
+  // The three-state flag and WHY it must be three-state (v3.6.2) now live in
+  // `lib/viewer.ts`, shared with `/algorave` — §11.3 seam 3.
+  const { flag: viewerFlag, isViewer } = useViewerFlag();
 
   // Mode + hash sync live in the shared hook (§11.3 seam 3).
 
