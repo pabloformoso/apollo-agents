@@ -1,5 +1,15 @@
 import type { NextConfig } from "next";
 
+// §11 S3 — Strudel is NOT bundled. See web/CLAUDE.md.
+//
+// It is copied to public/vendor/strudel/ by scripts/vendor-strudel.mjs and
+// loaded at runtime by URL, because its AudioWorklet asset is resolved with
+// `new URL("assets/...", import.meta.url)` and therefore has to sit next to
+// the module on the server. Bundling it breaks audio silently.
+//
+// An eslint no-restricted-imports rule stops a static `@strudel/*` import
+// from quietly reintroducing a bundled second copy.
+
 const nextConfig: NextConfig = {
   // E2E runs set NEXT_DIST_DIR=.next-e2e so the mock-mode dev server's lockfile
   // lives in a separate build dir and does not collide with the engineer's

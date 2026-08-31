@@ -265,6 +265,64 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   whenever the endless queue is dry) and the second is gated by LLM
   latency, so both drift by a minute or more.
 
+## Strudel in the app (§11 S3)
+
+- **Strudel is NOT bundled, and that is load-bearing.** Its dist resolves its
+  own AudioWorklet asset with
+  `new URL("assets/clockworker-<hash>.js", import.meta.url)` — relative to the
+  MODULE's URL — so the bundle and its `assets/` folder have to be neighbours
+  on the server. Bundled, `import.meta.url` becomes a hashed chunk path, the
+  asset 404s, and every AudioWorkletNode construction then throws
+  *"AudioWorklet does not have a valid AudioWorkletGlobalScope"* — once per
+  event, forever, while superdough cheerfully logs `[superdough] ready`.
+  `app/vendor/strudel/[...path]/route.ts` serves the dist from node_modules
+  under a stable prefix (the same mapping `serve.mjs` does), and
+  `lib/strudel.ts` loads it from that URL through a `new Function` import no
+  bundler can see. An eslint `no-restricted-imports` rule makes a static
+  `@strudel/*` import an error, so a bundled second copy cannot creep back.
+- **An alias is NOT enough, and looked like it was.** The first attempt used a
+  Turbopack `resolveAlias` to force one `Pattern` class. The identity assertion
+  went green in a real browser against a production build — and the page was
+  silent. Structural checks pass while audio fails; **the only honest check is
+  playing something and reading the console.**
+- **Sample sources must be registered before anything plays.** `initStrudel`
+  boots the engine but registers no sounds, so `.bank("RolandTR909")` resolves
+  to nothing and every event logs `sound RolandTR909_bd not found!` while the
+  transport runs happily. `lib/strudel.ts`'s `boot()` registers sources first,
+  the way the playground does; a source that fails is reported, not thrown.
+- **`pkill -f "next start"` does not kill a Next server.** It renames itself to
+  `next-server (v16.2.4)`, so the pattern never matches, the port stays taken,
+  every "restart" silently fails to bind, and you keep measuring a build from
+  an hour ago. This cost a wrong conclusion (that `next start` does not serve
+  `public/` — it does). Kill by port or by `next-server`, and check the PID's
+  start time before trusting a measurement. Related: never combine the kill and
+  the relaunch in one shell command — the pattern then matches the command's
+  own argv and it kills itself.
+- **A non-secure origin has no AudioWorklet at all**, and this is the one that
+  will keep biting. `AudioContext.audioWorklet` is `undefined` outside a secure
+  context, so superdough's registration dies with `Cannot read properties of
+  undefined (reading 'addModule')` and every worklet-backed sound — supersaw,
+  the effects chain — throws once per event. **Samples still load and play**,
+  which is exactly what makes it read as a Strudel bug instead of a URL
+  problem. Measured 2026-08-31: `127.0.0.1:4011` → `isSecureContext: true`,
+  AudioWorklet defined; `100.68.5.104:4011` → `false`, undefined.
+  Secure contexts are HTTPS plus the `localhost`/`127.0.0.1` exception, so it
+  works on the box and fails over the tailnet by IP. `boot()` returns
+  `secureContext` and the page must say so rather than swallow it.
+  **This applies to the `:4031` playground too** — served by IP over plain
+  HTTP, its supersaw and pads (#145) have never been able to sound over the
+  tailnet. Tailscale HTTPS certs are not enabled on this tailnet
+  (`CertDomains: None`), so `tailscale serve` cannot fix it until they are.
+- **`initStrudel` does not await the worklets — `initAudio` does.** It only
+  arms `initAudioOnFirstClick`, so evaluating straight afterwards races the
+  registration and every event in the meantime logs "AudioWorkletNode cannot be
+  created". Intermittent by nature (it depends on whether evaluate beats
+  addModule), which is exactly why it first read as a flake. `boot()` awaits
+  `initAudio()` and reports `workletError`. This is a DIFFERENT failure from
+  the non-secure-origin one above and they must not be conflated: one is a
+  race that a secure context still suffers, the other is the browser
+  withholding the API entirely.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
