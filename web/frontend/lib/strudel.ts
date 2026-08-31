@@ -39,6 +39,13 @@ export interface StrudelModule {
   /** The pattern class. Used for identity checks; never constructed here. */
   Pattern: unknown;
   initStrudel: (options?: Record<string, unknown>) => Promise<void>;
+  /**
+   * Boots the audio graph and, crucially, `await`s the AudioWorklet
+   * registration. `initStrudel` only arms this behind a first-click handler
+   * and does not await it, so evaluating straight after `initStrudel` races
+   * the worklet and every event in the meantime throws.
+   */
+  initAudio: () => Promise<void>;
   evaluate: (code: string) => Promise<unknown>;
   hush: () => void;
   /** Registers a sample map. `base` is prepended to every path inside it. */
@@ -102,6 +109,8 @@ export interface BootResult {
   registered: string[];
   /** Sources that failed, with the reason. Boot succeeds anyway. */
   failed: { tag: string; error: string }[];
+  /** Why the AudioWorklet registration failed, or null when it succeeded. */
+  workletError: string | null;
 }
 
 /**
@@ -120,6 +129,22 @@ export async function boot(
   const strudel = await loadStrudel();
   await strudel.initStrudel();
 
+  // Wait for the worklets. `initStrudel` returns before they are registered —
+  // it only arms `initAudioOnFirstClick` — so without this the first bars
+  // race the registration and log
+  //   "AudioWorkletNode cannot be created: AudioWorklet does not have a
+  //    valid AudioWorkletGlobalScope"
+  // once per event. Intermittent by nature: it depends on whether evaluate
+  // beats addModule, which is why it looked like a flake (one run in four).
+  // A non-secure context fails here for a different reason and is reported
+  // separately — do not let that failure mask this await.
+  let worklets: string | null = null;
+  try {
+    await strudel.initAudio();
+  } catch (err) {
+    worklets = String(err);
+  }
+
   const registered: string[] = [];
   const failed: { tag: string; error: string }[] = [];
   await Promise.all(
@@ -134,5 +159,5 @@ export async function boot(
     }),
   );
 
-  return { strudel, secureContext, registered, failed };
+  return { strudel, secureContext, registered, failed, workletError: worklets };
 }

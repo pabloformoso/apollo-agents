@@ -313,11 +313,15 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   HTTP, its supersaw and pads (#145) have never been able to sound over the
   tailnet. Tailscale HTTPS certs are not enabled on this tailnet
   (`CertDomains: None`), so `tailscale serve` cannot fix it until they are.
-- **Watch for a startup race.** One run in four logged the AudioWorklet error
-  even with everything served correctly, suggesting `evaluate` can beat the
-  worklet registration; three consecutive clean runs followed. Not diagnosed.
-  If it resurfaces in S4, awaiting worklet readiness before the first evaluate
-  is the place to look.
+- **`initStrudel` does not await the worklets — `initAudio` does.** It only
+  arms `initAudioOnFirstClick`, so evaluating straight afterwards races the
+  registration and every event in the meantime logs "AudioWorkletNode cannot be
+  created". Intermittent by nature (it depends on whether evaluate beats
+  addModule), which is exactly why it first read as a flake. `boot()` awaits
+  `initAudio()` and reports `workletError`. This is a DIFFERENT failure from
+  the non-secure-origin one above and they must not be conflated: one is a
+  race that a secure context still suffers, the other is the browser
+  withholding the API entirely.
 
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
