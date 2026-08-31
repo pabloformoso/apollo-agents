@@ -138,6 +138,9 @@ export default function AlgoravePage() {
 
   // --- the palette (S7) -----------------------------------------------------
   const [palette, setPalette] = useState<Palette | null>(null);
+  // Read by `evaluate`, which runs from a gesture and must see the palette as
+  // it stands rather than as it was when the callback was created.
+  const paletteRef = useRef<Palette | null>(null);
   const [paletteError, setPaletteError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -146,7 +149,11 @@ export default function AlgoravePage() {
         const body = await r.json();
         if (cancelled) return;
         if (!r.ok) setPaletteError(body?.error ?? `HTTP ${r.status}`);
-        else setPalette(readPalette(body));
+        else {
+          const parsed = readPalette(body);
+          paletteRef.current = parsed;
+          setPalette(parsed);
+        }
       })
       .catch((e) => {
         if (!cancelled) setPaletteError(String(e));
@@ -195,7 +202,15 @@ export default function AlgoravePage() {
         if (!engine.current) {
           setPhase("booting");
           setDetail("loading the engine and registering sounds…");
-          const { strudel, secureContext, failed, workletError } = await boot();
+          // Register the registry's OWN sources, not just the built-in
+          // fallback: with drum-machines alone, every sampled instrument (the
+          // piano and the nine VCSL sounds of #146/#147) resolves to nothing
+          // and plays silence without an error. The palette fetch lands on
+          // mount, long before a human can press Play; the fallback is only
+          // for the case where the registry could not be read at all.
+          const { strudel, secureContext, failed, workletError } = await boot(
+            paletteRef.current?.sources?.length ? paletteRef.current.sources : undefined,
+          );
           engine.current = strudel;
           setInsecure(!secureContext);
           if (workletError) setDetail(`AudioWorklet did not register: ${workletError}`);

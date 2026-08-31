@@ -444,6 +444,29 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   decision, not a frontend one. The browser already renders it permanently
   disabled with "<bank> does not carry fx".
 
+## Two silent bugs the palette browser hid (2026-08-31)
+
+Both shipped green and neither raised anything. Worth knowing the shapes.
+
+- **Only `drum-machines` was registered.** `boot()` defaulted to
+  `FALLBACK_SOURCES`, so `piano.json` and `vcsl.json` were never fetched and
+  every sampled instrument — the piano and the nine VCSL sounds of #146/#147 —
+  resolved to nothing. No error, no sample fetch, no sound: the browser offered
+  them and they did not play. The page now boots with the registry's OWN
+  `sources`; the fallback is only for a registry that could not be read.
+- **`insertIntoBuffer` used `lastIndexOf(")")`.** The opening buffer ends
+  `).cpm(124/4)`, so that paren closes `cpm`, and every insertion became
+  `cpm(124/4, note(...).s("piano"))` — **valid JavaScript, no layer, no sound**.
+  `stackCloseIndex` counts depth from `stack(` and is string-aware, so a `)`
+  inside `"bd(3,8)"` closes nothing.
+
+**The lesson is about the test, not the code.** The acceptance criterion was
+"the inserted buffer parses", and it passed for a year of runs while the
+insertion was wrong — a criterion a broken implementation can satisfy is not a
+criterion. It now asserts the line became a top-level LAYER of the stack
+(`stackLayers`). Same shape as S3's "one `Pattern` class" going green on a
+silent page: **structural checks pass while the music is wrong.**
+
 ## The OBS view (§11 S8)
 
 - **`afterFiles` rewrites beat DYNAMIC routes, not static ones.** `next.config`
