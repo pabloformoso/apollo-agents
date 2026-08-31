@@ -115,3 +115,37 @@ jobs:
           name: playwright-report
           path: web/frontend/playwright-report/
           retention-days: 14
+
+  algorave:
+    name: Algorave spike (Node 22)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22, not 20: the spike needs `registerHooks`, which Node 18 does
+      # not have and which is why jarvis runs 22 via nvm. Kept separate from
+      # the Frontend job for that reason alone.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: scripts/algorave-spike/package-lock.json
+
+      - name: Install
+        working-directory: scripts/algorave-spike
+        run: npm ci
+
+      # This suite carries the validator, the pen, B2B and the palette rules —
+      # the vocabulary §11 S5-S7 move into the app. Until now none of it ran in
+      # CI, which is how #147 came to find 28 validator tests that a fresh
+      # install had silently stopped executing.
+      #
+      # Expected: 5 files / 129 tests passing, plus test/wav.test.mjs skipping
+      # itself in full — it is `describe.skipIf(!present)` over a rendered WAV
+      # that CI has no reason to produce. A DROP in the passing count is the
+      # thing to look at; that skip is not.
+      - name: Test
+        working-directory: scripts/algorave-spike
+        run: npx vitest run
