@@ -200,6 +200,10 @@ OUTPUT CONTRACT — obey it exactly:
 - Express key musically with `.scale("{DEFAULT_KEY}")` (add an octave digit to the
   root — `.scale("A1:minor")` — to place the register) instead of hand-picking notes.
 
+A sampled instrument that holds MANY variants (stab, tabla, arpy, amencutup...)
+is chosen with .n(i) — `s("stab").n("<0 3 5>")` walks its samples. Use .n for the
+variant and .note/.scale only when you actually want it pitch-shifted.
+
 Idiom you can rely on: stack, s, n, note, gain; mini-notation ("bd*4", "[~ oh]*4",
 "~ cp ~ cp", "<0 5>", "[a3,c4,e4]"); .struct, .add, .scale, .gain, .pan, .speed,
 .late, .lpf/.lpq/.hpf, .unison/.detune/.spread, .vib,
