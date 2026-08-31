@@ -350,6 +350,40 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 - The buffer is a plain `<textarea>` on purpose: no editor library gets to own
   Ctrl/Cmd+Enter before S5 decides what the pen needs.
 
+## The mind, from the app (§11 S5)
+
+- **The browser never calls the mind directly, and it cannot.** The page must
+  be a secure context or Strudel gets no AudioWorklet (S3), and an HTTPS page
+  cannot `fetch` the plain-HTTP mind on :4032 — mixed content, blocked
+  outright. `app/api/algorave/mind/route.ts` proxies it server-side, where no
+  such rule applies.
+- **That deletes the CORS problem rather than managing it.**
+  `algorave_playground.py` compares origins byte-exact (`SPIKE_ORIGINS` plus
+  `--allow-origin`), so every new surface used to mean another flag on a
+  process someone must remember to restart — §11.5 risk 2. No browser origin
+  reaches the mind now, so there is nothing to keep in sync. **The plan's task
+  to widen `--allow-origin` is obsolete, not skipped.**
+- **Seam 1 is checkable, so check it**: `grep -rn ':4032\|/api/algorave/mind'`
+  over the frontend must hit exactly two files — the route handler (which knows
+  the upstream address) and `lib/mind.ts` (which knows the browser endpoint).
+  The page names neither. `ALGORAVE_MIND_URL` overrides the upstream; the
+  default is the tailnet IP because the mind binds to that interface, not
+  loopback (#144's HOST bind).
+- **The mind's statuses mean different things and must not be flattened**: 400
+  the page sent something malformed, 502 it could not produce valid Strudel
+  (ask again), 503 the validator is not installed (`npm install`, not a retry),
+  504 no answer in time. `MindError.worthRetrying` is that distinction, and the
+  UI wording follows it.
+- **The tie rule (#148) lives in `autoApplyDecision`** — pure, exported, and
+  tested including the whitespace case. A proposal may only be applied WITHOUT
+  ASKING when the buffer is byte-identical to what the mind was shown; if the
+  human typed meanwhile their edit stands and the proposal drops to a manual
+  diff. S5 computes and shows it; S6 hands it to the scheduler. The manual
+  Apply button is never gated by it.
+- The ~20 s wait is a designed state, not a spinner: it names the intent it is
+  answering and counts. Measured 5.6 s on a warm e4b with a short buffer, so
+  treat 20 s as the p50 to pace for, not a constant.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
