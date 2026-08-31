@@ -45,20 +45,14 @@ import {
   motion,
 } from "@/components/ember/motion";
 import { Banner, toast } from "@/components/ember/feedback";
+import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 
-type Mode = "audience" | "cabin" | "immersive";
 
 // v3.7.1 — how many dj_chat entries the feeds render (the fixed
 // overlay the OBS Browser Source captures, and the booth panel). Was 4;
 // bumped to 10 so audience conversations stay on screen long enough to
 // read on stream.
 const CHAT_FEED_VISIBLE = 10;
-
-const MODES: ReadonlyArray<[Mode, string]> = [
-  ["audience", "Audience"],
-  ["cabin", "Booth"],
-  ["immersive", "Immersive"],
-];
 
 const INTENT_BUTTONS: ReadonlyArray<[LiveCommand["type"], string]> = [
   ["skip", "skip"],
@@ -74,10 +68,6 @@ function formatMMSS(seconds: number | null | undefined): string {
   return `${m}:${String(s % 60).padStart(2, "0")}`;
 }
 
-function isMode(s: string): s is Mode {
-  return s === "audience" || s === "cabin" || s === "immersive";
-}
-
 function LivePageInner() {
   const router = useRouter();
   const { user } = useAuth();
@@ -89,7 +79,7 @@ function LivePageInner() {
   const sessionId = auto.status === "ready" ? auto.sessionId : null;
 
   const [session, setSession] = useState<SessionState | null>(null);
-  const [mode, setMode] = useState<Mode>("audience");
+  const [mode, setMode] = useStageMode("audience");
   const [cmd, setCmd] = useState("");
   // Tracks whether the user has tapped the audio gate at least once.
   // We dismiss the overlay immediately after the gesture even if the
@@ -121,20 +111,7 @@ function LivePageInner() {
   }, []);
   const isViewer = viewerFlag === true;
 
-  // Read the active mode from the URL hash on mount + sync future
-  // changes back to the hash so reloads / "Show controls" navigation
-  // stick to the user's choice.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const initial = window.location.hash.slice(1);
-    if (isMode(initial)) setMode(initial);
-  }, []);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (window.location.hash !== `#${mode}`) {
-      window.history.replaceState(null, "", `#${mode}`);
-    }
-  }, [mode]);
+  // Mode + hash sync live in the shared hook (§11.3 seam 3).
 
   // Hold the WS back (sessionId=null) until the viewer flag is
   // resolved — see the ``viewerFlag`` comment above.
@@ -280,22 +257,7 @@ function LivePageInner() {
           </Crumb>
         </div>
 
-        <div className="flex gap-1 p-[3px] border border-line2">
-          {MODES.map(([id, label]) => (
-            <button
-              key={id}
-              onClick={() => setMode(id)}
-              className={
-                "px-4 py-1.5 text-xs font-sans cursor-pointer " +
-                (mode === id
-                  ? "bg-cream text-ink"
-                  : "bg-transparent text-mute hover:text-ember-text")
-              }
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <ModeSwitcher mode={mode} onChange={setMode} />
 
         <div className="flex items-center gap-2">
           {/* v2.6.0 — endless / improvisation mode toggle. When ON,
