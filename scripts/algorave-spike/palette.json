@@ -15,6 +15,11 @@
       "json": "https://strudel.b-cdn.net/vcsl.json",
       "base": "https://strudel.b-cdn.net/VCSL/",
       "tag": "vcsl"
+    },
+    {
+      "json": "https://raw.githubusercontent.com/tidalcycles/Dirt-Samples/master/strudel.json",
+      "base": "https://raw.githubusercontent.com/tidalcycles/Dirt-Samples/master/",
+      "tag": "dirt-samples"
     }
   ],
   "drums": [
@@ -53,13 +58,63 @@
     "agogo",
     "shaker_small",
     "fmpiano",
-    "balafon"
+    "balafon",
+    "jvbass",
+    "stab",
+    "house",
+    "hoover",
+    "arpy",
+    "juno",
+    "moog",
+    "pad",
+    "space",
+    "wind",
+    "tabla",
+    "amencutup",
+    "clubkick",
+    "realclaps"
   ],
   "roles": {
-    "bass": { "voices": ["sawtooth"], "octaves": [1, 2] },
-    "stabs": { "voices": ["triangle", "piano"], "octaves": [3, 4] },
-    "pads": { "voices": ["supersaw", "sawtooth"], "octaves": [2, 3] },
-    "leads": { "voices": ["pulse", "square", "supersaw"], "octaves": [4, 5] }
+    "bass": {
+      "voices": [
+        "sawtooth"
+      ],
+      "octaves": [
+        1,
+        2
+      ]
+    },
+    "stabs": {
+      "voices": [
+        "triangle",
+        "piano"
+      ],
+      "octaves": [
+        3,
+        4
+      ]
+    },
+    "pads": {
+      "voices": [
+        "supersaw",
+        "sawtooth"
+      ],
+      "octaves": [
+        2,
+        3
+      ]
+    },
+    "leads": {
+      "voices": [
+        "pulse",
+        "square",
+        "supersaw"
+      ],
+      "octaves": [
+        4,
+        5
+      ]
+    }
   },
   "banks": {
     "RolandTR909": [
@@ -178,13 +233,61 @@
         "agogo",
         "shaker_small",
         "fmpiano",
-        "balafon"
+        "balafon",
+        "jvbass",
+        "stab",
+        "house",
+        "arpy",
+        "juno",
+        "moog",
+        "pad",
+        "tabla",
+        "clubkick",
+        "realclaps"
       ],
       "roles": {
-        "bass": { "voices": ["sawtooth"], "octaves": [1, 2] },
-        "stabs": { "voices": ["triangle", "piano"], "octaves": [3, 4] },
-        "pads": { "voices": ["supersaw", "sawtooth"], "octaves": [2, 3] },
-        "leads": { "voices": ["pulse", "square", "supersaw"], "octaves": [4, 5] }
+        "bass": {
+          "voices": [
+            "sawtooth",
+            "jvbass"
+          ],
+          "octaves": [
+            1,
+            2
+          ]
+        },
+        "stabs": {
+          "voices": [
+            "triangle",
+            "piano",
+            "stab"
+          ],
+          "octaves": [
+            3,
+            4
+          ]
+        },
+        "pads": {
+          "voices": [
+            "supersaw",
+            "sawtooth"
+          ],
+          "octaves": [
+            2,
+            3
+          ]
+        },
+        "leads": {
+          "voices": [
+            "pulse",
+            "square",
+            "supersaw"
+          ],
+          "octaves": [
+            4,
+            5
+          ]
+        }
       },
       "banks": [
         "RolandTR909",

@@ -468,3 +468,49 @@ not Latin, percussion. Nothing there earns a slot in a deep-house prompt.
   `machines/` tree to pick banks per genre pack.
 - **Upstream source** — https://codeberg.org/uzu/strudel (moved off GitHub;
   GitHub raw URLs 404 — spike finding).
+
+### Curation rationale — the Dirt-Samples library (2026-08-31)
+
+`samples('.../Dirt-Samples/master/strudel.json')` is the classic TidalCycles
+library: **218 sound folders, 2038 samples**. It is registered as a fourth
+source and a curated slice is added to `instruments`.
+
+**No new category, and that is the point.** By the registry's own taxonomy
+(`_doc`) a category is defined by the BANK RULE, and Dirt sounds are
+sample-backed and not bank-prefixed — exactly what `instruments` already means.
+The validator's instrument branch already refuses `.bank()` on them with the
+right message. So this is a data change, not a code change, which is what §10
+promised the registry would make possible.
+
+**The handoff's dead end is not this.** `Dirt-Samples.json` on the b-cdn is a
+2 KB nine-folder subset with no mirror. This is the library's own
+`strudel.json`, from its own repo, whose `_base` already points at the raw
+files. Different artefact, same name — worth knowing before dismissing it twice.
+
+**What the fourteen add, by what we lacked:**
+
+| | |
+|---|---|
+| `jvbass` | a sampled bass. The catalogue had none — every low end was an oscillator |
+| `stab`, `house`, `hoover` | house stabs and the rave stab, an idiom with no voice here before |
+| `arpy`, `juno`, `moog` | pitched plucks and synth keys with sample character |
+| `pad` | a sampled pad beside the supersaw one |
+| `space`, `wind` | texture for the ambient lane, which had none |
+| `tabla` | hand percussion — a colour the six machines cannot make |
+| `amencutup` | breaks, for a change of feel rather than a change of sound |
+| `clubkick`, `realclaps` | a kick and a clap that are not machine-shaped |
+
+Ten of them go into `genres.deep`; `hoover`, `amencutup`, `space` and `wind`
+stay registry-wide, since rave stabs and jungle breaks are not deep house.
+`jvbass` joins the `bass` role and `stab` the `stabs` role — the two that add an
+idiom rather than another timbre.
+
+**The hazard the tests now guard:** Dirt shares many names with the drum
+machines (`bd`, `sd`, `hh`, `cp`, `perc`…). A curated name that collided would
+be addressable two ways and mean two things — `s("bd")` bare would PLAY (Dirt's)
+while the validator rejected it as a bankless drum. None of the fourteen
+collide, and a test keeps it that way.
+
+**Selection is `.n(i)`, not `.note()`.** These hold many variants —
+`s("stab").n("<0 3 5>")` walks them. The prompt now says so; pitch-shifting is
+for when you actually want it.

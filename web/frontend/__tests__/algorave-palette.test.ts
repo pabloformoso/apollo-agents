@@ -61,6 +61,33 @@ describe("the registry is reachable and whole", () => {
     expect(palette.instruments).toEqual(registry.instruments);
   });
 
+  it("no instrument name collides with a drum name", () => {
+    // A name in both categories would be addressable two ways and mean two
+    // things: `s("bd")` bare (a Dirt one-shot) versus `s("bd").bank(...)` (a
+    // machine sample). The validator would reject the bare form as a bankless
+    // drum while the engine happily played it — the two disagreeing about the
+    // same string. Checked here because the Dirt-Samples library shares many
+    // names with the drum machines (bd, sd, hh, cp, perc...) and the curated
+    // list must never pick one of them.
+    const clash = palette.instruments.filter((i) => palette.drums.includes(i));
+    expect(clash).toEqual([]);
+  });
+
+  it("registers every sample source the sounds need", () => {
+    // Sounds without their map are the silent failure of 2026-08-31: offered,
+    // never fetched, never played.
+    expect(palette.sources.map((s) => s.tag).sort()).toEqual([
+      "dirt-samples",
+      "drum-machines",
+      "piano",
+      "vcsl",
+    ]);
+    for (const src of palette.sources) {
+      expect(src.json).toMatch(/^https:\/\//);
+      expect(src.base).toMatch(/^https:\/\//);
+    }
+  });
+
   it("has exactly the orphan drums we already know about", () => {
     // The registry's own doc: "a .bank() must both exist here and carry that
     // sound — a pair this matrix lacks plays SILENCE live". A drum no bank
