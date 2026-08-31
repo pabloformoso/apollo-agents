@@ -37,11 +37,13 @@ export default function StrudelSpikePage() {
     try {
       setPhase("booting");
       setDetail("loading engine from " + STRUDEL_URL + " and registering sounds…");
-      const { strudel, secureContext, registered: ok, failed } = await boot();
+      const { strudel, secureContext, registered: ok, failed, workletError } = await boot();
       setEngine(strudel);
       setRegistered(ok);
       setInsecure(!secureContext);
-      if (failed.length) {
+      if (workletError) {
+        setDetail(`AudioWorklet did not register: ${workletError}`);
+      } else if (failed.length) {
         setDetail(`sources failed: ${failed.map((f) => `${f.tag} (${f.error})`).join(", ")}`);
       }
       await strudel.evaluate(PATTERN);
