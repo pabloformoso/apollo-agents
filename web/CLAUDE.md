@@ -325,6 +325,13 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## The algorave route (§11 S4)
 
+- **There are TWO algorave surfaces on purpose** (§11 S9): this route, and the
+  `:4031` playground, which stays as the rehearsal room. They share `pen.js`
+  and `palette.json`, so turn-taking and the sound vocabulary cannot diverge —
+  but each page's own wiring can, and a fix here is not a fix there. What this
+  route still lacks: persistence across a reload, `summarizeHumanEdit`, and
+  genre/key selection. See `scripts/CLAUDE.md`.
+
 - **`/live` and `/algorave` render the SAME mode switcher** —
   `components/ember/ModeSwitcher` — with the same hash sync. This is seam 3 of
   §11.3, and the extraction happened in the same PR that created the second
