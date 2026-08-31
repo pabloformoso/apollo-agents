@@ -63,6 +63,8 @@ export interface SampleSource {
   tag?: string;
 }
 
+import { installMidi } from "./strudel-midi";
+
 export const STRUDEL_URL = "/vendor/strudel/index.mjs";
 
 /**
@@ -128,6 +130,11 @@ export async function boot(
 
   const strudel = await loadStrudel();
   await strudel.initStrudel();
+
+  // Adds `.midi()` to THIS bundle's Pattern. Installing @strudel/midi instead
+  // would bring its own @strudel/core and therefore a second Pattern class —
+  // rule 1 above, and a method on the wrong Pattern never fires.
+  installMidi(strudel);
 
   // Wait for the worklets. `initStrudel` returns before they are registered —
   // it only arms `initAudioOnFirstClick` — so without this the first bars

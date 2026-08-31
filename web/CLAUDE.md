@@ -474,6 +474,36 @@ criterion. It now asserts the line became a top-level LAYER of the stack
 (`stackLayers`). Same shape as S3's "one `Pattern` class" going green on a
 silent page: **structural checks pass while the music is wrong.**
 
+## MIDI out — `.midi("port")`
+
+- **Written here rather than installed, and that is not a preference.**
+  `@strudel/midi` depends on `@strudel/core` and would arrive with its own copy
+  — a SECOND `Pattern` class, the silent failure S3 spent a day proving. A
+  method registered on a Pattern the scheduler does not run simply never fires.
+  `lib/strudel-midi.ts` adds `.midi()` to OUR single bundle's prototype using
+  hooks it already exports: `onTrigger`, `valueToMidi`, `getAudioContext`.
+- **`installMidi` is idempotent per PROTOTYPE, not per module.** A module-level
+  flag installs on the first Pattern it ever sees and silently skips any other.
+  Caught by a test, which is the only place that difference shows.
+- **The clock conversion is the part to read twice.** `onTrigger` hands over
+  `targetTime` in the AUDIO clock; `output.send` wants the PERFORMANCE clock.
+  Without `performance.now() + (target - audioNow) * 1000` every note still
+  plays, at a time that looks plausible and is not — drifting with how long the
+  page has been open. Nothing throws.
+- **The validator has a no-op `.midi()`** (`validate.mjs`). Without it, the
+  moment a human routes a layer to a synth every later mutation the mind writes
+  carries `.midi(...)` and is rejected as a syntax error — the mind silently
+  unable to touch the set again. A no-op is exactly right for gating: MIDI
+  changes where notes GO, not what they are, so `queryArc` sees the same events.
+- **Do not call `midiSupport()` during render.** It reads
+  `window.isSecureContext`, which the server cannot know, and doing so produced
+  a hydration mismatch (React #418). The button is always offered; `enableMidi()`
+  reports which way it failed on the click.
+- **WebMIDI needs a secure context**, exactly like AudioWorklet. And the notes
+  reach the ports of the machine with the TAB open — the performer's, not the
+  server's. That is what makes this a better fit than Strudel's OSC/SuperDirt
+  path, where SuperCollider would make the sound on the server in an empty room.
+
 ## The OBS view (§11 S8)
 
 - **`afterFiles` rewrites beat DYNAMIC routes, not static ones.** `next.config`

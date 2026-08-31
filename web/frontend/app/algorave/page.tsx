@@ -22,6 +22,7 @@ import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 import { TurnStrip, type PenHolder } from "@/components/ember/TurnStrip";
 import { PaletteBrowser } from "@/components/ember/PaletteBrowser";
 import { insertIntoBuffer, readPalette, type Palette } from "@/lib/palette";
+import { enableMidi, type MidiPort } from "@/lib/strudel-midi";
 import { boot, type StrudelModule } from "@/lib/strudel";
 import {
   fetchRun,
@@ -135,6 +136,27 @@ export default function AlgoravePage() {
       reason: proposal?.reason ?? "",
     });
   }, [viewerResolved, isViewer, runId, buffer, pen, barsNow, phraseBars, proposal]);
+
+  // --- MIDI out ------------------------------------------------------------
+  // WebMIDI runs in THIS browser, so the notes reach the ports of the machine
+  // the tab is open on — the performer's, not the server's. That is what makes
+  // it a better fit than Strudel's OSC/SuperDirt path, where the sound would
+  // be made on the server in a room nobody is in.
+  const [midiPorts, setMidiPorts] = useState<MidiPort[] | null>(null);
+  const [midiPort, setMidiPort] = useState<string>("");
+  const [midiError, setMidiError] = useState<string | null>(null);
+
+  const askForMidi = useCallback(async () => {
+    setMidiError(null);
+    try {
+      const ports = await enableMidi();
+      setMidiPorts(ports);
+      if (ports.length > 0) setMidiPort((cur) => cur || ports[0].name);
+    } catch (err) {
+      setMidiPorts([]);
+      setMidiError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
 
   // --- the palette (S7) -----------------------------------------------------
   const [palette, setPalette] = useState<Palette | null>(null);
@@ -339,6 +361,13 @@ export default function AlgoravePage() {
     setPen(next);
   }, []);
 
+  const addMidiLayer = useCallback(() => {
+    if (!midiPort) return;
+    setBuffer((b) =>
+      insertIntoBuffer(b, `note("c2 eb2 g2").midi(${JSON.stringify(midiPort)})`),
+    );
+  }, [midiPort]);
+
   const insertSound = useCallback((line: string) => {
     setBuffer((b) => insertIntoBuffer(b, line));
   }, []);
@@ -493,6 +522,61 @@ export default function AlgoravePage() {
         "b2b-bars",
       )}
       {numberField("BPM", "sets the bar clock", bpm, setBpm, "bpm")}
+
+      <div className="flex flex-col gap-2 border-t border-line pt-3">
+        <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+          MIDI out
+        </span>
+        {/* Availability is NOT checked during render: `midiSupport()` reads
+            `window.isSecureContext`, which the server cannot know, and doing so
+            here produced a hydration mismatch (React #418). `enableMidi()`
+            already reports which way it failed, so the button is always offered
+            and the answer arrives on the click. */}
+        {midiPorts === null ? (
+          <button
+            type="button"
+            onClick={() => void askForMidi()}
+            data-testid="enable-midi"
+            className="font-mono uppercase tracking-mono text-[10.5px] px-3 py-2 rounded border border-line2 text-ember-text cursor-pointer text-left"
+          >
+            Enable MIDI
+            <span className="block text-[9px] normal-case tracking-normal text-faint">
+              play your own synths from here
+            </span>
+          </button>
+        ) : midiPorts.length === 0 ? (
+          <p data-testid="midi-error" className="text-warn text-xs">
+            {midiError ??
+              "no MIDI outputs — open a virtual port (loopMIDI, IAC, MIDI Through) and enable again"}
+          </p>
+        ) : (
+          <>
+            <select
+              data-testid="midi-port"
+              value={midiPort}
+              onChange={(e) => setMidiPort(e.target.value)}
+              className="bg-surf border border-line rounded px-2 py-1 font-mono text-[11px] text-ember-text outline-none focus:border-line2"
+            >
+              {midiPorts.map((p) => (
+                <option key={p.id} value={p.name}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={addMidiLayer}
+              data-testid="add-midi-layer"
+              className="font-mono uppercase tracking-mono text-[10.5px] px-3 py-2 rounded border border-line2 text-ember-text cursor-pointer text-left"
+            >
+              Add a MIDI layer
+              <span className="block text-[9px] normal-case tracking-normal text-faint">
+                .midi({midiPort ? `"${midiPort}"` : "…"}) — notes leave, no sound here
+              </span>
+            </button>
+          </>
+        )}
+      </div>
 
       <div
         data-testid="scheduler-log"

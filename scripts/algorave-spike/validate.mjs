@@ -417,6 +417,23 @@ async function loadStrudel() {
 
   await core.evalScope(core, mini, tonal);
 
+  // `.midi("port")` is a browser method — WebMIDI does not exist here, and
+  // `@strudel/midi` would drag in its own `@strudel/core` and therefore a
+  // second Pattern class (the trap web/frontend/lib/strudel.ts documents). But
+  // the validator MUST still accept it: the moment a human routes a layer to a
+  // synth, every subsequent mutation the mind writes carries `.midi(...)`, and
+  // without this the pattern would be rejected as a syntax error — the mind
+  // silently unable to touch the set from then on.
+  //
+  // A no-op that returns the pattern unchanged is exactly right for gating:
+  // `queryArc` sees the same events either way, because MIDI changes where the
+  // notes GO, not what they are.
+  if (typeof core.Pattern?.prototype?.midi !== 'function') {
+    core.Pattern.prototype.midi = function midi() {
+      return this;
+    };
+  }
+
   return transpilerPkg;
 }
 
