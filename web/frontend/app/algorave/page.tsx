@@ -1,33 +1,39 @@
 "use client";
 /**
- * §11 S4 + S5 — `/algorave`, the live-coding room inside Apollo.
+ * §11 S4–S6 — `/algorave`, the live-coding room inside Apollo.
  *
- * The canvas is modelled on `/live`, not on `/editor` (§11.2): three modes
- * switched IN PLACE and synced to the URL hash, code on screen as the show
- * rather than as a work surface. The switcher and hash sync are the SAME ones
- * `/live` uses — §11.3 seam 3.
+ * Canvas modelled on `/live` (§11.2): three modes switched IN PLACE, synced to
+ * the URL hash, sharing `/live`'s switcher (§11.3 seam 3).
  *
- * S5 adds the mind: an intent goes out, a proposal comes back as a diff, and
- * the human accepts or discards it. Every call goes through `lib/mind.ts`
- * (seam 1); this page never names the endpoint.
+ * S6 adds the turn-taking: the pen, the phrase scheduler and B2B. **None of
+ * that logic is written here.** It is imported from the pen module the spike
+ * already owns (§11.3 seam 2) — `decide`, `b2bDecide`, the `WHY` enums, the
+ * tie rule — so there is exactly one copy in the repo and the spike's tests
+ * still guard it. This page only wires a clock to it and renders the answer.
  *
- * NOT here, per the S5 scope: phrase-boundary scheduling and B2B. Those are
- * S6, and `autoApplyDecision` is exported ready for them — the tie rule is
- * computed and shown now, but nothing applies itself yet.
+ * Layout follows the original playground: the editor on the left, the mind's
+ * proposal on the right, controls in a rail. Reading a diff means reading it
+ * against the code it changes, and stacked panes make that a scroll.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Shell } from "@/components/ember/Shell";
 import { Crumb } from "@/components/ember/primitives";
 import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
+import { TurnStrip, type PenHolder } from "@/components/ember/TurnStrip";
 import { boot, type StrudelModule } from "@/lib/strudel";
 import { resolveRunId } from "@/lib/algorave-run";
-import { MindError, askMind, autoApplyDecision } from "@/lib/mind";
-import { diffCounts, hasChanges, lineDiff, type DiffLine } from "@/lib/line-diff";
+import { MindError, askMind, autoApplyDecision, diffLines, pushReason } from "@/lib/mind";
+import {
+  b2bDecide,
+  barsElapsed,
+  decide,
+  nextBoundaryBar,
+  barsUntilFlip,
+  togglePen,
+} from "@algorave/pen";
 
 type Phase = "idle" | "booting" | "playing" | "stopped" | "failed";
-
-/** What the mind typically takes (p50 ~20 s). Used to pace the wait, not to time it out. */
-const EXPECTED_WAIT_SEC = 20;
+type DiffRow = { type: "same" | "add" | "del"; text: string };
 
 const OPENING_BUFFER = `stack(
   s("bd*4").bank("RolandTR909").gain(0.9),
@@ -36,12 +42,18 @@ const OPENING_BUFFER = `stack(
   note("c2 eb2 g2 bb2").s("supersaw").lpf(sine.range(400, 2000).slow(8)).gain(0.5)
 ).cpm(124/4)`;
 
+const DEFAULT_BPM = 124;
+/** Cycles per second at 4/4 — one cycle is one bar, which is what the pen counts. */
+const cpsFor = (bpm: number) => bpm / 60 / 4;
+
 interface Proposal {
   code: string;
   reason: string;
-  /** The buffer the mind was shown. The tie rule compares against this. */
+  /** The buffer the mind was shown; the tie rule compares against this. */
   seen: string;
-  diff: DiffLine[];
+  diff: DiffRow[];
+  /** True when the scheduler asked, false when the human clicked. */
+  scheduled: boolean;
 }
 
 export default function AlgoravePage() {
@@ -60,14 +72,42 @@ export default function AlgoravePage() {
   const [mindError, setMindError] = useState<MindError | null>(null);
   const [reasons, setReasons] = useState<string[]>([]);
 
-  // The wait is ~20 s. Counting it makes the pause legible as something in
-  // progress rather than something broken — the interval callback is the
-  // allowed place to setState from an effect.
+  // --- turn taking (S6) -----------------------------------------------------
+  const [pen, setPen] = useState<PenHolder>("human");
+  const [b2b, setB2b] = useState(false);
+  const [phraseBars, setPhraseBars] = useState(8);
+  const [b2bBars, setB2bBars] = useState(16);
+  const [bpm, setBpm] = useState(DEFAULT_BPM);
+  const [barsNow, setBarsNow] = useState(0);
+  const [why, setWhy] = useState<string | null>(null);
+  const [log, setLog] = useState<{ bar: number; text: string }[]>([]);
+
+  // Refs so the tick reads the CURRENT values, not the ones captured when the
+  // interval was created. A stale `pen` here would fire the mind on a boundary
+  // the human had already taken back.
+  const penRef = useRef<PenHolder>("human");
+  const inFlight = useRef(false);
+  const lastBoundary = useRef<number | null>(null);
+  const lastFlip = useRef<number | null>(null);
+  const startedAt = useRef<number | null>(null);
+  // The bar the tick last computed. `ask` runs from an interval, so reading
+  // `barsNow` out of its closure logged the bar the closure was BORN on, not
+  // the one the boundary fired at — a log you cannot trust is worse than none.
+  const barsRef = useRef(0);
+  const bufferRef = useRef(buffer);
+  // Mirrored in an effect, not during render: the scheduler's interval reads
+  // this, and writing a ref while rendering is a tear waiting to happen.
+  useEffect(() => {
+    bufferRef.current = buffer;
+  }, [buffer]);
+
+  const cps = useMemo(() => cpsFor(bpm), [bpm]);
+  const note = useCallback((bar: number, text: string) => {
+    setLog((l) => [...l, { bar, text }].slice(-14));
+  }, []);
+
   useEffect(() => {
     if (!thinking) return;
-    // Only the interval here: the counter is reset where the wait actually
-    // begins (in `ask`), because setting state in an effect body is what
-    // cascading renders are made of.
     const t = setInterval(() => setElapsed((s) => s + 1), 1000);
     return () => clearInterval(t);
   }, [thinking]);
@@ -84,13 +124,12 @@ export default function AlgoravePage() {
           const { strudel, secureContext, failed, workletError } = await boot();
           engine.current = strudel;
           setInsecure(!secureContext);
-          if (workletError) {
-            setDetail(`AudioWorklet did not register: ${workletError}`);
-          } else if (failed.length) {
+          if (workletError) setDetail(`AudioWorklet did not register: ${workletError}`);
+          else if (failed.length)
             setDetail(`sound sources failed: ${failed.map((f) => f.tag).join(", ")}`);
-          }
         }
         await engine.current.evaluate(code);
+        if (startedAt.current === null) startedAt.current = Date.now();
         setPhase("playing");
         setDetail(`playing · run ${id}`);
       } catch (err) {
@@ -103,41 +142,113 @@ export default function AlgoravePage() {
 
   const stop = useCallback(() => {
     engine.current?.hush();
+    startedAt.current = null;
+    lastBoundary.current = null;
+    lastFlip.current = null;
+    setBarsNow(0);
     setPhase("stopped");
     setDetail("stopped");
   }, []);
 
-  const ask = useCallback(async () => {
-    // Captured HERE, before the await: this exact text is what the tie rule
-    // compares against when the answer lands.
-    const seen = buffer;
-    setElapsed(0);
-    setThinking(true);
-    setMindError(null);
-    setProposal(null);
-    try {
-      const out = await askMind({
-        code: seen,
-        intent,
-        recentReasons: reasons.slice(-5),
+  /**
+   * Ask the mind. `scheduled` marks a call the phrase scheduler made — only
+   * those may auto-apply, and only when the tie rule allows it.
+   */
+  const ask = useCallback(
+    async (scheduled = false) => {
+      if (inFlight.current) return;
+      const seen = bufferRef.current;
+      inFlight.current = true;
+      setElapsed(0);
+      setThinking(true);
+      setMindError(null);
+      setProposal(null);
+      try {
+        const at = barsRef.current;
+        const out = await askMind({ code: seen, intent, recentReasons: reasons, barsElapsed: at });
+        const diff = diffLines(seen, out.code) as DiffRow[];
+        setReasons((r) => pushReason(r, out.reason) as string[]);
+
+        // The tie rule (#148) gates the AUTOMATIC path only. A hand-clicked
+        // Apply is a human looking at the diff and is never blocked.
+        const tie = autoApplyDecision({ askedWith: seen, current: bufferRef.current });
+        if (scheduled && tie.apply) {
+          setBuffer(out.code);
+          void evaluate(out.code);
+          note(at, `mind applied · ${out.reason.slice(0, 60)}`);
+        } else {
+          setProposal({ code: out.code, reason: out.reason, seen, diff, scheduled });
+          if (scheduled) note(at, `held · ${tie.why}`);
+        }
+      } catch (err) {
+        const e = err instanceof MindError ? err : new MindError(0, "the mind call failed", String(err));
+        setMindError(e);
+        note(barsRef.current, `mind failed · ${e.message.slice(0, 50)}`);
+      } finally {
+        inFlight.current = false;
+        setThinking(false);
+      }
+    },
+    [intent, reasons, evaluate, note],
+  );
+
+  // Same reason: the interval must call the CURRENT `ask`, not the one that
+  // existed when it was created, and the mirror belongs in an effect.
+  const askRef = useRef(ask);
+  useEffect(() => {
+    askRef.current = ask;
+  }, [ask]);
+
+  // --- the scheduler --------------------------------------------------------
+  // All the deciding is the pen module's; this only supplies a clock and obeys.
+  useEffect(() => {
+    if (phase !== "playing") return;
+    const t = setInterval(() => {
+      const secs = startedAt.current === null ? 0 : (Date.now() - startedAt.current) / 1000;
+      const bars = barsElapsed(secs, cps) as number;
+      barsRef.current = bars;
+      setBarsNow(bars);
+
+      const flip = b2bDecide({
+        barsNow: bars,
+        lastFlipBar: lastFlip.current,
+        b2bBars,
+        mode: b2b ? "b2b" : "free",
+        playing: true,
+        pen: penRef.current,
       });
-      setProposal({
-        code: out.code,
-        reason: out.reason,
-        seen,
-        diff: lineDiff(seen, out.code),
+      if (flip.consume) lastFlip.current = flip.at;
+      if (flip.flip && flip.to) {
+        penRef.current = flip.to as PenHolder;
+        setPen(flip.to as PenHolder);
+        note(bars, `b2b · the pen goes to the ${flip.to}`);
+      }
+
+      const d = decide({
+        barsNow: bars,
+        lastBoundaryBar: lastBoundary.current,
+        phraseBars,
+        inFlight: inFlight.current,
+        pen: penRef.current,
+        playing: true,
       });
-      if (out.reason) setReasons((r) => [...r, out.reason].slice(-5));
-    } catch (err) {
-      setMindError(
-        err instanceof MindError
-          ? err
-          : new MindError(0, "the mind call failed", String(err)),
-      );
-    } finally {
-      setThinking(false);
-    }
-  }, [buffer, intent, reasons]);
+      if (d.consume) lastBoundary.current = d.at;
+      setWhy(d.why);
+      if (d.fire) {
+        note(bars, "boundary · asking the mind");
+        void askRef.current(true);
+      } else if (d.consume) {
+        note(bars, `boundary SKIPPED · ${d.why}`);
+      }
+    }, 250);
+    return () => clearInterval(t);
+  }, [phase, cps, phraseBars, b2bBars, b2b, note]);
+
+  const handTheP = useCallback(() => {
+    const next = togglePen(penRef.current) as PenHolder;
+    penRef.current = next;
+    setPen(next);
+  }, []);
 
   const applyProposal = useCallback(() => {
     if (!proposal) return;
@@ -157,42 +268,28 @@ export default function AlgoravePage() {
   );
 
   const playing = phase === "playing";
-  // The tie rule (#148). Recomputed on every render because the human may be
-  // typing right now, while the proposal on screen was written against an
-  // older buffer.
-  const tie = proposal ? autoApplyDecision(proposal.seen, buffer) : null;
+  const tie = proposal
+    ? autoApplyDecision({ askedWith: proposal.seen, current: buffer })
+    : null;
+  const added = proposal?.diff.filter((l) => l.type === "add").length ?? 0;
+  const removed = proposal?.diff.filter((l) => l.type === "del").length ?? 0;
 
-  const transport = (
-    <div className="flex items-center gap-3 flex-wrap">
-      <button
-        type="button"
-        onClick={() => void evaluate(buffer)}
-        disabled={phase === "booting"}
-        data-testid="evaluate"
-        className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded bg-ember text-ink disabled:opacity-40 cursor-pointer"
-      >
-        {playing ? "Re-evaluate" : "Play"}
-      </button>
-      <button
-        type="button"
-        onClick={stop}
-        disabled={!playing}
-        data-testid="stop"
-        className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded border border-line2 disabled:opacity-40 cursor-pointer"
-      >
-        Stop
-      </button>
-      <span
-        data-testid="status"
-        data-phase={phase}
-        className={"text-xs " + (phase === "failed" ? "text-ember" : "text-mute")}
-      >
-        {detail}
-      </span>
-    </div>
+  const strip = (
+    <TurnStrip
+      pen={pen}
+      barsNow={barsNow}
+      phraseBars={phraseBars}
+      nextBoundaryBar={playing ? (nextBoundaryBar(barsNow, phraseBars) as number) : null}
+      barsToFlip={b2b && playing ? (barsUntilFlip(barsNow, b2bBars) as number) : null}
+      working={thinking ? intent : null}
+      why={playing ? why : null}
+      onTogglePen={handTheP}
+      onToggleB2b={() => setB2b((v) => !v)}
+      b2b={b2b}
+    />
   );
 
-  const code = (
+  const codeView = (
     <pre
       data-testid="code-display"
       className="font-mono text-ember-text whitespace-pre-wrap break-words"
@@ -201,152 +298,211 @@ export default function AlgoravePage() {
     </pre>
   );
 
-  /** The wait, as a state rather than a spinner: what was asked, and how long. */
-  const waiting = (
-    <div
-      data-testid="thinking"
-      className="border border-line2 border-l-2 border-l-ember rounded-md bg-surf px-4 py-3"
-    >
-      <p className="font-mono uppercase tracking-mono text-[10.5px] text-ember mb-1">
-        The mind is listening · {elapsed}s
-      </p>
-      <p className="text-mute text-sm italic font-display">“{intent}”</p>
-      <div className="mt-3 h-px bg-line2 relative overflow-hidden">
-        <div
-          className="absolute inset-y-0 left-0 bg-ember transition-[width] duration-1000 ease-linear"
-          style={{
-            width: `${Math.min(100, (elapsed / EXPECTED_WAIT_SEC) * 100)}%`,
-          }}
-        />
-      </div>
-      <p className="text-faint text-xs mt-2">
-        Usually about {EXPECTED_WAIT_SEC}s. It is writing against the buffer as
-        it was when you asked — keep playing.
-      </p>
-    </div>
+  const numberField = (
+    label: string,
+    hint: string,
+    value: number,
+    onChange: (n: number) => void,
+    testid: string,
+  ) => (
+    <label className="flex flex-col gap-1">
+      <span className="font-mono uppercase tracking-mono text-[10px] text-faint leading-tight">
+        {label}
+        <br />
+        <span className="text-faint/70">{hint}</span>
+      </span>
+      <input
+        type="number"
+        min={1}
+        value={value}
+        data-testid={testid}
+        onChange={(e) => onChange(Number(e.target.value) || value)}
+        className="bg-surf border border-line rounded px-2 py-1 font-mono text-sm text-ember-text outline-none focus:border-line2"
+      />
+    </label>
   );
 
-  const mindPanel = (
-    <div className="flex flex-col gap-3">
-      <div className="flex gap-3 flex-wrap items-center">
+  const rail = (
+    <aside className="flex flex-col gap-4 lg:w-[250px] shrink-0">
+      <div className="flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => void evaluate(buffer)}
+          disabled={phase === "booting"}
+          data-testid="evaluate"
+          className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2.5 rounded bg-ember text-ink disabled:opacity-40 cursor-pointer text-left"
+        >
+          {playing ? "Re-evaluate" : "Play"}
+          <span className="block text-[9px] normal-case tracking-normal opacity-70">
+            evaluates the editor buffer
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={stop}
+          disabled={!playing}
+          data-testid="stop"
+          className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2.5 rounded border border-line2 disabled:opacity-40 cursor-pointer text-left"
+        >
+          Stop
+        </button>
+      </div>
+
+      <label className="flex flex-col gap-1">
+        <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+          Intent
+        </span>
         <input
           data-testid="intent"
           value={intent}
           onChange={(e) => setIntent(e.target.value)}
           placeholder="darker · more space · build"
-          className="flex-1 min-w-[260px] bg-surf border border-line rounded-md px-3 py-2 font-sans text-sm text-ember-text outline-none focus:border-line2"
+          className="bg-surf border border-line rounded px-2 py-2 font-sans text-sm text-ember-text outline-none focus:border-line2"
         />
-        <button
-          type="button"
-          onClick={() => void ask()}
-          disabled={thinking || intent.trim().length === 0}
-          data-testid="ask-mind"
-          className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded border border-line2 text-ember-text disabled:opacity-40 cursor-pointer"
-        >
-          Ask the mind
-        </button>
-      </div>
+      </label>
 
-      {thinking && waiting}
+      <button
+        type="button"
+        onClick={() => void ask()}
+        disabled={thinking || intent.trim().length === 0}
+        data-testid="ask-mind"
+        className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2.5 rounded bg-cream text-ink disabled:opacity-40 cursor-pointer text-left"
+      >
+        Mind
+        <span className="block text-[9px] normal-case tracking-normal opacity-70">
+          asks now, outside the phrase grid
+        </span>
+      </button>
 
-      {mindError && (
-        <div
-          data-testid="mind-error"
-          className="border border-line2 border-l-2 border-l-ember rounded-md bg-surf px-4 py-3"
-        >
-          <p className="font-mono uppercase tracking-mono text-[10.5px] text-ember mb-1">
-            {mindError.worthRetrying ? "The mind stumbled" : "Something needs fixing"}
-          </p>
-          <p className="text-mute text-sm">{mindError.message}</p>
-          {mindError.detail && (
-            <p className="text-faint text-xs font-mono mt-1 break-words">
-              {mindError.detail}
-            </p>
-          )}
-        </div>
+      {numberField(
+        "Phrase",
+        "bars between the mind's mutations",
+        phraseBars,
+        setPhraseBars,
+        "phrase-bars",
       )}
+      {numberField(
+        "B2B",
+        "bars per turn before the pen flips",
+        b2bBars,
+        setB2bBars,
+        "b2b-bars",
+      )}
+      {numberField("BPM", "sets the bar clock", bpm, setBpm, "bpm")}
 
-      {proposal && (
-        <div
-          data-testid="proposal"
-          data-auto-appliable={String(tie?.autoApply ?? false)}
-          className="border border-line rounded-md bg-surf"
-        >
-          <div className="flex items-baseline justify-between gap-3 px-4 py-3 border-b border-line flex-wrap">
-            <p className="text-mute text-sm italic font-display">
+      <div
+        data-testid="scheduler-log"
+        className="flex flex-col gap-1 font-mono text-[10.5px] text-faint max-h-[220px] overflow-y-auto"
+      >
+        {log.length === 0 ? (
+          <span>the scheduler has said nothing yet</span>
+        ) : (
+          log.map((l, i) => (
+            <span key={i}>
+              bar {l.bar} · {l.text}
+            </span>
+          ))
+        )}
+      </div>
+    </aside>
+  );
+
+  const proposalPane = (
+    <section
+      data-testid="proposal-pane"
+      className="flex flex-col border border-line rounded-md bg-surf min-h-[380px]"
+    >
+      <header className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line">
+        <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+          Proposal — what the mind would play
+        </span>
+        {thinking && (
+          <span
+            data-testid="thinking"
+            className="font-mono uppercase tracking-mono text-[10.5px] text-ember"
+          >
+            thinking… {elapsed}s
+          </span>
+        )}
+      </header>
+
+      <div className="flex-1 overflow-auto">
+        {mindError && (
+          <div data-testid="mind-error" className="px-4 py-3">
+            <p className="font-mono uppercase tracking-mono text-[10.5px] text-ember mb-1">
+              {mindError.worthRetrying ? "The mind stumbled" : "Something needs fixing"}
+            </p>
+            <p className="text-mute text-sm">{mindError.message}</p>
+            {mindError.detail && (
+              <p className="text-faint text-xs font-mono mt-1 break-words">
+                {mindError.detail}
+              </p>
+            )}
+          </div>
+        )}
+
+        {proposal && (
+          <div data-testid="proposal" data-auto-appliable={String(tie?.apply ?? false)}>
+            <p className="px-4 py-3 text-ok text-sm italic font-display border-b border-line">
               {proposal.reason || "no reason given"}
             </p>
-            <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
-              +{diffCounts(proposal.diff).added} −
-              {diffCounts(proposal.diff).removed}
-            </span>
-          </div>
-
-          {tie && !tie.autoApply && (
-            <p
-              data-testid="tie-warning"
-              className="px-4 py-2 text-xs text-warn border-b border-line"
-            >
-              You edited while it was thinking, so your text stands. This
-              proposal was written against the older buffer — read it before
-              applying.
-            </p>
-          )}
-
-          {hasChanges(proposal.diff) ? (
+            {tie && !tie.apply && (
+              <p data-testid="tie-warning" className="px-4 py-2 text-xs text-warn border-b border-line">
+                {tie.why}
+              </p>
+            )}
             <pre className="px-4 py-3 font-mono text-xs overflow-x-auto">
               {proposal.diff.map((l, i) => (
                 <div
                   key={i}
                   className={
-                    l.op === "add"
-                      ? "text-ok"
-                      : l.op === "del"
-                        ? "text-ember"
-                        : "text-faint"
+                    l.type === "add" ? "text-ok" : l.type === "del" ? "text-ember" : "text-faint"
                   }
                 >
-                  {l.op === "add" ? "+ " : l.op === "del" ? "- " : "  "}
+                  {l.type === "add" ? "+ " : l.type === "del" ? "- " : "  "}
                   {l.text}
                 </div>
               ))}
             </pre>
-          ) : (
-            <p className="px-4 py-3 text-faint text-sm">
-              The mind returned the same buffer — nothing to apply.
-            </p>
-          )}
-
-          <div className="flex gap-3 px-4 py-3 border-t border-line">
-            <button
-              type="button"
-              onClick={applyProposal}
-              disabled={!hasChanges(proposal.diff)}
-              data-testid="apply"
-              className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded bg-cream text-ink disabled:opacity-40 cursor-pointer"
-            >
-              Apply
-            </button>
-            <button
-              type="button"
-              onClick={() => setProposal(null)}
-              data-testid="discard"
-              className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded border border-line2 cursor-pointer"
-            >
-              Discard
-            </button>
           </div>
-        </div>
+        )}
+
+        {!proposal && !mindError && !thinking && (
+          <p className="px-4 py-3 text-faint text-sm">waiting for the mind…</p>
+        )}
+      </div>
+
+      {proposal && (
+        <footer className="flex items-center gap-3 px-4 py-3 border-t border-line">
+          <button
+            type="button"
+            onClick={applyProposal}
+            data-testid="apply"
+            className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded bg-cream text-ink cursor-pointer"
+          >
+            Apply
+          </button>
+          <button
+            type="button"
+            onClick={() => setProposal(null)}
+            data-testid="discard"
+            className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded border border-line2 cursor-pointer"
+          >
+            Discard
+          </button>
+          <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+            +{added} −{removed}
+          </span>
+        </footer>
       )}
-    </div>
+    </section>
   );
 
   return (
     <Shell sessionLabel="algorave" hideNav={mode === "immersive"}>
       <div
         className={
-          "flex flex-col gap-5 " +
-          (mode === "immersive" ? "p-6 min-h-screen" : "px-9 py-7")
+          "flex flex-col gap-4 " + (mode === "immersive" ? "p-6 min-h-screen" : "px-7 py-6")
         }
       >
         <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -354,7 +510,9 @@ export default function AlgoravePage() {
             <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
               Live coding
             </span>
-            <Crumb>run {runId ?? "—"}</Crumb>
+            <Crumb>
+              run {runId ?? "—"} · {bpm} BPM
+            </Crumb>
           </div>
           <ModeSwitcher mode={mode} onChange={setMode} />
         </div>
@@ -362,53 +520,69 @@ export default function AlgoravePage() {
         {insecure && (
           <div
             data-testid="insecure-warning"
-            className="border border-line2 border-l-2 border-l-warn rounded-md bg-surf px-4 py-3 max-w-4xl"
+            className="border border-line2 border-l-2 border-l-warn rounded-md bg-surf px-4 py-3"
           >
             <p className="font-mono uppercase tracking-mono text-[10.5px] text-warn mb-1">
               Non-secure origin
             </p>
             <p className="text-mute text-sm">
-              The browser exposes no <code>AudioWorklet</code> here, so samples
-              play but every worklet-backed sound — supersaw, the effects chain
-              — does not. Reach this page over HTTPS, or through{" "}
-              <code>localhost</code>.
+              The browser exposes no <code>AudioWorklet</code> here, so samples play but
+              every worklet-backed sound — supersaw, the effects chain — does not. Reach
+              this page over HTTPS, or through <code>localhost</code>.
             </p>
           </div>
         )}
 
         {mode === "cabin" && (
-          <div className="flex flex-col gap-4">
-            <textarea
-              data-testid="buffer"
-              value={buffer}
-              onChange={(e) => setBuffer(e.target.value)}
-              onKeyDown={onKeyDown}
-              spellCheck={false}
-              className="w-full min-h-[280px] bg-surf border border-line rounded-md p-4 font-mono text-sm text-ember-text outline-none focus:border-line2 resize-y"
-            />
-            <div className="flex items-center justify-between gap-4 flex-wrap">
-              {transport}
-              <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
-                ⌘/Ctrl + Enter to evaluate
-              </span>
+          <>
+            {strip}
+            <div className="flex flex-col lg:flex-row gap-4 items-stretch">
+              <section className="flex flex-col flex-1 min-w-0 border border-line rounded-md bg-surf">
+                <header className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-line">
+                  <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+                    Editor — the code the room hears
+                  </span>
+                  <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+                    ⌘/Ctrl+Enter evaluates
+                  </span>
+                </header>
+                <textarea
+                  data-testid="buffer"
+                  value={buffer}
+                  onChange={(e) => setBuffer(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  spellCheck={false}
+                  className="flex-1 min-h-[380px] bg-transparent p-4 font-mono text-sm text-ember-text outline-none resize-none"
+                />
+                <footer className="px-4 py-2 border-t border-line">
+                  <span
+                    data-testid="status"
+                    data-phase={phase}
+                    className={"text-xs " + (phase === "failed" ? "text-ember" : "text-mute")}
+                  >
+                    {detail}
+                  </span>
+                </footer>
+              </section>
+
+              <div className="flex-1 min-w-0">{proposalPane}</div>
+              {rail}
             </div>
-            {mindPanel}
-          </div>
+          </>
         )}
 
         {mode === "audience" && (
-          <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-5">
+            {strip}
             <div className="bg-surf border border-line rounded-md p-8 text-lg leading-relaxed">
-              {code}
+              {codeView}
             </div>
-            {thinking && waiting}
-            {transport}
           </div>
         )}
 
         {mode === "immersive" && (
           <div className="flex-1 flex flex-col items-center justify-center gap-6 text-xl leading-relaxed">
-            {code}
+            {codeView}
             {thinking && (
               <p className="font-display italic text-mute text-base">
                 the mind is listening · {elapsed}s

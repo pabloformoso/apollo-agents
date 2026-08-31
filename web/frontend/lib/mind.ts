@@ -8,7 +8,15 @@
  *
  * The server half is `app/api/algorave/mind/route.ts`, which exists because an
  * HTTPS page cannot reach a plain-HTTP mind — see its header.
+ *
+ * What lives here is TRANSPORT ONLY. Building the request body and deciding
+ * the tie both belong to the pen module (§11.3 seam 2) and are imported from
+ * it. S5 briefly reimplemented both, plus the line diff, before the pen was
+ * shared — exactly the duplication the seam exists to prevent, and it is why
+ * the seam is worded as "imported, not reimplemented".
  */
+
+import { mindRequest } from "@algorave/pen";
 
 /** What the page knows when it asks. Mirrors `parse_request` in the mind. */
 export interface MindRequest {
@@ -57,18 +65,23 @@ export class MindError extends Error {
 
 export const MIND_ENDPOINT = "/api/algorave/mind";
 
+export { autoApplyDecision, diffLines, pushReason } from "@algorave/pen";
+
 export async function askMind(req: MindRequest): Promise<MindProposal> {
-  // Field names are the mind's, not ours: it validates them by name and a
-  // rename here would be a 400 that reads like a mind failure.
-  const body = JSON.stringify({
-    code: req.code,
-    intent: req.intent,
-    ...(req.genre ? { genre: req.genre } : {}),
-    ...(req.key ? { key: req.key } : {}),
-    ...(req.barsElapsed !== undefined ? { bars_elapsed: req.barsElapsed } : {}),
-    ...(req.recentReasons ? { recent_reasons: req.recentReasons } : {}),
-    ...(req.b2b ? { b2b: true } : {}),
-  });
+  // The wire shape is the pen module's job: it pins the field names the mind
+  // validates by name, caps `recent_reasons`, and emits `b2b` only when true —
+  // sending `b2b: false` would change the prompt of every free-mode call.
+  const body = JSON.stringify(
+    mindRequest({
+      code: req.code,
+      intent: req.intent,
+      genre: req.genre,
+      key: req.key,
+      barsElapsed: req.barsElapsed,
+      recentReasons: req.recentReasons,
+      b2b: req.b2b,
+    }),
+  );
 
   let res: Response;
   try {
@@ -125,23 +138,3 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
   };
 }
 
-/**
- * The tie rule — **on a tie, the human wins** (#148).
- *
- * A proposal may only be applied without asking when the buffer is BYTE-
- * IDENTICAL to what the mind was shown. If the human typed while the mind was
- * thinking, their edit stands and the proposal drops to a manual diff: the
- * mind wrote an answer to a question that is no longer on screen, and
- * overwriting live edits is the one thing a duet partner must never do.
- *
- * Pure and exported so S6 can hand it to the scheduler unchanged — the manual
- * Apply button is never gated by it, only the automatic path is.
- */
-export function autoApplyDecision(
-  seenByMind: string,
-  currentBuffer: string,
-): { autoApply: boolean; why: "buffer_unchanged" | "held_buffer_dirty" } {
-  return seenByMind === currentBuffer
-    ? { autoApply: true, why: "buffer_unchanged" }
-    : { autoApply: false, why: "held_buffer_dirty" };
-}

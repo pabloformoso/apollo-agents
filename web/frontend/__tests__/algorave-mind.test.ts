@@ -12,7 +12,7 @@ import {
   askMind,
   autoApplyDecision,
 } from "@/lib/mind";
-import { diffCounts, hasChanges, lineDiff } from "@/lib/line-diff";
+import { diffLines } from "@algorave/pen";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -28,26 +28,23 @@ function stubFetch(status: number, body: unknown, raw?: string) {
 }
 
 describe("the tie rule — on a tie, the human wins", () => {
+  // The implementation is the spike's, imported through lib/mind (§11.3 seam
+  // 2). These assertions exist so the APP's use of it is pinned too: a change
+  // to the shared module that broke this contract would otherwise only be
+  // caught on the spike's side.
   it("allows the automatic path only when the buffer is byte-identical", () => {
     const seen = 's("bd*4")';
-    expect(autoApplyDecision(seen, seen)).toEqual({
-      autoApply: true,
-      why: "buffer_unchanged",
-    });
+    expect(autoApplyDecision({ askedWith: seen, current: seen }).apply).toBe(true);
   });
 
   it("refuses it after ANY edit, including whitespace", () => {
-    // Byte-identical means byte-identical: a trailing space is still the human
-    // having touched the buffer while the mind was away.
-    expect(autoApplyDecision('s("bd*4")', 's("bd*4") ').autoApply).toBe(false);
-    expect(autoApplyDecision('s("bd*4")', 's("bd*4")\n').why).toBe(
-      "held_buffer_dirty",
-    );
-    expect(autoApplyDecision('s("bd*4")', 's("bd*2")').autoApply).toBe(false);
+    expect(autoApplyDecision({ askedWith: 's("bd*4")', current: 's("bd*4") ' }).apply).toBe(false);
+    expect(autoApplyDecision({ askedWith: 's("bd*4")', current: 's("bd*4")\n' }).apply).toBe(false);
+    expect(autoApplyDecision({ askedWith: 's("bd*4")', current: 's("bd*2")' }).apply).toBe(false);
   });
 
   it("treats an emptied buffer as an edit, not as 'nothing there'", () => {
-    expect(autoApplyDecision('s("bd*4")', "").autoApply).toBe(false);
+    expect(autoApplyDecision({ askedWith: 's("bd*4")', current: "" }).apply).toBe(false);
   });
 });
 
@@ -60,8 +57,14 @@ describe("askMind", () => {
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(MIND_ENDPOINT);
     const sent = JSON.parse(String(init.body));
-    expect(sent).toEqual({ code: 's("bd*4")', intent: "more space" });
-    // `b2b: false` must not be sent — the mind reads its presence, and an
+    // The shared `mindRequest` always emits the fields the mind defaults
+    // anyway — genre, key, bars_elapsed, recent_reasons — so the wire shape
+    // stays byte-identical to what the bench measured.
+    expect(sent.code).toBe('s("bd*4")');
+    expect(sent.intent).toBe("more space");
+    expect(sent.bars_elapsed).toBe(0);
+    expect(sent.recent_reasons).toEqual([]);
+    // `b2b: false` must NOT be sent — the mind reads its presence, and an
     // always-present flag would change the prompt of every free-mode call.
     expect("b2b" in sent).toBe(false);
   });
@@ -112,27 +115,25 @@ describe("askMind", () => {
   });
 });
 
-describe("lineDiff", () => {
+describe("diffLines — the shared implementation", () => {
+  const counts = (d: { type: string }[]) => ({
+    added: d.filter((l) => l.type === "add").length,
+    removed: d.filter((l) => l.type === "del").length,
+  });
+
   it("reports the minimal edit, not a smear from the first difference", () => {
-    const before = "a\nb\nc\nd";
-    const after = "a\nB\nc\nd";
-    const diff = lineDiff(before, after);
-    // Only line 2 moved; c and d must stay `same` or the reader cannot see
-    // which layer the mind actually touched.
-    expect(diffCounts(diff)).toEqual({ added: 1, removed: 1 });
-    expect(diff.filter((l) => l.op === "same").map((l) => l.text)).toEqual([
-      "a",
-      "c",
-      "d",
-    ]);
+    const diff = diffLines("a\nb\nc\nd", "a\nB\nc\nd") as { type: string; text: string }[];
+    expect(counts(diff)).toEqual({ added: 1, removed: 1 });
+    expect(diff.filter((l) => l.type === "same").map((l) => l.text)).toEqual(["a", "c", "d"]);
   });
 
   it("says nothing changed when nothing changed", () => {
-    expect(hasChanges(lineDiff("a\nb", "a\nb"))).toBe(false);
+    const diff = diffLines("a\nb", "a\nb") as { type: string }[];
+    expect(diff.every((l) => l.type === "same")).toBe(true);
   });
 
   it("handles a pure insertion and a pure deletion", () => {
-    expect(diffCounts(lineDiff("a", "a\nb"))).toEqual({ added: 1, removed: 0 });
-    expect(diffCounts(lineDiff("a\nb", "a"))).toEqual({ added: 0, removed: 1 });
+    expect(counts(diffLines("a", "a\nb") as { type: string }[])).toEqual({ added: 1, removed: 0 });
+    expect(counts(diffLines("a\nb", "a") as { type: string }[])).toEqual({ added: 0, removed: 1 });
   });
 });

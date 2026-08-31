@@ -18,6 +18,7 @@ import {
   type StageMode,
 } from "@/components/ember/ModeSwitcher";
 import { RUN_PARAM, newRunId, resolveRunId } from "@/lib/algorave-run";
+import { TurnStrip } from "@/components/ember/TurnStrip";
 
 afterEach(() => {
   cleanup();
@@ -127,5 +128,70 @@ describe("run identity (§11.3 seam 5)", () => {
     const before = window.history.length;
     resolveRunId();
     expect(window.history.length).toBe(before);
+  });
+});
+
+describe("TurnStrip — seam 4, mountable over any instrument", () => {
+  it("names who holds the pen and offers to take it back", () => {
+    render(
+      <TurnStrip
+        pen="mind"
+        barsNow={12}
+        phraseBars={8}
+        nextBoundaryBar={16}
+        barsToFlip={null}
+        onTogglePen={() => {}}
+      />,
+    );
+    expect(screen.getByTestId("turn-strip").dataset.pen).toBe("mind");
+    expect(screen.getByTestId("pen-holder").textContent).toBe("Mind");
+    expect(screen.getByTestId("toggle-pen").textContent).toContain("take the pen back");
+    expect(screen.getByTestId("next-boundary").textContent).toContain("bar 16");
+  });
+
+  it("shows the WHY — an idle mind and a busy one are different silences", () => {
+    render(
+      <TurnStrip
+        pen="mind"
+        barsNow={8}
+        phraseBars={8}
+        nextBoundaryBar={16}
+        barsToFlip={null}
+        why="request-in-flight"
+      />,
+    );
+    expect(screen.getByTestId("turn-why").textContent).toBe("request-in-flight");
+  });
+
+  it("hides the flip counter when not alternating, and shows it when it is", () => {
+    const { rerender } = render(
+      <TurnStrip pen="human" barsNow={4} phraseBars={8} nextBoundaryBar={8} barsToFlip={null} />,
+    );
+    expect(screen.queryByTestId("bars-to-flip")).toBeNull();
+    rerender(
+      <TurnStrip pen="human" barsNow={4} phraseBars={8} nextBoundaryBar={8} barsToFlip={12} />,
+    );
+    expect(screen.getByTestId("bars-to-flip").textContent).toContain("12");
+  });
+
+  it("renders from a DECK-shaped prop set — no Strudel anywhere near it", () => {
+    // §11.3 seam 4: a crossfade IS a phrase boundary, so this component must be
+    // mountable over the DJ lane unchanged. Nothing here mentions a buffer, a
+    // pattern or a sound: bars, a pen and a reason are the whole vocabulary.
+    render(
+      <TurnStrip
+        pen="human"
+        barsNow={64}
+        phraseBars={32}
+        nextBoundaryBar={96}
+        barsToFlip={32}
+        working="crossfade into Velvet Corridor"
+        why="between-boundaries"
+      />,
+    );
+    expect(screen.getByTestId("turn-working").textContent).toContain(
+      "crossfade into Velvet Corridor",
+    );
+    expect(screen.getByTestId("pen-holder").textContent).toBe("You");
   });
 });

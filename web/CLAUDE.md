@@ -384,6 +384,39 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   answering and counts. Measured 5.6 s on a warm e4b with a short buffer, so
   treat 20 s as the p50 to pace for, not a constant.
 
+## Turn-taking: the pen, phrases and B2B (§11 S6)
+
+- **The pen module has ONE copy, and it is the spike's.**
+  `scripts/algorave-spike/patterns/pen.js` is imported by the spike's page, the
+  spike's tests AND this app, through `@algorave/pen`. Making that work needed
+  three aligned pieces: a `paths` entry in `tsconfig.json`, `turbopack.root`
+  widened to the repo in `next.config.ts` (Turbopack's default root is
+  `web/frontend`, which would refuse the import), and a matching alias in
+  `vitest.config.ts`. Change one, change all three.
+- **Do not reimplement anything the pen already exports.** S5 shipped its own
+  line diff, its own request builder and its own tie rule before the module was
+  shared — all three already existed there, better documented. That is the
+  duplication seam 2 exists to prevent, and it happened anyway because the app
+  code came first. `diffLines`, `mindRequest`, `autoApplyDecision` and
+  `pushReason` are re-exported from `lib/mind.ts`; reach for those.
+- **`decide` is modulo arithmetic on the absolute bar, deliberately.** A
+  boundary missed because a call was in flight is SKIPPED, never queued — with
+  subtraction it would stay due forever and fire the instant the previous
+  answer landed. Verified live: phrase 2, and the log reads
+  `bar 2 · asking the mind` then `bar 4/6/8 · boundary SKIPPED ·
+  request-in-flight`.
+- **The scheduler's log must report the bar the boundary fired at.** `ask` runs
+  from an interval, so reading `barsNow` out of its closure logged the bar the
+  closure was born on — an off-by-a-few that made the log untrustworthy, which
+  defeats the point of showing the WHY at all. It reads `barsRef` now.
+- **`TurnStrip` takes plain numbers and strings and imports nothing from the
+  algorave** (seam 4). A crossfade IS a phrase boundary, so the same strip is
+  meant to sit over the DJ lane's decks unchanged; a test mounts it with a
+  deck-shaped prop set to keep that true before the DJ lane exists.
+- Layout follows the original playground: **editor left, proposal right**,
+  controls in a rail. Reading a diff means reading it against the code it
+  changes, and stacked panes make that a scroll.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
