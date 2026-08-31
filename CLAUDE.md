@@ -112,23 +112,24 @@ fonts/
 ## Deploy & operations (read before touching prod)
 
 Prod = `docker compose` in the **main checkout**
-(`C:\Users\pablo\Documents\GitHub\apollo-agents`), which sits on a
-`deploy/*` branch (currently `deploy/endless-w4-20260711`) carrying
-main + not-yet-merged live work. The repo is bind-mounted into the
-containers and the backend runs `uvicorn --reload`.
+(`C:\Users\pablo\Documents\GitHub\apollo-agents`), which sits on
+`main` and tracks `origin/main` directly (the `deploy/*` branch era
+ended 2026-08-29). The repo is bind-mounted into the containers and
+the backend runs `uvicorn --reload`.
 
 The only sanctioned path to prod:
 
 1. Feature branch (worktree) → PR → **squash-merge to `main`** with CI
    green (read the FULL failure list; `youtube_chat` fails local-only).
-2. In the main checkout: `git fetch && git merge origin/main` into the
-   deploy branch, resolve, re-run tests there.
+2. In the main checkout: `git fetch && git merge --ff-only origin/main`.
 3. Restart containers if needed (`docker compose restart backend frontend`).
 
 Hard rules:
 
-- **Never deploy from `main` directly** — the deploy branch is the
-  prod truth; skipping it strands its extra commits.
+- **The main checkout stays a pure mirror of `origin/main`** — no local
+  commits, no deploying unmerged work. If `--ff-only` refuses, the
+  checkout has drifted (first check `git branch --show-current` still
+  says `main`); investigate, don't force a merge.
 - **Never merge into the main checkout or restart containers while a
   live session is running** — `--reload` watches `agent/` and `web/`,
   so a merge mid-stream kills the broadcast. Check first:
