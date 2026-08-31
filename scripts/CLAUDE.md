@@ -234,3 +234,39 @@ thing to look at; that skip is not.**
 Node 22 is required — the spike uses `registerHooks`, which Node 18 lacks.
 That is why this is its own CI job rather than a step in the Frontend one,
 which pins Node 20. On jarvis: `. ~/.nvm/nvm.sh && nvm use 22`.
+
+## Two algorave surfaces, and which is which (§11 S9)
+
+**The decision, 2026-08-31: the `:4031` playground STAYS.** It is the rehearsal
+room; `/algorave` in the Apollo app is the room with a door on it.
+
+`/algorave` is now the fuller surface — Ember design inside the suite, the
+palette browser with the bank rule made visible, a read-only `?viewer=1` mirror
+for OBS, and the same pen, phrase scheduler and B2B. But the plan's own rule is
+**do not delete before the replacement is proven in use**, and it has not been:
+nobody has played a real set on it yet.
+
+**Three things the playground has and `/algorave` does not.** Until these land,
+the playground is not redundant, and saying otherwise would be a lie in the
+repo:
+
+1. **Persistence across a reload.** The playground keeps buffer, intent, phrase
+   and b2bBars in `localStorage`, so F5 — or a crash, or someone else driving
+   the tab — does not eat the jam. `/algorave` loses everything.
+2. **`summarizeHumanEdit`.** The playground tells the mind what the human just
+   changed, so the duet is informed. `/algorave` sends the buffer and the
+   intent and nothing about the edit.
+3. **Genre and key.** The playground sets them; `/algorave` sends neither, so
+   the mind falls back to its server defaults (`deep`, and `DEFAULT_KEY`).
+
+**What can still drift, and what cannot.** The two share the things that would
+hurt most: `patterns/pen.js` is imported by both (§11.3 seam 2) and
+`palette.json` is read by both, so the turn-taking rules and the sound
+vocabulary cannot diverge. What CAN drift is each page's own UI and wiring —
+they are separate code, and a fix to one is not a fix to the other. Assume that
+and check both when changing behaviour either shows.
+
+**Before retiring the playground**, all three gaps above must be closed AND a
+real set played on `/algorave`. At that point `serve.mjs`, the vendor mount and
+`patterns/playground.html` go together, in one change, with the spike's tests
+following whatever survives.
