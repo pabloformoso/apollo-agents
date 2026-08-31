@@ -20,6 +20,8 @@ import { Shell } from "@/components/ember/Shell";
 import { Crumb } from "@/components/ember/primitives";
 import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 import { TurnStrip, type PenHolder } from "@/components/ember/TurnStrip";
+import { PaletteBrowser } from "@/components/ember/PaletteBrowser";
+import { insertIntoBuffer, readPalette, type Palette } from "@/lib/palette";
 import { boot, type StrudelModule } from "@/lib/strudel";
 import { resolveRunId } from "@/lib/algorave-run";
 import { MindError, askMind, autoApplyDecision, diffLines, pushReason } from "@/lib/mind";
@@ -81,6 +83,26 @@ export default function AlgoravePage() {
   const [barsNow, setBarsNow] = useState(0);
   const [why, setWhy] = useState<string | null>(null);
   const [log, setLog] = useState<{ bar: number; text: string }[]>([]);
+
+  // --- the palette (S7) -----------------------------------------------------
+  const [palette, setPalette] = useState<Palette | null>(null);
+  const [paletteError, setPaletteError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/algorave/palette")
+      .then(async (r) => {
+        const body = await r.json();
+        if (cancelled) return;
+        if (!r.ok) setPaletteError(body?.error ?? `HTTP ${r.status}`);
+        else setPalette(readPalette(body));
+      })
+      .catch((e) => {
+        if (!cancelled) setPaletteError(String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Refs so the tick reads the CURRENT values, not the ones captured when the
   // interval was created. A stale `pen` here would fire the mind on a boundary
@@ -249,6 +271,21 @@ export default function AlgoravePage() {
     penRef.current = next;
     setPen(next);
   }, []);
+
+  const insertSound = useCallback((line: string) => {
+    setBuffer((b) => insertIntoBuffer(b, line));
+  }, []);
+
+  /**
+   * Hear one sound alone. Only offered while STOPPED: `evaluate` replaces the
+   * running pattern, so an audition mid-set would take the room with it.
+   */
+  const auditionSound = useCallback(
+    (line: string) => {
+      void evaluate(line);
+    },
+    [evaluate],
+  );
 
   const applyProposal = useCallback(() => {
     if (!proposal) return;
@@ -568,6 +605,20 @@ export default function AlgoravePage() {
               <div className="flex-1 min-w-0">{proposalPane}</div>
               {rail}
             </div>
+
+            <section className="border border-line rounded-md bg-surf px-4 py-3">
+              <header className="mb-3">
+                <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+                  Palette — what the mind may write, and so may you
+                </span>
+              </header>
+              <PaletteBrowser
+                palette={palette}
+                error={paletteError}
+                onInsert={insertSound}
+                onAudition={playing ? undefined : auditionSound}
+              />
+            </section>
           </>
         )}
 
