@@ -24,7 +24,14 @@ export interface Palette {
   instruments: string[];
   /** bank name → the drum sounds that bank actually has. */
   banks: Record<string, string[]>;
-  sources?: { json: string; base: string; tag?: string }[];
+  /**
+   * The sample maps the engine must register before ANY of this is playable.
+   * Load only `drum-machines` and every `instruments` entry — the piano and the
+   * nine VCSL sounds of #146/#147 — resolves to nothing, silently: no error,
+   * no sample fetch, no sound. The browser would offer them and they would not
+   * play, which is the worst failure this lane has.
+   */
+  sources: { json: string; base: string; tag?: string }[];
 }
 
 export const CATEGORIES: ReadonlyArray<[PaletteCategory, string, string]> = [
@@ -41,11 +48,22 @@ export function readPalette(raw: unknown): Palette {
   const banksIn = (o.banks ?? {}) as Record<string, unknown>;
   const banks: Record<string, string[]> = {};
   for (const [name, sounds] of Object.entries(banksIn)) banks[name] = list(sounds);
+  const sources = Array.isArray(o.sources)
+    ? (o.sources as Record<string, unknown>[])
+        .filter((s) => typeof s?.json === "string" && typeof s?.base === "string")
+        .map((s) => ({
+          json: String(s.json),
+          base: String(s.base),
+          tag: typeof s.tag === "string" ? s.tag : undefined,
+        }))
+    : [];
+
   return {
     drums: list(o.drums),
     synths: list(o.synths),
     instruments: list(o.instruments),
     banks,
+    sources,
   };
 }
 
@@ -80,18 +98,90 @@ export function insertionFor(
 }
 
 /**
- * Adds a line to a `stack(...)` buffer, or starts one.
+ * Finds the `)` that closes the `stack(` a buffer opens with, or -1.
  *
- * The comma placement is the whole job: the last element of a stack carries no
- * trailing comma, so appending before the closing paren without moving it
- * produces `a\nb)` — a syntax error that only shows up when the buffer is
- * evaluated, which during a set means the pattern stops.
+ * `lastIndexOf(")")` is NOT this, and the difference is a silent musical bug:
+ * the opening buffer ends `).cpm(124/4)`, so the last paren closes `cpm`, and
+ * inserting before it makes the new layer a SECOND ARGUMENT to `cpm` —
+ * perfectly valid JavaScript that plays nothing at all. Found 2026-08-31 by a
+ * piano that registered, never triggered, and therefore never loaded.
+ *
+ * Depth counting, and string-aware: a `")"` inside a mini-notation literal
+ * must not close anything.
+ */
+export function stackCloseIndex(buffer: string): number {
+  const open = buffer.indexOf("stack(");
+  if (open === -1) return -1;
+
+  let depth = 0;
+  let quote: string | null = null;
+  for (let i = open + "stack".length; i < buffer.length; i++) {
+    const ch = buffer[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "(") depth++;
+    else if (ch === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * The stack's TOP-LEVEL arguments — its layers. Used by the tests to assert
+ * that an insertion actually became a layer, rather than merely leaving the
+ * buffer parseable.
+ */
+export function stackLayers(buffer: string): string[] {
+  const open = buffer.indexOf("stack(");
+  const close = stackCloseIndex(buffer);
+  if (open === -1 || close === -1) return [];
+
+  const inner = buffer.slice(open + "stack(".length, close);
+  const out: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let start = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (quote) {
+      if (ch === "\\") i++;
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") quote = ch;
+    else if (ch === "(" || ch === "[" || ch === "{") depth++;
+    else if (ch === ")" || ch === "]" || ch === "}") depth--;
+    else if (ch === "," && depth === 0) {
+      out.push(inner.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  const last = inner.slice(start).trim();
+  if (last) out.push(last);
+  return out.filter((x) => x.length > 0);
+}
+
+/**
+ * Adds a line to a `stack(...)` buffer as a new LAYER, or starts one.
+ *
+ * Two things have to be right, and both bite silently:
+ *   - the paren must be the STACK's, not the last one in the buffer
+ *     (see `stackCloseIndex`);
+ *   - the last existing layer carries no trailing comma, so one has to be
+ *     added or the result is `a\nb)` — a syntax error that only surfaces on
+ *     evaluate, which mid-set is the pattern stopping.
  */
 export function insertIntoBuffer(buffer: string, line: string): string {
   const trimmed = buffer.trimEnd();
-  const close = trimmed.lastIndexOf(")");
+  const close = stackCloseIndex(trimmed);
 
-  if (!trimmed.startsWith("stack(") || close === -1) {
+  if (close === -1) {
     // Not a stack we understand: wrap both, which is always valid.
     return trimmed.length === 0
       ? line
@@ -100,6 +190,6 @@ export function insertIntoBuffer(buffer: string, line: string): string {
 
   const head = trimmed.slice(0, close).trimEnd();
   const tail = trimmed.slice(close);
-  const needsComma = !head.endsWith(",");
+  const needsComma = !head.endsWith(",") && !head.endsWith("stack(");
   return `${head}${needsComma ? "," : ""}\n  ${line}\n${tail}`;
 }

@@ -18,6 +18,7 @@ import {
   insertIntoBuffer,
   insertionFor,
   readPalette,
+  stackLayers,
 } from "@/lib/palette";
 
 const registry = JSON.parse(
@@ -32,6 +33,9 @@ const OPENING = `stack(
   s("bd*4").bank("RolandTR909").gain(0.9),
   s("hh*8").bank("RolandTR909").gain(0.4)
 ).cpm(124/4)`;
+
+/** The opening buffer's own layer count, so insertions are measured against it. */
+const BASE_LAYERS = 2;
 
 /** Parses as JavaScript. It will not RUN outside Strudel, but it must parse. */
 function parses(code: string): boolean {
@@ -93,7 +97,11 @@ describe("the bank rule", () => {
   });
 });
 
-describe("insertion always yields a buffer that parses (AC2)", () => {
+describe("insertion adds a LAYER — parsing was never the real bar (AC2)", () => {
+  // The first version of this asserted only that the result parsed, and it
+  // passed while every insertion was landing as a second argument to
+  // `.cpm(124/4)`: valid JavaScript, no layer, no sound, no error. A criterion
+  // a wrong implementation can satisfy is not a criterion.
   it("for every drum, on every bank that carries it", () => {
     let checked = 0;
     for (const sound of palette.drums) {
@@ -102,6 +110,10 @@ describe("insertion always yields a buffer that parses (AC2)", () => {
         expect(line).not.toBeNull();
         const next = insertIntoBuffer(OPENING, line as string);
         expect(parses(next), `${sound} on ${bank}: ${next}`).toBe(true);
+        // The real assertion: it became a layer of the stack.
+        const layers = stackLayers(next);
+        expect(layers.length, `${sound} on ${bank}`).toBe(BASE_LAYERS + 1);
+        expect(layers[layers.length - 1]).toBe(line);
         checked++;
       }
     }
@@ -115,11 +127,29 @@ describe("insertion always yields a buffer that parses (AC2)", () => {
       const line = insertionFor(category, sound) as string;
       const next = insertIntoBuffer(OPENING, line);
       expect(parses(next), `${sound}: ${next}`).toBe(true);
+      const layers = stackLayers(next);
+      expect(layers.length, sound).toBe(BASE_LAYERS + 1);
+      expect(layers[layers.length - 1]).toBe(line);
     }
   });
 });
 
 describe("insertIntoBuffer", () => {
+  it("closes the STACK, not the last paren in the buffer", () => {
+    // `.cpm(124/4)` trails the stack, so `lastIndexOf(")")` closes cpm. An
+    // insertion there becomes cpm's second argument: valid JS, silent music.
+    const out = insertIntoBuffer(OPENING, 'note("c3").s("piano")');
+    expect(out).toContain(").cpm(124/4)");
+    expect(out).not.toContain("cpm(124/4,");
+    expect(stackLayers(out)).toHaveLength(BASE_LAYERS + 1);
+  });
+
+  it("is not fooled by a paren inside a mini-notation string", () => {
+    const out = insertIntoBuffer('stack(\n  s("bd(3,8)")\n)', 's("cp")');
+    expect(parses(out)).toBe(true);
+    expect(stackLayers(out)).toEqual(['s("bd(3,8)")', 's("cp")']);
+  });
+
   it("puts the comma where the stack needs it", () => {
     // The last element of a stack carries no trailing comma, so appending
     // before the closing paren without moving it gives `a\nb)` — a syntax
