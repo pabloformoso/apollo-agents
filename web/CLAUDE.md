@@ -433,7 +433,19 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## Known issues
 
-- 2 pre-existing eslint errors in `lib/live.ts`
-  (`set-state-in-effect`, refs-during-render) — old debt, not from
-  v3.9; fix in its own change, not as a drive-by.
+- **eslint baseline: 17 errors + 6 warnings across 11 files** (measured
+  2026-08-31 on `main`). The long-standing "2 errors in `lib/live.ts`"
+  note was stale — the debt spread while nothing measured it, because CI
+  does not run `npm run lint`. Treat those numbers as a ceiling: a change
+  may not raise either count in the files it touches. Fixing the existing
+  ones is its own change, not a drive-by.
+- **Every page reaching `useAutoSession` or `useAuthQueryBootstrap` needs
+  its own Suspense boundary.** Both call `useSearchParams()`, which opts
+  the route out of the prerender pass; without a boundary ABOVE the
+  calling component, `next build` fails on that route — and `next dev`
+  never notices. The boundary cannot live inside the hook (a hook cannot
+  wrap its own caller), so the pattern is: rename the page component to
+  `<Name>Inner` and export a default that wraps it in `<Suspense>`. Five
+  pages already do this; CI now runs `npm run build`, so a sixth that
+  forgets fails the PR instead of shipping.
 - `tests/web/test_youtube_chat.py` fails LOCALLY only; passes in CI.

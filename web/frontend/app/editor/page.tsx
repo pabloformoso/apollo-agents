@@ -13,7 +13,7 @@
  *   - LLM command line → SSE ``POST /api/sessions/:id/editor_command``.
  *   - Set-health read from ``session.set_health`` (server-recomputed).
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   DndContext,
@@ -151,7 +151,7 @@ function TrackCard({ track, rowId, index, selected, onSelect, onDelete }: CardPr
   );
 }
 
-export default function EditorPage() {
+function EditorPageInner() {
   const router = useRouter();
   const { user } = useAuth();
   const auto = useAutoSession("playlist");
@@ -603,5 +603,22 @@ export default function EditorPage() {
         defaultGenre={session.genre ?? null}
       />
     </Shell>
+  );
+}
+
+/**
+ * `useSearchParams()` — reached here through `useAutoSession` — opts this route
+ * out of the prerender pass unless a Suspense boundary sits ABOVE the
+ * component that calls it. Without one, `next build` fails on this route
+ * (it cannot live inside the hook: a hook cannot wrap its own caller).
+ *
+ * Any new page reaching for those hooks needs the same wrapper — see
+ * web/CLAUDE.md.
+ */
+export default function EditorPage() {
+  return (
+    <Suspense fallback={null}>
+      <EditorPageInner />
+    </Suspense>
   );
 }

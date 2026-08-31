@@ -161,7 +161,8 @@ Hard rules:
 - Poisoned BPMs in catalog (lofi@150, synthware 176–212) act as
   genre-drift bridges.
 - `tests/web/test_youtube_chat.py` fails locally, passes in CI.
-- 2 pre-existing eslint errors in `web/frontend/lib/live.ts`.
+- eslint baseline in `web/frontend`: 17 errors + 6 warnings across 11
+  files (2026-08-31). CI does not run lint; see `web/CLAUDE.md`.
 
 ## Key constants (top of `main.py`)
 

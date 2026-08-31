@@ -19,7 +19,7 @@
  *   - Cabin + Immersive swap in the production ``<VisualLayer>`` which
  *     reads ``live.audioRef.current.currentTime`` + beatgrid for sync.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { getSession, youtubeOAuthStartUrl } from "@/lib/api";
@@ -78,7 +78,7 @@ function isMode(s: string): s is Mode {
   return s === "audience" || s === "cabin" || s === "immersive";
 }
 
-export default function LivePage() {
+function LivePageInner() {
   const router = useRouter();
   const { user } = useAuth();
   // Hand off an `?auth=<jwt>` token to localStorage before the rest of
@@ -851,5 +851,22 @@ export default function LivePage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * `useSearchParams()` — reached here through `useAuthQueryBootstrap / useAutoSession` — opts this route
+ * out of the prerender pass unless a Suspense boundary sits ABOVE the
+ * component that calls it. Without one, `next build` fails on this route
+ * (it cannot live inside the hook: a hook cannot wrap its own caller).
+ *
+ * Any new page reaching for those hooks needs the same wrapper — see
+ * web/CLAUDE.md.
+ */
+export default function LivePage() {
+  return (
+    <Suspense fallback={null}>
+      <LivePageInner />
+    </Suspense>
   );
 }

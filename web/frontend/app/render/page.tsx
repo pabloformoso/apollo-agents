@@ -21,7 +21,7 @@
  *     disabled with a tooltip and a sibling "Copy description" action
  *     pulls ``youtube.md`` into the clipboard.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getSession, getRenderStatus, startRender } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -59,7 +59,7 @@ function formatTimestamp(ms: number): string {
   return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
 
-export default function RenderPage() {
+function RenderPageInner() {
   const router = useRouter();
   const { user } = useAuth();
   const auto = useAutoSession("playlist");
@@ -479,5 +479,22 @@ export default function RenderPage() {
         </section>
       </div>
     </Shell>
+  );
+}
+
+/**
+ * `useSearchParams()` — reached here through `useAutoSession` — opts this route
+ * out of the prerender pass unless a Suspense boundary sits ABOVE the
+ * component that calls it. Without one, `next build` fails on this route
+ * (it cannot live inside the hook: a hook cannot wrap its own caller).
+ *
+ * Any new page reaching for those hooks needs the same wrapper — see
+ * web/CLAUDE.md.
+ */
+export default function RenderPage() {
+  return (
+    <Suspense fallback={null}>
+      <RenderPageInner />
+    </Suspense>
   );
 }
