@@ -1,24 +1,14 @@
 import type { NextConfig } from "next";
 
-// §11 S3 — one `Pattern` class, or silence.
+// §11 S3 — Strudel is NOT bundled. See web/CLAUDE.md.
 //
-// `@strudel/web`'s `dist/index.mjs` is a self-contained prebuilt bundle: core,
-// mini, tonal and webaudio are compiled INTO it and it imports nothing at
-// runtime. But the package still DECLARES those sub-packages as dependencies,
-// so npm installs them alongside, each with its own separate build. Importing
-// `@strudel/core` directly therefore hands you a DIFFERENT `Pattern` class
-// than the one living inside the bundle — patterns built by one are not
-// recognised by the other, and the failure is silent: no error, no audio.
+// It is copied to public/vendor/strudel/ by scripts/vendor-strudel.mjs and
+// loaded at runtime by URL, because its AudioWorklet asset is resolved with
+// `new URL("assets/...", import.meta.url)` and therefore has to sit next to
+// the module on the server. Bundling it breaks audio silently.
 //
-// `patterns/playground.html` solves this with an import map pointing every
-// `@strudel/*` specifier at the single file. This is the bundler equivalent.
-// The package has no `exports` field, only `main` (CJS) and `module` (ESM),
-// so the alias also pins which of the two builds is used instead of leaving
-// it to bundler heuristics.
-//
-// `/algorave-spike` asserts the invariant at runtime. Do not remove one
-// without the other.
-const STRUDEL_BUNDLE = "@strudel/web/dist/index.mjs";
+// An eslint no-restricted-imports rule stops a static `@strudel/*` import
+// from quietly reintroducing a bundled second copy.
 
 const nextConfig: NextConfig = {
   // E2E runs set NEXT_DIST_DIR=.next-e2e so the mock-mode dev server's lockfile
@@ -30,16 +20,6 @@ const nextConfig: NextConfig = {
   // (HMR WS + RSC payload both rejected) — symptoms: root /  doesn't redirect,
   // controlled inputs don't update state, submit buttons stay disabled.
   allowedDevOrigins: ["127.0.0.1"],
-  turbopack: {
-    resolveAlias: {
-      "@strudel/web": STRUDEL_BUNDLE,
-      "@strudel/core": STRUDEL_BUNDLE,
-      "@strudel/mini": STRUDEL_BUNDLE,
-      "@strudel/tonal": STRUDEL_BUNDLE,
-      "@strudel/webaudio": STRUDEL_BUNDLE,
-      "@strudel/transpiler": STRUDEL_BUNDLE,
-    },
-  },
   async rewrites() {
     return [
       {

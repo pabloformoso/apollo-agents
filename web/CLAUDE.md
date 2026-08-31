@@ -267,32 +267,42 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## Strudel in the app (§11 S3)
 
-- **Every `@strudel/*` specifier is aliased to ONE file**
-  (`@strudel/web/dist/index.mjs`) in `next.config.ts`. This is not
-  belt-and-braces, it is load-bearing, and it was **verified by
-  falsification**: with the alias, `@strudel/web` and `@strudel/core`
-  yield the identical `Pattern` class; without it they yield two
-  different function objects. Patterns built by one are then silently
-  ignored by the other — no error, no audio, just a page that never
-  plays.
-  The trap is that `@strudel/web`'s dist is a **self-contained bundle**
-  (core, mini, tonal, webaudio compiled in, zero runtime imports) while
-  the package still DECLARES those sub-packages as dependencies — so npm
-  installs them alongside with their own separate builds, and reaching
-  for one is a plain import away. `patterns/playground.html` solves the
-  same problem with an import map; the alias is the bundler equivalent.
-- The package has **no `exports` field**, only `main` (CJS `dist/index.js`)
-  and `module` (ESM `dist/index.mjs`) — TypeScript resolves through
-  `main`. That is a second, independent reason the alias names the file
-  explicitly rather than trusting resolution to pick a build.
-- `types/strudel.d.ts` declares only what the app calls; the bundle has
-  1017 exports and typing them is not the job. Everything else stays
-  `unknown` on purpose, so reaching for an untyped export is a compile
-  error rather than a silent `any`.
-- **`/algorave-spike` is the regression guard.** It asserts the identity
-  at runtime in the browser. If it moves or is replaced (S4 folds it into
-  `/algorave`), the assertion moves with it — do not delete one without
-  the other.
+- **Strudel is NOT bundled, and that is load-bearing.** Its dist resolves its
+  own AudioWorklet asset with
+  `new URL("assets/clockworker-<hash>.js", import.meta.url)` — relative to the
+  MODULE's URL — so the bundle and its `assets/` folder have to be neighbours
+  on the server. Bundled, `import.meta.url` becomes a hashed chunk path, the
+  asset 404s, and every AudioWorkletNode construction then throws
+  *"AudioWorklet does not have a valid AudioWorkletGlobalScope"* — once per
+  event, forever, while superdough cheerfully logs `[superdough] ready`.
+  `app/vendor/strudel/[...path]/route.ts` serves the dist from node_modules
+  under a stable prefix (the same mapping `serve.mjs` does), and
+  `lib/strudel.ts` loads it from that URL through a `new Function` import no
+  bundler can see. An eslint `no-restricted-imports` rule makes a static
+  `@strudel/*` import an error, so a bundled second copy cannot creep back.
+- **An alias is NOT enough, and looked like it was.** The first attempt used a
+  Turbopack `resolveAlias` to force one `Pattern` class. The identity assertion
+  went green in a real browser against a production build — and the page was
+  silent. Structural checks pass while audio fails; **the only honest check is
+  playing something and reading the console.**
+- **Sample sources must be registered before anything plays.** `initStrudel`
+  boots the engine but registers no sounds, so `.bank("RolandTR909")` resolves
+  to nothing and every event logs `sound RolandTR909_bd not found!` while the
+  transport runs happily. `lib/strudel.ts`'s `boot()` registers sources first,
+  the way the playground does; a source that fails is reported, not thrown.
+- **`pkill -f "next start"` does not kill a Next server.** It renames itself to
+  `next-server (v16.2.4)`, so the pattern never matches, the port stays taken,
+  every "restart" silently fails to bind, and you keep measuring a build from
+  an hour ago. This cost a wrong conclusion (that `next start` does not serve
+  `public/` — it does). Kill by port or by `next-server`, and check the PID's
+  start time before trusting a measurement. Related: never combine the kill and
+  the relaunch in one shell command — the pattern then matches the command's
+  own argv and it kills itself.
+- **Watch for a startup race.** One run in four logged the AudioWorklet error
+  even with everything served correctly, suggesting `evaluate` can beat the
+  worklet registration; three consecutive clean runs followed. Not diagnosed.
+  If it resurfaces in S4, awaiting worklet readiness before the first evaluate
+  is the place to look.
 
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 

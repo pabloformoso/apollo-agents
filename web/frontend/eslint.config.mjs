@@ -38,6 +38,24 @@ const config = [
           destructuredArrayIgnorePattern: "^_",
         },
       ],
+      // §11 S3 — Strudel must never be bundled. Its dist resolves its own
+      // AudioWorklet asset against `import.meta.url`, so it has to be served
+      // as a file with its `assets/` neighbour intact; a bundled copy 404s
+      // that asset and every AudioWorkletNode then throws, silently, forever.
+      // `lib/strudel.ts` loads it by URL through an import the bundler cannot
+      // see. A static import here would quietly undo that, so it is an error.
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@strudel/*"],
+              message:
+                "Do not import @strudel/* — it must not be bundled. Use lib/strudel.ts, which loads it from /vendor/strudel/. See web/CLAUDE.md.",
+            },
+          ],
+        },
+      ],
     },
   },
 ];
