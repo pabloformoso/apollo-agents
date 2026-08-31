@@ -2,23 +2,22 @@
 /**
  * §11 S3 — the Strudel bundle spike. THROWAWAY.
  *
- * This route exists to answer one question before any design work happens:
- * can a Next route run Strudel with exactly one `Pattern` class, in a
- * production build and not just `next dev`?
+ * Answers one question before any design work: can a Next route run Strudel,
+ * audibly, in a production build?
  *
- * The risk it probes (see the comment in next.config.ts): `@strudel/web`'s
- * dist is a self-contained bundle, but the package declares the sub-packages
- * as dependencies, so they also sit in node_modules with their own builds.
- * Two `Pattern` classes means patterns built by one are not recognised by the
- * other — and that failure is SILENT. No error, no audio. A spinner that
- * never resolves is what you would actually see.
+ * The first attempt looked like a pass — a Turbopack alias gave one `Pattern`
+ * class and the assertion went green — but the page was silent. Two failures
+ * hid behind it, both silent by construction, both listed in lib/strudel.ts:
+ * the AudioWorklet asset 404s when the bundle is bundled, and no sound is
+ * registered unless sample sources are loaded first. Hence the checks below
+ * are FUNCTIONAL: the only honest proof is a console with nothing in it.
  *
- * S4 replaces this page with the real `/algorave`. The identity assertion
- * below should survive that move — it is the regression guard.
+ * S4 folds this into `/algorave`. Keep the checks when it does.
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
+import { boot, STRUDEL_URL, type StrudelModule } from "@/lib/strudel";
 
-type Check = { ok: boolean; detail: string };
+type Phase = "idle" | "booting" | "playing" | "stopped" | "failed";
 
 const PATTERN = `stack(
   s("bd*4").bank("RolandTR909").gain(0.9),
@@ -28,66 +27,35 @@ const PATTERN = `stack(
 ).cpm(124/4)`;
 
 export default function StrudelSpikePage() {
-  const [identity, setIdentity] = useState<Check | null>(null);
-  const [audio, setAudio] = useState<string>("idle");
-  const [playing, setPlaying] = useState(false);
+  const [phase, setPhase] = useState<Phase>("idle");
+  const [detail, setDetail] = useState("not started");
+  const [registered, setRegistered] = useState<string[]>([]);
+  const [engine, setEngine] = useState<StrudelModule | null>(null);
 
-  // The invariant, checked at runtime in the browser that will actually run
-  // it. `@strudel/core` is aliased to the same file as `@strudel/web`, so the
-  // two specifiers must yield the identical class object. Drop the alias from
-  // next.config.ts and this flips to FAIL — that is the point of it.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [web, core] = await Promise.all([
-          import("@strudel/web"),
-          import("@strudel/core"),
-        ]);
-        if (cancelled) return;
-        const a = web.Pattern;
-        const b = core.Pattern;
-        const ok = typeof a === "function" && a === b;
-        setIdentity({
-          ok,
-          detail: ok
-            ? "@strudel/web and @strudel/core resolve to the SAME Pattern class."
-            : `MISMATCH — web:${typeof a} core:${typeof b}. Two Pattern classes: ` +
-              "patterns built by one will be silently ignored by the other.",
-        });
-      } catch (err) {
-        if (!cancelled) {
-          setIdentity({ ok: false, detail: `import failed: ${String(err)}` });
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // initStrudel needs a user gesture — an AudioContext started without one is
-  // created suspended and stays silent.
   const play = useCallback(async () => {
     try {
-      setAudio("loading engine…");
-      const strudel = await import("@strudel/web");
-      await strudel.initStrudel();
-      setAudio("evaluating…");
+      setPhase("booting");
+      setDetail("loading engine from " + STRUDEL_URL + " and registering sounds…");
+      const { strudel, registered: ok, failed } = await boot();
+      setEngine(strudel);
+      setRegistered(ok);
+      if (failed.length) {
+        setDetail(`sources failed: ${failed.map((f) => `${f.tag} (${f.error})`).join(", ")}`);
+      }
       await strudel.evaluate(PATTERN);
-      setPlaying(true);
-      setAudio("playing — you should HEAR a 909 pattern with a supersaw bass");
+      setPhase("playing");
+      setDetail("playing — a 909 kick, clap and hats with a supersaw bass at 124 BPM");
     } catch (err) {
-      setAudio(`FAILED: ${String(err)}`);
+      setPhase("failed");
+      setDetail(String(err));
     }
   }, []);
 
   const stop = useCallback(async () => {
-    const strudel = await import("@strudel/web");
-    strudel.hush();
-    setPlaying(false);
-    setAudio("stopped");
-  }, []);
+    engine?.hush();
+    setPhase("stopped");
+    setDetail("stopped");
+  }, [engine]);
 
   return (
     <main className="min-h-screen bg-ink text-ember-text p-8 font-sans">
@@ -98,33 +66,15 @@ export default function StrudelSpikePage() {
         Strudel in Next
       </h1>
 
-      <section
-        data-testid="identity-check"
-        data-ok={identity ? String(identity.ok) : "pending"}
-        className="border border-line rounded-md bg-surf p-4 mb-4 max-w-3xl"
-      >
-        <p className="font-mono uppercase tracking-mono text-[10.5px] text-faint mb-2">
-          One Pattern class
-        </p>
-        {identity === null ? (
-          <p className="text-mute">checking…</p>
-        ) : (
-          <p className={identity.ok ? "text-ok" : "text-ember"}>
-            {identity.ok ? "PASS — " : "FAIL — "}
-            {identity.detail}
-          </p>
-        )}
-      </section>
-
-      <section className="border border-line rounded-md bg-surf p-4 max-w-3xl">
+      <section className="border border-line rounded-md bg-surf p-4 mb-4 max-w-3xl">
         <p className="font-mono uppercase tracking-mono text-[10.5px] text-faint mb-3">
-          Audio
+          Engine
         </p>
         <div className="flex gap-3 mb-3">
           <button
             type="button"
             onClick={play}
-            disabled={playing}
+            disabled={phase === "booting" || phase === "playing"}
             data-testid="play"
             className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded bg-ember text-ink disabled:opacity-40"
           >
@@ -133,17 +83,34 @@ export default function StrudelSpikePage() {
           <button
             type="button"
             onClick={stop}
-            disabled={!playing}
+            disabled={phase !== "playing"}
             data-testid="stop"
             className="font-mono uppercase tracking-mono text-[10.5px] px-4 py-2 rounded border border-line2 disabled:opacity-40"
           >
             Stop
           </button>
         </div>
-        <p data-testid="audio-status" className="text-mute text-sm">
-          {audio}
+        <p
+          data-testid="status"
+          data-phase={phase}
+          className={phase === "failed" ? "text-ember text-sm" : "text-mute text-sm"}
+        >
+          {detail}
         </p>
-        <pre className="mt-4 text-xs font-mono text-faint overflow-x-auto">{PATTERN}</pre>
+        <p data-testid="registered" className="text-faint text-xs font-mono mt-2">
+          sources registered: {registered.length ? registered.join(", ") : "—"}
+        </p>
+      </section>
+
+      <section className="border border-line rounded-md bg-surf p-4 max-w-3xl">
+        <p className="font-mono uppercase tracking-mono text-[10.5px] text-faint mb-2">
+          Pattern
+        </p>
+        <pre className="text-xs font-mono text-faint overflow-x-auto">{PATTERN}</pre>
+        <p className="text-faint text-xs mt-3">
+          The real check is the browser console: a clean run logs no{" "}
+          <code>getTrigger</code> errors and no AudioWorklet failure.
+        </p>
       </section>
     </main>
   );
