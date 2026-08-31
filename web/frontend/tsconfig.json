@@ -24,6 +24,9 @@
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "@algorave/pen": [
+        "../../scripts/algorave-spike/patterns/pen.js"
       ]
     },
     "target": "ES2017"

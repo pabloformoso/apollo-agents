@@ -1,3 +1,4 @@
+import path from "node:path";
 import type { NextConfig } from "next";
 
 // §11 S3 — Strudel is NOT bundled. See web/CLAUDE.md.
@@ -11,6 +12,11 @@ import type { NextConfig } from "next";
 // from quietly reintroducing a bundled second copy.
 
 const nextConfig: NextConfig = {
+  // §11 S6 — the pen module lives in scripts/algorave-spike and is imported
+  // by BOTH the spike's page and this app (§11.3 seam 2: one copy, never two).
+  // Turbopack's root defaults to this directory, so it has to be widened to
+  // the repo for that import to resolve.
+  turbopack: { root: path.join(__dirname, "..", "..") },
   // E2E runs set NEXT_DIST_DIR=.next-e2e so the mock-mode dev server's lockfile
   // lives in a separate build dir and does not collide with the engineer's
   // running `npm run dev` session (Next 16 refuses two dev servers per project).
