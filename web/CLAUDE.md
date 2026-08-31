@@ -417,6 +417,33 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   controls in a rail. Reading a diff means reading it against the code it
   changes, and stacked panes make that a scroll.
 
+## The palette browser (§11 S7)
+
+- **The registry is read, never copied.** `/api/algorave/palette` reads
+  `scripts/algorave-spike/palette.json` from disk at request time, so adding a
+  sound shows up without a rebuild and without a frontend change. That file is
+  the one vocabulary the validator, `strudel_mind` and the pages share (§10);
+  a second list in TS is exactly the drift the root CLAUDE.md warns about.
+- **The browser exists to make the bank rule VISIBLE**, not merely enforced.
+  Drums are offered only on a bank that actually carries them — the
+  (sound, bank) matrix is data, and a pair outside it plays SILENCE live, which
+  is the worst kind of wrong because it looks like it worked. Synths and
+  sampled instruments are written with no bank at all, and `insertionFor` does
+  not accept one for them, so the UI has no path to that mistake.
+- **`insertIntoBuffer` is about the comma.** The last element of a `stack(...)`
+  carries no trailing comma, so appending before the closing paren without
+  moving it yields `a\nb)` — a syntax error that surfaces only on evaluate,
+  which mid-set means the pattern stops. Every sound in the registry is
+  inserted and parsed in a test for that reason.
+- **Audition is off while a set is running.** `evaluate` replaces the running
+  pattern, so a preview would take the room with it. The browser says so rather
+  than offering a button that would cost a performance.
+- **Known registry wart: `fx` is a drum no bank carries.** It is therefore in
+  the mind's palette and unusable by it — the validator rejects whichever bank
+  is tried. Pinned by a test so a NEW orphan fails; removing it is a registry
+  decision, not a frontend one. The browser already renders it permanently
+  disabled with "<bank> does not carry fx".
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
