@@ -56,12 +56,22 @@ export type ShellProps = {
   /** When true, clamp the layout to exactly one viewport (no page scroll).
    * Used by the dashboard/login splash screens. */
   fitViewport?: boolean;
+  /** Force the nav away for a full-bleed surface. `/live` hides it by route
+   * because it is always broadcasting; `/algorave` hides it only in its
+   * immersive mode, which the route alone cannot know (§11 S4). */
+  hideNav?: boolean;
 };
 
-export function Shell({ children, sessionLabel, username, fitViewport }: ShellProps) {
+export function Shell({
+  children,
+  sessionLabel,
+  username,
+  fitViewport,
+  hideNav: hideNavProp,
+}: ShellProps) {
   const pathname = usePathname();
   const route = routeIdForPath(pathname);
-  const hideNav = route === "live";
+  const hideNav = hideNavProp ?? route === "live";
 
   return (
     <div

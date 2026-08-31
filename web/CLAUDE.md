@@ -323,6 +323,33 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   race that a secure context still suffers, the other is the browser
   withholding the API entirely.
 
+## The algorave route (§11 S4)
+
+- **`/live` and `/algorave` render the SAME mode switcher** —
+  `components/ember/ModeSwitcher` — with the same hash sync. This is seam 3 of
+  §11.3, and the extraction happened in the same PR that created the second
+  consumer so the duplication never existed. If a third performance surface
+  appears, it uses this too; do not copy the markup.
+- **`cabin` is not renamed.** It is what the code has always called the Booth,
+  and every URL hash, bookmark and OBS Browser Source carries it. The label is
+  "Booth"; the id is `cabin`, and a tidier identifier is not worth breaking
+  those for.
+- **`Shell` takes an optional `hideNav`.** `/live` hides the nav by route
+  because it is always broadcasting; `/algorave` hides it only in immersive
+  mode, which the route alone cannot know.
+- **A rave run gets an id from day one** (`lib/algorave-run.ts`, seam 5),
+  minted in the browser and carried in `?run=`. Nothing server-side consumes
+  it yet — the point is that the surface already addresses itself by id, so
+  S5's mind calls and any later server session adopt it without changing how
+  the page is reached, and the fusion of §11.1 stays a composition rather than
+  a data migration. It is minted **in the click handler, not an effect**:
+  that avoids a hydration mismatch, avoids `set-state-in-effect`, and adds no
+  second consumer of `useSearchParams` — the hook whose prerender bailout was
+  S1. `crypto.randomUUID` is unavailable outside a secure context, so it
+  degrades to a readable random string rather than throwing.
+- The buffer is a plain `<textarea>` on purpose: no editor library gets to own
+  Ctrl/Cmd+Enter before S5 decides what the pen needs.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from

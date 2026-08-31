@@ -119,6 +119,18 @@ export default function DashboardPage() {
               Browse catalog
             </Btn>
           </div>
+          {/* §11 S4 — the way into the live-coding surface. A peer
+              destination to a DJ session, not a step inside one: the two
+              performances do not mix (§11.2), they just share a house. */}
+          <div className="mt-4">
+            <Btn
+              kind="ghost"
+              data-testid="algorave-entry"
+              onClick={() => router.push("/algorave")}
+            >
+              Algorave — live coding <Arrow />
+            </Btn>
+          </div>
           {!loading && sessionCount > 0 && (
             <div className="mt-6">
               <Crumb>
