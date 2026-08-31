@@ -265,6 +265,35 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   whenever the endless queue is dry) and the second is gated by LLM
   latency, so both drift by a minute or more.
 
+## Strudel in the app (§11 S3)
+
+- **Every `@strudel/*` specifier is aliased to ONE file**
+  (`@strudel/web/dist/index.mjs`) in `next.config.ts`. This is not
+  belt-and-braces, it is load-bearing, and it was **verified by
+  falsification**: with the alias, `@strudel/web` and `@strudel/core`
+  yield the identical `Pattern` class; without it they yield two
+  different function objects. Patterns built by one are then silently
+  ignored by the other — no error, no audio, just a page that never
+  plays.
+  The trap is that `@strudel/web`'s dist is a **self-contained bundle**
+  (core, mini, tonal, webaudio compiled in, zero runtime imports) while
+  the package still DECLARES those sub-packages as dependencies — so npm
+  installs them alongside with their own separate builds, and reaching
+  for one is a plain import away. `patterns/playground.html` solves the
+  same problem with an import map; the alias is the bundler equivalent.
+- The package has **no `exports` field**, only `main` (CJS `dist/index.js`)
+  and `module` (ESM `dist/index.mjs`) — TypeScript resolves through
+  `main`. That is a second, independent reason the alias names the file
+  explicitly rather than trusting resolution to pick a build.
+- `types/strudel.d.ts` declares only what the app calls; the bundle has
+  1017 exports and typing them is not the job. Everything else stays
+  `unknown` on purpose, so reaching for an untyped export is a compile
+  error rather than a silent `any`.
+- **`/algorave-spike` is the regression guard.** It asserts the identity
+  at runtime in the browser. If it moves or is replaced (S4 folds it into
+  `/algorave`), the assertion moves with it — do not delete one without
+  the other.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
