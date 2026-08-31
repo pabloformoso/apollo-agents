@@ -31,14 +31,16 @@ export default function StrudelSpikePage() {
   const [detail, setDetail] = useState("not started");
   const [registered, setRegistered] = useState<string[]>([]);
   const [engine, setEngine] = useState<StrudelModule | null>(null);
+  const [insecure, setInsecure] = useState(false);
 
   const play = useCallback(async () => {
     try {
       setPhase("booting");
       setDetail("loading engine from " + STRUDEL_URL + " and registering sounds…");
-      const { strudel, registered: ok, failed } = await boot();
+      const { strudel, secureContext, registered: ok, failed } = await boot();
       setEngine(strudel);
       setRegistered(ok);
+      setInsecure(!secureContext);
       if (failed.length) {
         setDetail(`sources failed: ${failed.map((f) => `${f.tag} (${f.error})`).join(", ")}`);
       }
@@ -65,6 +67,24 @@ export default function StrudelSpikePage() {
       <h1 className="font-display italic text-4xl tracking-display-tight mt-1 mb-6">
         Strudel in Next
       </h1>
+
+      {insecure && (
+        <section
+          data-testid="insecure-warning"
+          className="border border-line2 border-l-2 border-l-warn rounded-md bg-surf p-4 mb-4 max-w-3xl"
+        >
+          <p className="font-mono uppercase tracking-mono text-[10.5px] text-warn mb-2">
+            Non-secure origin
+          </p>
+          <p className="text-mute text-sm">
+            This page is not a secure context, so the browser exposes no{" "}
+            <code>AudioWorklet</code> at all. Samples still play; every
+            worklet-backed sound — supersaw, the effects chain — throws once per
+            event. Reach it over HTTPS, or through{" "}
+            <code>localhost</code>/<code>127.0.0.1</code> (an SSH tunnel counts).
+          </p>
+        </section>
+      )}
 
       <section className="border border-line rounded-md bg-surf p-4 mb-4 max-w-3xl">
         <p className="font-mono uppercase tracking-mono text-[10.5px] text-faint mb-3">
