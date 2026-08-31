@@ -203,3 +203,34 @@
 Convention: scripts are operator-facing and safe to run against the
 main checkout; none of them mutate `tracks/` or `output/` without
 saying so in their `--help`.
+
+## The algorave spike's test suite (§11 S2)
+
+`scripts/algorave-spike` carries the validator, the pen, B2B and the palette
+rules — the vocabulary §11 S5–S7 move into the web app. **It now runs in CI**
+as the `Algorave spike (Node 22)` job. Until 2026-08-31 it ran nowhere but a
+developer's shell, which is how #147 came to discover 28 validator tests that
+a fresh install had silently stopped executing.
+
+Locally: `npm ci && npx vitest run` from `scripts/algorave-spike`.
+
+Expected, measured 2026-08-31:
+
+| | |
+|---|---|
+| `test/validate.test.mjs` | 37 |
+| `test/pen.test.mjs` | 40 |
+| `test/b2b.test.mjs` | 29 |
+| `test/pattern.test.mjs` | 18 |
+| `test/serve.test.mjs` | 5 |
+| `test/wav.test.mjs` | 7, **all skipped** |
+| **total** | **129 passing**, 7 skipped, ~5.5 s |
+
+`wav.test.mjs` skipping in full is CORRECT, not a failure: it is
+`describe.skipIf(!present)` over `output/algorave/deephouse-30s.wav`, a
+rendered artifact CI has no reason to produce. **A drop in the 129 is the
+thing to look at; that skip is not.**
+
+Node 22 is required — the spike uses `registerHooks`, which Node 18 lacks.
+That is why this is its own CI job rather than a step in the Frontend one,
+which pins Node 20. On jarvis: `. ~/.nvm/nvm.sh && nvm use 22`.
