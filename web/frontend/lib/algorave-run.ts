@@ -30,6 +30,16 @@ export function newRunId(): string {
 export const RUN_PARAM = "run";
 
 /**
+ * Reads `?run=` WITHOUT minting one. The viewer must use this: minting would
+ * give the OBS tab an id nobody publishes under, so it would wait forever on a
+ * run that does not exist.
+ */
+export function readRunId(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URL(window.location.href).searchParams.get(RUN_PARAM);
+}
+
+/**
  * Reads `?run=` or mints one, without adding a history entry — arriving at the
  * page is one navigation, not two.
  */
@@ -42,4 +52,56 @@ export function resolveRunId(): string {
   url.searchParams.set(RUN_PARAM, id);
   window.history.replaceState(null, "", url.toString());
   return id;
+}
+
+// ---------------------------------------------------------------------------
+// §11 S8 — publishing a run so the OBS tab can mirror it
+// ---------------------------------------------------------------------------
+
+/** What the operator publishes and the viewer renders. */
+export interface RunSnapshot {
+  buffer: string;
+  pen: "human" | "mind";
+  barsNow: number;
+  phraseBars: number;
+  reason: string;
+}
+
+/**
+ * The ONE place the run endpoint is named — the same rule `lib/mind.ts`
+ * follows for the mind. If this ever moves behind the FastAPI backend, it is a
+ * change here and nowhere else.
+ */
+const runEndpoint = (id: string) =>
+  `/api/algorave/run?id=${encodeURIComponent(id)}`;
+
+/**
+ * Publish the current state. Failure is deliberately silent: the operator is
+ * performing, and a mirror that cannot be reached must never interrupt what
+ * the room is hearing.
+ */
+export async function publishRun(id: string, snapshot: RunSnapshot): Promise<void> {
+  try {
+    await fetch(runEndpoint(id), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(snapshot),
+    });
+  } catch {
+    // Intentionally ignored — see above.
+  }
+}
+
+/** Read a run. `null` means nobody has published under this id yet. */
+export async function fetchRun(id: string): Promise<RunSnapshot | null> {
+  const res = await fetch(runEndpoint(id), { cache: "no-store" });
+  const body = await res.json();
+  if (!res.ok || body?.waiting) return null;
+  return {
+    buffer: String(body.buffer ?? ""),
+    pen: body.pen === "mind" ? "mind" : "human",
+    barsNow: Number(body.barsNow ?? 0),
+    phraseBars: Number(body.phraseBars ?? 8),
+    reason: String(body.reason ?? ""),
+  };
 }

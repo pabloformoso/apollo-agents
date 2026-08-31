@@ -23,7 +23,14 @@ import { TurnStrip, type PenHolder } from "@/components/ember/TurnStrip";
 import { PaletteBrowser } from "@/components/ember/PaletteBrowser";
 import { insertIntoBuffer, readPalette, type Palette } from "@/lib/palette";
 import { boot, type StrudelModule } from "@/lib/strudel";
-import { resolveRunId } from "@/lib/algorave-run";
+import {
+  fetchRun,
+  publishRun,
+  readRunId,
+  resolveRunId,
+  type RunSnapshot,
+} from "@/lib/algorave-run";
+import { useViewerFlag, viewerUrlFor } from "@/lib/viewer";
 import { MindError, askMind, autoApplyDecision, diffLines, pushReason } from "@/lib/mind";
 import {
   b2bDecide,
@@ -83,6 +90,51 @@ export default function AlgoravePage() {
   const [barsNow, setBarsNow] = useState(0);
   const [why, setWhy] = useState<string | null>(null);
   const [log, setLog] = useState<{ bar: number; text: string }[]>([]);
+
+  // --- viewer mode (S8) -----------------------------------------------------
+  // Three-state: nothing may attach until the URL has been read. See
+  // lib/viewer.ts for why treating "not yet known" as "operator" is the bug.
+  const { isViewer, resolved: viewerResolved } = useViewerFlag();
+  const [mirror, setMirror] = useState<RunSnapshot | null>(null);
+
+  // The viewer reads the run the operator publishes under. It must NOT mint an
+  // id: it would then wait forever on a run nobody writes to.
+  useEffect(() => {
+    if (!isViewer) return;
+    const id = readRunId();
+    if (!id) return;
+    // Deliberately NOT put in state: the viewer only needs it to poll, and a
+    // synchronous setState here is a cascading render for nothing.
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const snap = await fetchRun(id);
+        if (!cancelled) setMirror(snap);
+      } catch {
+        // A mirror that cannot reach the server shows the last frame it had
+        // rather than an error: OBS is on screen.
+      }
+    };
+    void poll();
+    const t = setInterval(poll, 500);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [isViewer]);
+
+  // The operator publishes. Never in viewer mode — a mirror writing back would
+  // overwrite the performance with its own stale frame.
+  useEffect(() => {
+    if (!viewerResolved || isViewer || !runId) return;
+    void publishRun(runId, {
+      buffer,
+      pen,
+      barsNow,
+      phraseBars,
+      reason: proposal?.reason ?? "",
+    });
+  }, [viewerResolved, isViewer, runId, buffer, pen, barsNow, phraseBars, proposal]);
 
   // --- the palette (S7) -----------------------------------------------------
   const [palette, setPalette] = useState<Palette | null>(null);
@@ -535,6 +587,44 @@ export default function AlgoravePage() {
     </section>
   );
 
+  // The viewer renders NOTHING interactive and boots NO engine: OBS captures
+  // video, the audio comes from the operator's desktop, and a second engine
+  // would double every sound. §11.2: it broadcasts, it does not converse — no
+  // chat here either.
+  if (isViewer) {
+    return (
+      <main
+        data-testid="viewer"
+        className="min-h-screen bg-ink text-ember-text font-sans p-8 flex flex-col gap-5"
+      >
+        <div className="flex items-baseline gap-4">
+          <span className="font-display italic text-2xl tracking-display-snug">
+            {mirror?.pen === "mind" ? "Mind" : "You"}
+          </span>
+          <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+            holds the pen
+          </span>
+          {mirror && (
+            <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+              bar {mirror.barsNow} · phrase {mirror.phraseBars}
+            </span>
+          )}
+        </div>
+
+        {mirror?.reason && (
+          <p className="font-display italic text-mute text-lg">{mirror.reason}</p>
+        )}
+
+        <pre
+          data-testid="viewer-code"
+          className="font-mono text-ember-text text-lg leading-relaxed whitespace-pre-wrap break-words"
+        >
+          {mirror?.buffer ?? "waiting for the set to start…"}
+        </pre>
+      </main>
+    );
+  }
+
   return (
     <Shell sessionLabel="algorave" hideNav={mode === "immersive"}>
       <div
@@ -551,7 +641,22 @@ export default function AlgoravePage() {
               run {runId ?? "—"} · {bpm} BPM
             </Crumb>
           </div>
-          <ModeSwitcher mode={mode} onChange={setMode} />
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              data-testid="copy-obs"
+              onClick={() => {
+                const url = viewerUrlFor(window.location.href);
+                void navigator.clipboard?.writeText(url);
+                setDetail(`OBS feed URL copied — ${url}`);
+              }}
+              title="Copies the read-only URL for an OBS Browser Source. Both tabs can stay open."
+              className="font-mono uppercase tracking-mono text-[10.5px] px-3 py-1.5 rounded border border-line2 text-mute hover:text-ember cursor-pointer"
+            >
+              copy OBS feed
+            </button>
+            <ModeSwitcher mode={mode} onChange={setMode} />
+          </div>
         </div>
 
         {insecure && (

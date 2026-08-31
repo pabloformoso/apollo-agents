@@ -444,6 +444,33 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   decision, not a frontend one. The browser already renders it permanently
   disabled with "<bank> does not carry fx".
 
+## The OBS view (§11 S8)
+
+- **`afterFiles` rewrites beat DYNAMIC routes, not static ones.** `next.config`
+  rewrites `/api/:path*` to the FastAPI backend, and a `rewrites()` returning an
+  array is `afterFiles` — checked AFTER static filesystem routes but BEFORE
+  dynamic ones. So `/api/algorave/mind` wins and `/api/algorave/run/[id]` loses:
+  every call silently became a proxy attempt to :4020 and came back
+  `ECONNREFUSED`, with nothing in the route handler to debug because it never
+  ran. The run id is a **query param** for that reason. Any new algorave
+  endpoint must keep its segment static.
+- **The viewer gate is three-state and shared** (`lib/viewer.ts`, seam 3). The
+  v3.6.2 lesson it carries is worth restating: a `?viewer=1` page that treats
+  "not yet resolved" as "operator" attaches to the PRIMARY endpoint, displaces
+  the operator and kills the session on teardown — an OBS Browser Source that
+  silently ends the set it is mirroring. Gate every attach on `resolved`.
+- **The mirror goes through the server because it has to.** OBS's Browser
+  Source is a separate browser, so `BroadcastChannel` and `localStorage` cannot
+  reach it. `/api/algorave/run?id=` is an in-memory store keyed by the run id
+  from seam 5 — a run is a performance, not a record, so nothing is persisted
+  and a restart costs a reload. If it ever needs to survive one or span
+  processes, it belongs behind FastAPI, and only `lib/algorave-run.ts` knows the
+  endpoint, so that is a one-file move.
+- **The viewer boots no engine.** OBS captures video; the audio comes from the
+  operator's desktop. A second engine would double every sound.
+- **A failed publish is swallowed on purpose.** The operator is performing, and
+  a mirror that cannot be reached must never interrupt what the room hears.
+
 ## Frontend playback substrate (v3.4+, `lib/audio_buffer_decks.ts` + `lib/live.ts`)
 
 - **A `playback_pos` ping's `track_id` and `currentTime` must come from
