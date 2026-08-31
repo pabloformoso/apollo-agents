@@ -60,6 +60,15 @@ jobs:
         working-directory: web/frontend
         run: npm test
 
+      # The production build is a separate failure mode from the unit tests:
+      # `next build` prerenders every route, and a client-only hook such as
+      # useSearchParams() without a Suspense boundary fails there and ONLY
+      # there — `next dev` never notices. This step exists because that break
+      # shipped to main undetected.
+      - name: Build
+        working-directory: web/frontend
+        run: npm run build
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest

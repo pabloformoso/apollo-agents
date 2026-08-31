@@ -20,7 +20,7 @@
  *     Ignore fires ``POST .../notes/:id/ignore`` (no agent, just sets
  *     the note's status). Both are optimistic with rollback on failure.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { applyNote, getSession, ignoreNote } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -55,7 +55,7 @@ function energyFor(t: Track): number {
  *  instead of the final UI. */
 const STREAMING_PHASES = new Set(["init", "genre", "planning", "checkpoint1"]);
 
-export default function CuratePage() {
+function CuratePageInner() {
   const router = useRouter();
   const { user } = useAuth();
   const auto = useAutoSession("playlist");
@@ -698,5 +698,22 @@ export default function CuratePage() {
         </aside>
       </div>
     </Shell>
+  );
+}
+
+/**
+ * `useSearchParams()` — reached here through `useAutoSession` — opts this route
+ * out of the prerender pass unless a Suspense boundary sits ABOVE the
+ * component that calls it. Without one, `next build` fails on this route
+ * (it cannot live inside the hook: a hook cannot wrap its own caller).
+ *
+ * Any new page reaching for those hooks needs the same wrapper — see
+ * web/CLAUDE.md.
+ */
+export default function CuratePage() {
+  return (
+    <Suspense fallback={null}>
+      <CuratePageInner />
+    </Suspense>
   );
 }

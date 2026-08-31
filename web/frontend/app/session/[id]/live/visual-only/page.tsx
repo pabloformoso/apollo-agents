@@ -16,7 +16,7 @@
  * touching this file.  That's the whole point of the OBS-friendly split.
  */
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
 import VisualLayer from "@/components/VisualLayer";
@@ -24,7 +24,7 @@ import { useAuth } from "@/lib/auth";
 import { useAuthQueryBootstrap } from "@/lib/auth-bootstrap";
 import { useLiveSession } from "@/lib/live";
 
-export default function VisualOnlyPage() {
+function VisualOnlyPageInner() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
   const sessionId = params?.id ?? null;
@@ -82,5 +82,22 @@ export default function VisualOnlyPage() {
         </div>
       ) : null}
     </main>
+  );
+}
+
+/**
+ * `useSearchParams()` — reached here through `useAuthQueryBootstrap` — opts this route
+ * out of the prerender pass unless a Suspense boundary sits ABOVE the
+ * component that calls it. Without one, `next build` fails on this route
+ * (it cannot live inside the hook: a hook cannot wrap its own caller).
+ *
+ * Any new page reaching for those hooks needs the same wrapper — see
+ * web/CLAUDE.md.
+ */
+export default function VisualOnlyPage() {
+  return (
+    <Suspense fallback={null}>
+      <VisualOnlyPageInner />
+    </Suspense>
   );
 }
