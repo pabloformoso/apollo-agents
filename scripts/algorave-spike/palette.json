@@ -93,7 +93,24 @@
     "bottle",
     "metal",
     "industrial",
-    "dist"
+    "dist",
+    "auto",
+    "bass1",
+    "bass2",
+    "bubble",
+    "casio",
+    "click",
+    "dr2",
+    "dr55",
+    "east",
+    "incoming",
+    "insect",
+    "invaders",
+    "mute",
+    "pluck",
+    "rave2",
+    "sax",
+    "sundance"
   ],
   "roles": {
     "bass": {
@@ -274,13 +291,18 @@
         "bass3",
         "sitar",
         "fm",
-        "sequential"
+        "sequential",
+        "bass1",
+        "mute",
+        "pluck"
       ],
       "roles": {
         "bass": {
           "voices": [
             "sawtooth",
-            "jvbass"
+            "jvbass",
+            "bass1",
+            "pluck"
           ],
           "octaves": [
             1,
@@ -291,7 +313,8 @@
           "voices": [
             "triangle",
             "piano",
-            "stab"
+            "stab",
+            "mute"
           ],
           "octaves": [
             3,
