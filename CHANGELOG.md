@@ -5,6 +5,76 @@ All notable changes to ApolloAgents are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project loosely follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0] — 2026-09-01
+
+Apollo stops being one product with a spike beside it. The algorave lane —
+until now a standalone page on its own port — becomes a performance surface
+**inside** the app, sharing its design, its stage and its OBS view. That is the
+reason this is a major and not a 3.12: what Apollo *is* changed, not how much
+of it there is.
+
+> **A note on the numbering.** This changelog stopped at 3.0.0 (2026-05-17) and
+> git tags stopped earlier still, at v2.7.1, while the code's own comments ran
+> on to v3.11. The 3.x work is documented in those comments and in
+> `web/CLAUDE.md`, not here. Rather than invent entries nobody wrote at the
+> time, this picks up at 4.0.0 and says so.
+
+### Added — the algorave inside Apollo (§11, PRs [#150](https://github.com/pabloformoso/apollo-agents/pull/150)–[#160](https://github.com/pabloformoso/apollo-agents/pull/160))
+
+- **`/algorave`**, a live-coding route in the Ember UI, modelled on `/live`:
+  three modes switched in place, synced to the URL hash, sharing the *same*
+  switcher component as the DJ lane.
+- **The mind, through one door.** An intent goes out, a proposal comes back as
+  a diff, the human accepts or discards it. The browser cannot reach the mind
+  directly — an HTTPS page cannot fetch a plain-HTTP service — so it is proxied
+  server-side, which deleted the CORS problem rather than managing it.
+- **The pen, phrase scheduling and B2B**, imported from the module the spike
+  already owned rather than reimplemented. A boundary missed because a call was
+  in flight is skipped, never queued. **On a tie, the human wins.**
+- **The palette browser**, which exists to make the bank rule *visible*: drums
+  require a bank, synths have none, and a sampled instrument carrying one plays
+  silence.
+- **A read-only view for OBS** (`?viewer=1`), mirroring the run through the
+  server because a Browser Source is a separate browser.
+
+### Added — the instrument grew
+
+- **The TidalCycles Dirt-Samples library**, 218 folders and 2038 samples,
+  registered as data. 52 folders curated into the palette across three passes,
+  the last of them triaged by twelve agents working from filename evidence.
+  Sampled instruments went from 9 to **61**.
+- **MIDI out** — `.midi("port")` on any layer, written against the app's single
+  Strudel bundle rather than installed, because the packaged version would have
+  brought a second `Pattern` class.
+- **Autocomplete** that knows the rules: sounds from the live registry, and
+  inside `.bank("` only the banks that actually carry the sound named.
+- **Live validation** using the *same validator the LLM is held to*, so both
+  players are judged by one rule. Invalid and out-of-key are different colours:
+  one will not play, the other will play and clash.
+- **Persistence across a reload** — but never the pen and never the B2B mode: a
+  freshly loaded page must not start asking an LLM for mutations by itself.
+- **Human edits become state.** Each evaluate is diffed against the last and
+  told to the mind as `human: ±N lines`, so a duet partner is not writing blind.
+
+### Fixed
+
+- **`next build` was broken on `main`** and CI never noticed, because the
+  Frontend job ran `npm test` and nothing else. Five pages needed a Suspense
+  boundary; the fix ships with a `Build` step so it cannot regress silently.
+- **The algorave spike's 129 tests ran nowhere.** They now run in CI — the
+  validator, the pen and B2B are exactly the code the app came to depend on.
+- **The piano never sounded.** Only one of three sample sources was registered,
+  and every palette insertion landed as an argument to `.cpm()` instead of a
+  stack layer — valid JavaScript, no layer, no sound, no error.
+- **58 of 61 instruments were written as pitched**; only three are. The sample
+  map already said which is which and nobody had asked it.
+
+### Changed
+
+- The `:4031` playground **stays**, as the rehearsal room. All three feature
+  gaps against it are now closed, but the rule was never about features: a real
+  set has not been played on `/algorave` yet.
+
 ## [3.0.0] — 2026-05-17
 
 Precision beat matching, end to end. Crossfades are no longer a

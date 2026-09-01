@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Algorave → Apollo · tablero</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300..700;1,9..40,400&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0a0807; --surf:#13100e; --surf2:#1c1814;
+    --line:rgba(255,238,220,.10); --line2:rgba(255,238,220,.20);
+    --fg:#fbf3e6; --mute:rgba(251,243,230,.62); --faint:rgba(251,243,230,.36);
+    --ember:#e8553a; --ember-dark:#b53d24; --cream:#f0e3c8;
+    --warn:#f0b15a; --ok:#9bbf7a;
+    --display:"Instrument Serif",Georgia,serif;
+    --sans:"DM Sans",system-ui,sans-serif;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--fg);font-family:var(--sans);font-size:15px;line-height:1.55;overflow-x:hidden}
+  .wrap{max-width:1180px;margin:0 auto;padding:40px 24px 80px}
+  h1{font-family:var(--display);font-style:italic;font-weight:400;font-size:clamp(30px,5vw,46px);letter-spacing:-.035em;margin:0 0 6px}
+  h2{font-family:var(--display);font-style:italic;font-weight:400;font-size:24px;letter-spacing:-.02em;margin:40px 0 14px}
+  .lbl{font-family:var(--mono);text-transform:uppercase;letter-spacing:.18em;font-size:10.5px;color:var(--faint)}
+  .sub{color:var(--mute);max-width:70ch;margin:0 0 4px}
+  a{color:var(--ember)}
+  header .lbl{margin-bottom:14px}
+  .banner{border:1px solid var(--line2);border-left:3px solid var(--warn);background:var(--surf);padding:13px 16px;border-radius:5px;margin:22px 0 8px;color:var(--mute);font-size:14px}
+  .banner b{color:var(--warn);font-family:var(--mono);text-transform:uppercase;letter-spacing:.14em;font-size:10.5px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:20px 0 6px;align-items:center}
+  .pill{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.16em;padding:3px 9px;border-radius:999px;border:1px solid var(--line2);color:var(--mute);white-space:nowrap}
+  .pill.todo{border-color:var(--line2)}
+  .pill.doing{border-color:var(--ember);color:var(--ember)}
+  .pill.review{border-color:var(--warn);color:var(--warn)}
+  .pill.done{border-color:var(--ok);color:var(--ok)}
+  .pill.block{border-color:var(--ember-dark);color:var(--ember-dark)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(330px,1fr));gap:14px;margin-top:18px}
+  .card{background:var(--surf);border:1px solid var(--line);border-radius:7px;padding:16px 17px;display:flex;flex-direction:column;gap:9px}
+  .card.chain{border-left:3px solid var(--ember-dark)}
+  .card h3{margin:0;font-family:var(--display);font-style:italic;font-weight:400;font-size:20px;letter-spacing:-.02em}
+  .card .id{font-family:var(--mono);font-size:11px;letter-spacing:.16em;color:var(--ember)}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .why{color:var(--mute);font-size:13.5px;margin:0}
+  .meta{display:flex;gap:14px;flex-wrap:wrap;font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--faint);text-transform:uppercase}
+  .meta b{color:var(--mute);font-weight:500}
+  details{border-top:1px solid var(--line);padding-top:9px;margin-top:2px}
+  details summary{cursor:pointer;font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.16em;color:var(--faint);list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details summary::before{content:"▸ ";color:var(--ember)}
+  details[open] summary::before{content:"▾ "}
+  details ul{margin:10px 0 4px;padding-left:17px;color:var(--mute);font-size:13.5px}
+  details li{margin-bottom:5px}
+  .stop{border-left:2px solid var(--warn);padding-left:11px;color:var(--warn);font-size:13px;margin:9px 0 2px}
+  .btn{font-family:var(--mono);font-size:10.5px;text-transform:uppercase;letter-spacing:.14em;padding:7px 12px;border-radius:4px;border:1px solid var(--line2);background:none;color:var(--fg);cursor:pointer;transition:.15s}
+  .btn:hover{border-color:var(--ember);color:var(--ember)}
+  .btn.copied{border-color:var(--ok);color:var(--ok)}
+  .dod{background:var(--surf);border:1px solid var(--line);border-radius:7px;padding:18px 20px}
+  .dod ol{margin:10px 0 0;padding-left:20px;color:var(--mute);font-size:14px}
+  .dod li{margin-bottom:7px}
+  code{font-family:var(--mono);font-size:.88em;color:var(--cream);background:var(--surf2);padding:1px 5px;border-radius:3px}
+  footer{margin-top:56px;padding-top:20px;border-top:1px solid var(--line);color:var(--faint);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="lbl">ApolloAgents · §11 · plan de ejecución</div>
+  <h1>Traer el algorave dentro de Apollo</h1>
+  <p class="sub">Nueve slices de ciclo diario. Cada uno una rama, un PR, un squash a <code>main</code>.</p>
+</header>
+
+<div class="banner">
+  <b>Snapshot</b> — Este HTML es una <em>vista</em>. La verdad son las issues de GitHub
+  etiquetadas <code>algorave-apollo</code>. Si el tablero y las issues discrepan, ganan las issues.
+  Estado global: <strong>BORRADOR, sin luz verde</strong> — nada empezado.
+</div>
+
+<div class="legend">
+  <span class="lbl">Estados</span>
+  <span class="pill todo">Todo</span>
+  <span class="pill doing">En curso</span>
+  <span class="pill review">En revisión</span>
+  <span class="pill done">Hecho</span>
+  <span class="pill block">Bloqueado</span>
+  <span class="lbl" style="margin-left:8px">· borde rojo = cadena dura S1→S3</span>
+</div>
+
+<h2>Los slices</h2>
+<div class="grid" id="grid"></div>
+
+<h2>Definición de hecho (compartida)</h2>
+<div class="dod">
+  <p class="sub" style="margin-top:0">Aplica a <strong>todos</strong> los slices. No se repite en cada uno.</p>
+  <ol>
+    <li>Los cuatro checks de CI en verde — Backend 3.12, Backend 3.13, Frontend Node 20, E2E Playwright. Leer la lista COMPLETA de fallos; <code>test_youtube_chat.py</code> falla solo en local.</li>
+    <li>Comportamiento nuevo cubierto por tests al nivel que le toca.</li>
+    <li>Sin errores de lint nuevos. La base en <code>main</code> son 17 errores + 6 warnings en 11 ficheros; un slice no puede subir ninguna de las dos cifras.</li>
+    <li><code>npx next build</code> pasa. Desde S1, lo vigila CI.</li>
+    <li>El <code>CLAUDE.md</code> más cercano actualizado si el slice decide algo o descubre una trampa.</li>
+    <li>El cuerpo del PR dice qué se verificó y qué NO. "Sin verificar en navegador real" es aceptable; omitirlo en silencio no.</li>
+    <li>Squash-merge, rama borrada, tablero actualizado.</li>
+  </ol>
+</div>
+
+<footer>
+  Spec: <code>docs/algorave-livecoding-plan.md</code> §11 · Plan: <code>docs/algorave-apollo-plan.md</code><br>
+  Una costura cerrada es un slice fallido, aunque pasen sus criterios. Ver §11.3.
+</footer>
+</div>
+
+<script>
+const SEAMS = {
+  1:"Un solo sitio que sepa dónde está la mente — cliente único, nunca un fetch inline.",
+  2:"El pen como módulo portable, no mueble de página. togglePen/decide/WHY/regla del empate no pueden soldarse a un componente React.",
+  3:"El switcher de modos y la puerta de viewer, compartidos entre /live y /algorave. Nunca dos copias.",
+  4:"La tira de turnos como componente propio: un crossfade ES una frontera de frase.",
+  5:"Decidir pronto la identidad de sesión — /live se direcciona como /api/sessions/{id}/…, una tirada de rave hoy no tiene id.",
+  6:"No clavar un segundo AudioContext."
+};
+
+const SLICES = [
+  { id:"S1", name:"Desatascar next build", status:"todo", chain:true, deps:"—",
+    why:"/algorave heredará la rotura en cuanto exista, y CI no construye, que es por lo que nadie lo vio.",
+    reqs:["npx next build pasa en main","Las cinco páginas afectadas se comportan igual","CI falla si la build vuelve a romperse","Sin cambios de URL, query ni auth"],
+    acs:["next build sale 0 desde un npm ci limpio","npm test pasa sin editar specs","Revertir el arreglo hace fallar el nuevo paso de CI — demostrarlo en el PR","E2E pasa; ?viewer=1 y ?token= siguen bien"],
+    out:"Arreglar los 17 errores de lint. Cualquier cambio visual.", seams:[] },
+
+  { id:"S2", name:"Los tests del spike en CI", status:"todo", chain:false, deps:"— (independiente)",
+    why:"El spike lleva validador, pen, B2B y reglas de paleta — justo lo que S5–S7 mueven — y NADA de eso corre en CI. #147 tuvo que rescatar 28 tests que un install limpio dejó de ejecutar en silencio.",
+    reqs:["La suite vitest del spike corre en cada PR","Un test roto rompe la build","Sin pasos manuales desde checkout limpio","Node 22 (el spike necesita registerHooks; el 18 no vale)"],
+    acs:["CI muestra los seis ficheros con recuento > 0","Una aserción rota a propósito tumba el PR","El CI no crece más de ~2 minutos"],
+    out:"Añadir tests nuevos. Refactorizar los existentes.", seams:[] },
+
+  { id:"S3", name:"Spike del bundle de Strudel", status:"todo", chain:true, deps:"S1",
+    why:"La decisión sobre la que descansa el resto. Bajo un bundler, @strudel/core y @strudel/web pueden resolver a copias distintas: dos clases Pattern y el fallo es SILENCIOSO — ni error ni audio.",
+    stop:"Condición de parada: si no se puede garantizar una sola clase Pattern con un mecanismo que estemos dispuestos a mantener, PARAR y reabrir la decisión de ruta antes de gastar diseño. Informar de que no se puede hacer con seguridad es un resultado exitoso de este slice.",
+    reqs:["Una ruta Next evalúa un patrón y suena","Existe exactamente una clase Pattern, demostrable","El mecanismo sobrevive a una build de producción, no solo a next dev","El mecanismo queda escrito con sus trade-offs"],
+    acs:["Se oye audio en next dev Y en next build && next start — decir si lo verificó un humano en navegador real o no","La aserción de clase duplicada pasa, y falla si se importa una segunda copia a propósito","Recomendación escrita: mecanismo, coste, qué lo rompe"],
+    out:"Estilo Ember. La mente. El pen. Nada de §11.2.", seams:[] },
+
+  { id:"S4", name:"Esqueleto /algorave + entrada en /dashboard", status:"todo", chain:false, deps:"S1, S3",
+    why:"La ruta y su canvas, modelado sobre /live: tres modos conmutados en sitio y sincronizados al hash.",
+    reqs:["/algorave dentro del Shell de Ember","Botón en /dashboard","Buffer editable, hot-swap al evaluar","Mismo componente de modos que usa /live, extraído en este slice","Solo tokens Ember; el teal/rosa del spike no viaja"],
+    acs:["Un clic desde /dashboard llega; el hash sigue al modo; recargar lo restaura","Editar y evaluar cambia lo que suena sin corte de audio","/live renderiza idéntico tras la extracción — lo prueba el E2E existente sin tocar","Ningún color hardcodeado fuera de los tokens"],
+    out:"La mente, el pen, la paleta, la vista de OBS.", seams:[3,5] },
+
+  { id:"S5", name:"Cablear la mente", status:"todo", chain:false, deps:"S4",
+    why:"El entregable real no es el diff: es que TODO acceso a la mente pase por un único módulo cliente.",
+    reqs:["Pide mutación y la muestra como diff con Aplicar/descartar","Todo acceso por un solo módulo cliente; ni un fetch inline","Dirección configurable, no hardcodeada","Los ~20 s son un estado diseñado, no un spinner","Regla del empate: auto-apply solo si el buffer es byte-idéntico"],
+    acs:["Una mutación va y vuelve contra la mente real de jarvis","Grepear la llamada a la mente devuelve exactamente un fichero","Editar mientras piensa deja vivo el texto humano — con test unitario","Un rechazo CORS da error legible, no un no-op silencioso"],
+    out:"Planificación por frontera de frase y B2B (eso es S6).", seams:[1] },
+
+  { id:"S6", name:"La tira de turnos", status:"todo", chain:false, deps:"S5",
+    why:"Lo más reutilizable del rave: un crossfade ES una frontera de frase, así que este componente es lo que el lane DJ toma prestado después.",
+    reqs:["Muestra pluma, compases a frontera, compases a relevo B2B y en qué anda la mente","Componente autónomo, sin imports específicos del algorave","La lógica del pen se importa del módulo portable, no se reimplementa","El WHY es visible, no solo logueado"],
+    acs:["El módulo del pen tiene exactamente una copia en el repo — demostrar por grep","Los tests de pen y b2b pasan sin modificar tras la mudanza","Los contadores aguantan un cambio de modo y un cambio de visibilidad","La tira renderiza con props de decks en un test — probando la reutilización sin que exista el lane DJ"],
+    out:"Enchufarla en /live. Eso es la fusión, y es después.", seams:[2,4] },
+
+  { id:"S7", name:"Navegador de paleta", status:"todo", chain:false, deps:"S4",
+    why:"La regla del banco tiene que verse, no solo aplicarse.",
+    reqs:["Las tres categorías de palette.json","La regla del banco visible en UI","Audición al clic","Insertar sin producir Strudel inválido","Lee el palette.json vivo; sin segunda copia de la lista"],
+    acs:["Toda entrada de palette.json es alcanzable; el recuento cuadra con el fichero","Insertar cualquier sonido da un buffer que parsea — test que los inserta todos","Un instrumento sampleado nunca se inserta con .bank()","Añadir un sonido al JSON lo hace aparecer sin tocar frontend"],
+    out:"Editar la paleta desde la UI.", seams:[] },
+
+  { id:"S8", name:"Vista read-only para OBS", status:"todo", chain:false, deps:"S4",
+    why:"El equivalente de ?viewer=1, reusando la misma puerta que /live.",
+    reqs:["Quita todo cromo de operador","Usa la misma puerta de viewer que /live, no una copia","Pestaña de operador y de OBS a la vez","Sin chat de YouTube (§11.2 — después, no nunca)"],
+    acs:["La URL read-only no renderiza ningún control de operador — aserción que los enumera, no a ojo","Dos pestañas abiertas mostrando el mismo patrón","Verificado en un Browser Source real de OBS, o registrado explícitamente como no verificado"],
+    out:"Infraestructura de streaming, escenas, overlays.", seams:[3] },
+
+  { id:"S9", name:"Destino del playground de :4031", status:"todo", chain:false, deps:"S4–S8 usables",
+    why:"Que ninguna de las dos superficies se pudra en silencio.",
+    reqs:["Decisión registrada en scripts/CLAUDE.md: sala de ensayo o redirección","Si se queda: para qué sirve y qué puede derivar","Si se retira: serve.mjs, el bundle vendor y playground.html tratados explícitamente"],
+    acs:["Hay una frase en el repo que dice cuál es cuál, y es verdad"],
+    out:"Borrar nada antes de que el reemplazo esté probado en uso.", seams:[] }
+];
+
+function brief(s){
+  const seamTxt = s.seams.length
+    ? "\n\nCOSTURAS QUE ESTE SLICE DEBE DEJAR ABIERTAS (§11.3) — obligatorias:\n" +
+      s.seams.map(n => "  " + n + ". " + SEAMS[n]).join("\n")
+    : "\n\nEste slice no toca ninguna costura de §11.3 directamente.";
+  return [
+    "SLICE " + s.id + " — " + s.name,
+    "",
+    "Lee antes docs/algorave-livecoding-plan.md §11 (spec) y docs/algorave-apollo-plan.md (contrato).",
+    "",
+    "POR QUÉ AHORA: " + s.why,
+    (s.stop ? "\n" + s.stop.toUpperCase() : ""),
+    seamTxt,
+    "",
+    "REQUISITOS:",
+    ...s.reqs.map((r,i) => "  R" + (i+1) + ". " + r),
+    "",
+    "CRITERIOS DE ACEPTACIÓN:",
+    ...s.acs.map((a,i) => "  AC" + (i+1) + ". " + a),
+    "",
+    "FUERA DE ALCANCE: " + s.out,
+    "",
+    "DEPENDE DE: " + s.deps,
+    "",
+    "REGLA DEL BANCO (siempre): los sonidos de batería REQUIEREN banco; los instrumentos sampleados NO pueden llevarlo — un .bank() sobre ellos es silencio.",
+    "",
+    "DEFINICIÓN DE HECHO: los cuatro checks de CI en verde (leer la lista COMPLETA; test_youtube_chat.py falla solo en local); comportamiento nuevo cubierto por tests; sin errores de lint nuevos (base: 17 errores + 6 warnings en 11 ficheros, no subirla); npx next build pasa; el CLAUDE.md más cercano actualizado si decides algo o encuentras una trampa; el cuerpo del PR dice qué verificaste y qué NO.",
+    "",
+    "NO cierres una costura para simplificarte el slice. Levántala."
+  ].filter(Boolean).join("\n");
+}
+
+const grid = document.getElementById("grid");
+SLICES.forEach(s => {
+  const el = document.createElement("div");
+  el.className = "card" + (s.chain ? " chain" : "");
+  const seamLine = s.seams.length ? '<span><b>costuras</b> ' + s.seams.join(", ") + '</span>' : "";
+  el.innerHTML =
+    '<div class="row"><span class="id">' + s.id + '</span><span class="pill ' + s.status + '">' + s.status + '</span></div>' +
+    '<h3>' + s.name + '</h3>' +
+    '<p class="why">' + s.why + '</p>' +
+    (s.stop ? '<p class="stop">' + s.stop + '</p>' : '') +
+    '<div class="meta"><span><b>depende</b> ' + s.deps + '</span>' + seamLine + '</div>' +
+    '<details><summary>Requisitos y criterios</summary><ul>' +
+      s.reqs.map((r,i) => '<li><b>R' + (i+1) + '.</b> ' + r + '</li>').join("") +
+    '</ul><ul>' +
+      s.acs.map((a,i) => '<li><b>AC' + (i+1) + '.</b> ' + a + '</li>').join("") +
+    '</ul><p class="why" style="font-size:13px"><b>Fuera de alcance:</b> ' + s.out + '</p></details>' +
+    '<div><button class="btn" type="button">Copiar brief</button></div>';
+  const btn = el.querySelector("button");
+  btn.addEventListener("click", async () => {
+    const text = brief(s);
+    try { await navigator.clipboard.writeText(text); }
+    catch { const t=document.createElement("textarea"); t.value=text; document.body.appendChild(t); t.select(); try{document.execCommand("copy");}catch(e){} t.remove(); }
+    btn.textContent = "Copiado ✓"; btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = "Copiar brief"; btn.classList.remove("copied"); }, 1800);
+  });
+  grid.appendChild(el);
+});
+</script>
+</body>
+</html>
