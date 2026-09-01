@@ -29,6 +29,15 @@ const registry = JSON.parse(
 );
 const palette = readPalette(registry);
 
+/**
+ * The pitched index the ROUTE derives, rebuilt here from the same rule so the
+ * tests exercise real data: a map entry that is an OBJECT is keyed by note name
+ * (chromatic), a flat ARRAY is walked with `.n(i)`.
+ */
+const dirtMap = JSON.parse(
+  readFileSync(join(__dirname, "..", "fixtures", "dirt-shapes.json"), "utf8"),
+) as Record<string, boolean>;
+
 const OPENING = `stack(
   s("bd*4").bank("RolandTR909").gain(0.9),
   s("hh*8").bank("RolandTR909").gain(0.4)
@@ -100,6 +109,45 @@ describe("the registry is reachable and whole", () => {
     // permanently disabled with "<bank> does not carry <sound>".
     const orphans = palette.drums.filter((d) => banksFor(palette, d).length === 0);
     expect(orphans).toEqual(["fx"]);
+  });
+});
+
+describe("chromatic vs one-shot — the rule the registry does not record", () => {
+  it("writes note() for a map keyed by note name", () => {
+    // piano.json is {"piano": {"A0": ..., "C1": ...}} — addressable by pitch.
+    expect(insertionFor("instruments", "piano", undefined, { piano: true })).toContain(
+      'note("c3 eb3 g3")',
+    );
+  });
+
+  it("writes .n() for a flat list of files", () => {
+    // gretsch is a 24-file array. `note()` over it picks ONE sample and
+    // transposes it — for a drum kit, one hit at three pitches instead of the
+    // kit. It plays, which is why it went unnoticed for a day.
+    const line = insertionFor("instruments", "gretsch", undefined, { gretsch: false });
+    expect(line).toContain('.n(');
+    expect(line).not.toContain("note(");
+  });
+
+  it("falls back to .n() when the map could not be read", () => {
+    // The cheaper mistake: `.n()` on a chromatic map still plays its samples,
+    // while note() on a one-shot silently transposes it.
+    expect(insertionFor("instruments", "whatever", undefined, {})).toContain(".n(");
+  });
+
+  it("keeps synths pitched — they have no sample map at all", () => {
+    expect(insertionFor("synths", "supersaw", undefined, {})).toContain("note(");
+  });
+
+  it("agrees with the real sample maps, including conga", () => {
+    // conga is a 34-file ARRAY despite being a named instrument — it was
+    // written as pitched from the day it was added until 2026-09-01.
+    expect(dirtMap.conga).toBe(false);
+    expect(dirtMap.piano).toBe(true);
+    for (const [sound, pitched] of Object.entries(dirtMap)) {
+      const line = insertionFor("instruments", sound, undefined, dirtMap) as string;
+      expect(line.includes("note("), sound).toBe(pitched);
+    }
   });
 });
 

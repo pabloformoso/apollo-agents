@@ -86,6 +86,16 @@ export function PaletteBrowser({
         >
           {hint}
         </span>
+        {category === "instruments" && (
+          // The second rule of this category, and it is invisible in the
+          // registry: a map keyed by note name is chromatic and takes
+          // `note(...)`, a flat list is walked with `.n(i)`. Writing the wrong
+          // one plays — it just transposes a one-shot — so it has to be shown.
+          <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+            <span className="text-ok">▲</span> chromatic · note() ·{" "}
+            <span className="text-mute">■</span> one-shots · .n()
+          </span>
+        )}
         <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
           {sounds.length} sounds
         </span>
@@ -121,7 +131,7 @@ export function PaletteBrowser({
           // (sound, bank) matrix is data, and a pair outside it is not a sound.
           const carried =
             category !== "drums" || (bank !== null && banksFor(palette, sound).includes(bank));
-          const line = insertionFor(category, sound, bank ?? undefined);
+          const line = insertionFor(category, sound, bank ?? undefined, palette.pitched);
           const usable = carried && line !== null;
 
           return (
@@ -146,6 +156,17 @@ export function PaletteBrowser({
                     : "border border-line text-faint/50 cursor-not-allowed border-l-line")
                 }
               >
+                {category === "instruments" && (
+                  <span
+                    data-pitched={String(palette.pitched[sound] === true)}
+                    className={
+                      "mr-1 " +
+                      (palette.pitched[sound] === true ? "text-ok" : "text-mute")
+                    }
+                  >
+                    {palette.pitched[sound] === true ? "▲" : "■"}
+                  </span>
+                )}
                 {sound}
               </button>
               {usable && onAudition && (

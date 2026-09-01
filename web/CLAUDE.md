@@ -451,6 +451,29 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   decision, not a frontend one. The browser already renders it permanently
   disabled with "<bank> does not carry fx".
 
+## Chromatic or one-shot — the rule the registry does not record (2026-09-01)
+
+- **58 of 61 sampled instruments were being written with `note()`, and only 3
+  should be.** A sampled instrument is addressed one of two ways and the SAMPLE
+  MAP decides: an entry that is an OBJECT is keyed by note name and chromatic
+  (`piano`, `balafon`, `fmpiano` — that is the whole list), while a flat ARRAY
+  is a set of one-shots walked with `.n(i)`. `palette.json` records neither.
+- **`note()` over a one-shot set is not an error and makes no noise.** It picks
+  one sample and transposes it — for a drum kit, one hit at three pitches
+  instead of the kit. That is why it survived: it plays. `conga` had been
+  written this way since the day it was added.
+- **Derived, not curated.** `/api/algorave/palette` fetches each source's map
+  (cached per process) and returns `pitched: Record<string, boolean>`. Curating
+  it by hand would be a second copy of something the data already states, and
+  it would go stale the next time a source is added.
+- **Unknown falls back to `.n()`**, deliberately: `.n()` on a chromatic map
+  still plays its samples, while `note()` on a one-shot silently transposes.
+  When the CDN cannot be reached, take the cheaper mistake.
+- The prompt now states the RULE rather than listing examples by hand — a hand
+  list was already stale at 61 sounds.
+- `__tests__/fixtures/dirt-shapes.json` is generated from the real maps, so the
+  test asserts against the library rather than against anyone's belief about it.
+
 ## Two silent bugs the palette browser hid (2026-08-31)
 
 Both shipped green and neither raised anything. Worth knowing the shapes.
