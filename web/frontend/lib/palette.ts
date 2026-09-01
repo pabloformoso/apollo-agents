@@ -32,6 +32,12 @@ export interface Palette {
    * play, which is the worst failure this lane has.
    */
   sources: { json: string; base: string; tag?: string }[];
+  /**
+   * sound → true when its map is keyed by NOTE NAME and it is therefore
+   * chromatic. A sound absent from this map is one whose sample map could not
+   * be read; the caller must not guess and falls back to the safer form.
+   */
+  pitched: Record<string, boolean>;
 }
 
 export const CATEGORIES: ReadonlyArray<[PaletteCategory, string, string]> = [
@@ -58,12 +64,19 @@ export function readPalette(raw: unknown): Palette {
         }))
     : [];
 
+  const pitchedIn = (o.pitched ?? {}) as Record<string, unknown>;
+  const pitched: Record<string, boolean> = {};
+  for (const [name, v] of Object.entries(pitchedIn)) {
+    if (typeof v === "boolean") pitched[name] = v;
+  }
+
   return {
     drums: list(o.drums),
     synths: list(o.synths),
     instruments: list(o.instruments),
     banks,
     sources,
+    pitched,
   };
 }
 
@@ -86,15 +99,33 @@ export function insertionFor(
   category: PaletteCategory,
   sound: string,
   bank?: string,
+  pitched?: Record<string, boolean>,
 ): string | null {
   if (category === "drums") {
     if (!bank) return null;
     return `s("${sound}*4").bank("${bank}")`;
   }
-  // Both oscillators and sampled instruments are pitched, and neither may
-  // carry a bank. Same line for both, which is the point: the difference is
-  // where the sound comes from, not how it is written.
-  return `note("c3 eb3 g3").s("${sound}")`;
+
+  // Oscillators have no sample map at all; they are pitched by definition.
+  if (category === "synths") return `note("c3 eb3 g3").s("${sound}")`;
+
+  // A sampled instrument is written one of two ways, and the map decides:
+  //
+  //   object keyed by note (piano, balafon)  ->  note("c3 eb3 g3").s(...)
+  //   flat array of files (gretsch, conga)   ->  s("...*4").n("<0 3 5>")
+  //
+  // Writing `note()` over a flat array is not an error and makes no noise —
+  // it picks one sample and transposes it. For a drum kit that means playing
+  // a single hit at three pitches instead of walking the kit, which is why
+  // this went unnoticed: it plays, it is just wrong.
+  //
+  // Unknown (map unreadable) falls back to the indexed form: `.n()` on a
+  // chromatic map still plays its samples, while `note()` on an indexed one
+  // silently transposes a one-shot. The cheaper mistake wins.
+  const isPitched = pitched?.[sound] === true;
+  return isPitched
+    ? `note("c3 eb3 g3").s("${sound}")`
+    : `s("${sound}*4").n("<0 3 5>")`;
 }
 
 /**
