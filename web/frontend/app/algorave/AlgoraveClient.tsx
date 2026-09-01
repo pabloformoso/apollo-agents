@@ -35,7 +35,7 @@ import {
   type RunSnapshot,
 } from "@/lib/algorave-run";
 import { useViewerFlag, viewerUrlFor } from "@/lib/viewer";
-import { MindError, askMind, autoApplyDecision, diffLines, pushReason } from "@/lib/mind";
+import { MindError, askMind, autoApplyDecision, diffLines, pushReason, summarizeHumanEdit } from "@/lib/mind";
 import {
   b2bDecide,
   barsElapsed,
@@ -258,6 +258,13 @@ export function AlgoraveClient() {
   // The bar the tick last computed. `ask` runs from an interval, so reading
   // `barsNow` out of its closure logged the bar the closure was BORN on, not
   // the one the boundary fired at — a log you cannot trust is worse than none.
+  /**
+   * The last text that was EVALUATED, which is what a human edit is diffed
+   * against (§9.1). It moves on EVERY evaluate, the mind's own included —
+   * without that, handing the pen back would report the mind's last mutation
+   * as if a human had made it.
+   */
+  const lastEvaluated = useRef<string | null>(null);
   const barsRef = useRef(0);
   const bufferRef = useRef(buffer);
   // Mirrored in an effect, not during render: the scheduler's interval reads
@@ -301,7 +308,33 @@ export function AlgoraveClient() {
           else if (failed.length)
             setDetail(`sound sources failed: ${failed.map((f) => f.tag).join(", ")}`);
         }
+        // A backgrounded tab or a sleeping device SUSPENDS the AudioContext;
+        // evaluate then schedules onto a stopped clock and the page reads
+        // "playing" in total silence (the playground's first real practice,
+        // 2026-08-30). Every evaluate here is gesture-driven, so resuming is
+        // always allowed.
+        const ctx = engine.current.getAudioContext?.();
+        if (ctx && ctx.state === "suspended") {
+          await ctx.resume();
+          note(barsRef.current, "audio context was suspended — resumed");
+        }
+
         await engine.current.evaluate(code);
+
+        // §9.1: while the HUMAN holds the pen, every evaluate of a changed
+        // buffer becomes a `human: …` entry in the recent-reasons ring —
+        // diffed, never typed. Nobody live-coding narrates their own edits
+        // into a text box mid-phrase, and without this the mind is told the
+        // buffer changed but never what the human did to it.
+        if (penRef.current !== "mind" && lastEvaluated.current !== null) {
+          const summary = summarizeHumanEdit(lastEvaluated.current, code) as string | null;
+          if (summary) {
+            setReasons((r) => pushReason(r, summary) as string[]);
+            note(barsRef.current, `${summary} — the mind will be told`);
+          }
+        }
+        lastEvaluated.current = code;
+
         if (startedAt.current === null) startedAt.current = Date.now();
         setPhase("playing");
         setDetail(`playing · run ${id}`);
@@ -310,7 +343,7 @@ export function AlgoraveClient() {
         setDetail(String(err));
       }
     },
-    [runId],
+    [runId, note],
   );
 
   const stop = useCallback(() => {
