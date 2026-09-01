@@ -21,6 +21,7 @@ import { Crumb } from "@/components/ember/primitives";
 import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 import { TurnStrip, type PenHolder } from "@/components/ember/TurnStrip";
 import { PaletteBrowser } from "@/components/ember/PaletteBrowser";
+import { CodeEditor } from "@/components/ember/CodeEditor";
 import { insertIntoBuffer, readPalette, type Palette } from "@/lib/palette";
 import { enableMidi, type MidiPort } from "@/lib/strudel-midi";
 import { boot, type StrudelModule } from "@/lib/strudel";
@@ -389,16 +390,6 @@ export default function AlgoravePage() {
     setProposal(null);
     void evaluate(proposal.code);
   }, [proposal, evaluate]);
-
-  const onKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        void evaluate(buffer);
-      }
-    },
-    [buffer, evaluate],
-  );
 
   const playing = phase === "playing";
   const tie = proposal
@@ -784,16 +775,15 @@ export default function AlgoravePage() {
                     Editor — the code the room hears
                   </span>
                   <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
-                    ⌘/Ctrl+Enter evaluates
+                    ⌘/Ctrl+Enter evaluates · ⌃Space completes
                   </span>
                 </header>
-                <textarea
-                  data-testid="buffer"
+                <CodeEditor
                   value={buffer}
-                  onChange={(e) => setBuffer(e.target.value)}
-                  onKeyDown={onKeyDown}
-                  spellCheck={false}
-                  className="flex-1 min-h-[380px] bg-transparent p-4 font-mono text-sm text-ember-text outline-none resize-none"
+                  onChange={setBuffer}
+                  onEvaluate={() => void evaluate(bufferRef.current)}
+                  palette={palette}
+                  className="flex-1 min-h-[380px] overflow-auto px-2"
                 />
                 <footer className="px-4 py-2 border-t border-line">
                   <span

@@ -451,6 +451,39 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   decision, not a frontend one. The browser already renders it permanently
   disabled with "<bank> does not carry fx".
 
+## The editor and its autocomplete
+
+- **Plain `@codemirror/*`, never `@strudel/codemirror`** — that package depends
+  on `@strudel/core` and would bring a second `Pattern` class, the silent
+  failure lib/strudel.ts documents. Our completions have to know the bank rule,
+  the chromatic/one-shot rule and the live palette anyway; a generic Strudel
+  mode knows none of them.
+- **The rules live in `lib/completions.ts` as pure functions**, and CodeMirror
+  is a thin layer over them. What is worth getting right is WHICH suggestions
+  are legal at a point, and that is testable without a DOM.
+- **`.bank("` is the whole point of the feature.** The validator has always
+  rejected a bank that does not carry its sound, the browser shows the rule and
+  the prompt explains it — and a wrong pair still plays SILENCE rather than
+  failing. Completion is the first place the wrong bank is simply not offered:
+  carriers rank first, non-carriers are labelled "does NOT carry X — silence",
+  and a sound that takes no bank at all (a synth, a sampled instrument) offers
+  an EMPTY list rather than a plausible mistake.
+- Suggestions are built from the live registry, never a list in the file. A
+  sound added to `palette.json` is completable with no frontend change, exactly
+  as it is browsable without one. The one hand-written list is the METHOD names
+  — those are Strudel's own vocabulary, not our data, and they are kept in step
+  with the idiom paragraph in `strudel_mind.py` so the mind and the human are
+  offered the same words.
+- **The editor is controlled but CodeMirror owns the document.** The `value`
+  prop is pushed in only when it differs from what the view holds, or every
+  keystroke fights a re-render and the cursor jumps. That matters more here
+  than usual: the mind rewrites this buffer while a human may be typing in it.
+- The extensions are built ONCE; callbacks and the palette are read through
+  refs. Rebuilding on a palette load would throw away the cursor mid-set.
+- **`data-testid="buffer"` is now the CodeMirror container, not a textarea.**
+  Playwright's `fill()` / `inputValue()` no longer apply — drive `.cm-content`
+  with `keyboard.type`, or read the doc through the view.
+
 ## Chromatic or one-shot — the rule the registry does not record (2026-09-01)
 
 - **58 of 61 sampled instruments were being written with `note()`, and only 3
