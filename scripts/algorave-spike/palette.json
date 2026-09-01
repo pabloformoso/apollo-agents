@@ -72,7 +72,28 @@
     "tabla",
     "amencutup",
     "clubkick",
-    "realclaps"
+    "realclaps",
+    "gretsch",
+    "bassdm",
+    "drumtraks",
+    "linnhats",
+    "hardkick",
+    "tabla2",
+    "hand",
+    "jungbass",
+    "bass3",
+    "sitar",
+    "sid",
+    "fm",
+    "bleep",
+    "sequential",
+    "breaks125",
+    "jungle",
+    "birds3",
+    "bottle",
+    "metal",
+    "industrial",
+    "dist"
   ],
   "roles": {
     "bass": {
@@ -243,7 +264,17 @@
         "pad",
         "tabla",
         "clubkick",
-        "realclaps"
+        "realclaps",
+        "gretsch",
+        "bassdm",
+        "drumtraks",
+        "linnhats",
+        "hand",
+        "jungbass",
+        "bass3",
+        "sitar",
+        "fm",
+        "sequential"
       ],
       "roles": {
         "bass": {
