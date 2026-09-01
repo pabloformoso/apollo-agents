@@ -595,3 +595,147 @@ playable whether or not the mind may reach for them.
 `sax` is the weakest entry: its case rests on the folder name, since
 `notes121a.wav` says nothing. Kept deliberately, and the first to drop if the
 ear disagrees.
+
+## 11. Bringing the algorave into Apollo (spec, 2026-08-31)
+
+> **Status, 2026-09-01: executed.** All nine slices landed — S1 #150, S2 #153,
+> S3 #152, S4 #154, S5 #155, S6 #156, S7 #157, S8 #158, S9 #160 — plus the work
+> §11.1 said would follow. This section is kept as written, including the parts
+> that turned out differently: §11.5's first risk was real and cost a day, and
+> the "not yet" of §11.1 is still not yet.
+
+
+The algorave lane is two days old — §10 landed 2026-08-30 — and its palette
+is already close to sufficient: not much more sound is needed to make
+something good. That work continues on its own track (§6, §10). This section
+is a different axis. The lane currently lives *outside* the Apollo app: its
+own page, its own server, its own colours. The first mission is to bring it
+inside, with the same shell and the same visual language.
+
+### 11.1 The fusion is coming — just not yet
+
+Two mistakes are on offer here, and we intend to make neither.
+
+The first is to conclude the two lanes stay apart forever. They will not. One
+live surface where decks and patterns coexist — a human, a mind, an audience
+— is where this is going, and every step below should be taken as if that day
+is booked. It is.
+
+The second is to attempt that fusion in one shot and expect it to come out
+right. Neither surface is settled: the palette is days old, the pen and B2B
+have had exactly one real rehearsal (§9.1, §9.2, #148), and the DJ live lane
+still carries the pre-Ember palette. Merging two moving things is how you get
+one broken thing.
+
+So the order is: **(a)** both lanes inside the same platform, **(b)** keep
+improving the algorave, **(c)** then work out how they join. What follows is
+(a) — plus the seams that keep (c) cheap when we get there.
+
+### 11.2 The mission now
+
+A button on `/dashboard` (the first page — `/` redirects there) opens
+`/algorave`, a route **inside** the Apollo Next.js app, wearing the same
+Ember shell as `/catalog`, `/brief`, `/curate`, `/editor`, `/render` and
+`/live`. Its canvas is modelled on `/live`: three modes switched in place and
+synced to the URL hash, code on screen as the show. It gets its own read-only
+view for an OBS Browser Source, the way `/live` has `?viewer=1`.
+
+Deliberately *not now* — each of these is a "later", not a "never":
+
+- **YouTube chat in the rave.** It broadcasts before it converses. The DJ
+  lane keeps chat; the rave gets it when the rave has an audience worth
+  answering.
+- **A second agent over the DJ live session, or the two agents negotiating.**
+  That is (c), and it needs both surfaces to stop moving first.
+
+### 11.3 The seams to leave open
+
+This is the part that makes (c) cheap later. None of it costs meaningful time
+now; all of it costs a rewrite if skipped.
+
+1. **One place that knows where the mind is.** The rave route must call the
+   mind through a single client module (a `lib/mind.ts`-shaped thing), never
+   an inline `fetch`. When the DJ lane also needs a mind, or when the call
+   gets routed through the FastAPI backend instead of hitting `:4032`
+   directly, that is a one-file change instead of a hunt.
+2. **The pen as a portable module, not page furniture.** `pen.js` already is
+   one — keep it that way when it moves. `togglePen`, `decide`, the `WHY`
+   enum and the tie rule are the vocabulary the DJ lane will borrow; they must
+   not end up welded into a React component.
+3. **The mode switcher and the viewer gate as shared components.** `/live`
+   and `/algorave` should render the *same* Audience/Booth/Immersive control
+   and the same read-only gate, not two copies. A merged surface then becomes
+   a composition rather than a rebuild — and it retires the duplication before
+   it hardens.
+4. **The turn-taking strip as its own component.** Who holds the pen, bars to
+   the next phrase boundary, bars to the next B2B flip. Built once, it can
+   later wrap a crossfade as easily as a hot-swap: a crossfade *is* a phrase
+   boundary. This is the single most reusable thing in the rave.
+5. **Decide the session identity early.** `/live` is addressed as
+   `/api/sessions/{id}/…`; a rave run has no id at all today. Giving it one
+   now — even a trivial one — means (c) is a composition of two instruments
+   inside one session, not a data migration.
+6. **Do not hardcode a second `AudioContext`.** Strudel renders through Web
+   Audio in the page; `/live` drives WAV decks through `<audio>` + `GainNode`.
+   A hybrid set eventually needs both on one context and one output bus.
+   Nothing to build now — just do not make it impossible.
+
+### 11.4 Slices, daily-cycle sized
+
+Each is a PR on its own, in the rhythm of §6. Nothing here is a big bang; any
+slice can be the last one shipped that day.
+
+- **S1 — unbreak `next build`.** Prerequisite, and useful with or without the
+  rest. See risk 3.
+- **S2 — the Strudel bundle spike.** Prove one `Pattern` class and real audio
+  from a Next route. Throwaway UI: a play button. **If this cannot be made
+  safe, stop and revisit the route decision here** — before any design work,
+  not after.
+- **S3 — `/algorave` skeleton.** Ember shell, nav entry, the `/dashboard`
+  button, the editable buffer, play/stop. No mind yet.
+- **S4 — wire the mind** through the seam-1 client, and widen the mind's
+  `--allow-origin` (risk 2).
+- **S5 — the turn-taking strip**: pen, phrase and B2B counters, the diff
+  review with the tie rule. Built as seam 4.
+- **S6 — the palette browser**, with the bank rule visible and audition on
+  click.
+- **S7 — the read-only view** for OBS.
+- **S8 — decide the fate of the `:4031` playground**: keep it as the
+  rehearsal room, or redirect it.
+
+S1 and S2 are the only ordered pair; the rest can be resequenced freely.
+Ember migration stays limited to what these slices actually touch — the wider
+legacy-palette cleanup (README's v2.6.0 §3.6) is not in this scope.
+
+### 11.5 Risks, named before they bite
+
+1. **One `Pattern` class, or silence.** `patterns/playground.html` uses an
+   import map pointing *every* `@strudel/*` specifier at one prebuilt bundle,
+   precisely so there is only ever one `Pattern` class. Under a bundler,
+   `@strudel/core` and `@strudel/web` can each resolve to their own copy;
+   patterns built by one are then not recognised by the other, and **the
+   failure is silent** — no error, no audio. Hence S2 before anything.
+2. **CORS on the mind.** `scripts/algorave_playground.py` compares origins
+   byte-exact: `SPIKE_ORIGINS` (`127.0.0.1:4031`, `localhost:4031`) plus
+   `--allow-origin` values. It runs today with
+   `--allow-origin http://100.68.5.104:4031`. Serving the UI from the Next app
+   changes the origin, so every `POST /mind` fails until the mind is
+   relaunched with the new one. Cheap to fix, easy to lose an hour to.
+3. **The production build is broken today.** `useSearchParams()` is called in
+   two shared hooks — `web/frontend/lib/auto-session.ts:69` and
+   `web/frontend/lib/auth-bootstrap.ts:37` — consumed by five pages
+   (`/curate`, `/render`, `/editor`, `/live`,
+   `/session/[id]/live/visual-only`), and `next build` fails prerendering them
+   for want of a Suspense boundary. `next dev` never notices. `/algorave` will
+   use `useAuthQueryBootstrap` for its read-only view, so it inherits the
+   break.
+4. **Latency vs the bar.** At 124 BPM an 8-bar phrase is 15.5 s; the mind is
+   ~20 s p50. It structurally cannot make the next boundary. The options are
+   16-bar phrases (31 s), aiming deliberately at boundary+1, or a faster
+   model — a musical decision, not a bug. Worth settling around S5.
+
+**Not a risk, and the reason deployment stays simple:** Strudel renders
+through Web Audio *in the browser*, so the route plays wherever the browser
+runs. Only the mind needs jarvis's GPU — the same shape as the existing
+`OLLAMA_BASE_URL` precedent of a backend calling an LLM on another host by IP.
+

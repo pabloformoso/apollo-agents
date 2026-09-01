@@ -7,9 +7,11 @@
 
 ![ApolloAgents — assemble. critique. perform.](apollo_banner.svg)
 
-> An AI-powered DJ set builder — from a single-sentence brief to a rendered YouTube video or a real-time live performance, guided by a team of specialized agents.
+> An AI-powered DJ set builder AND a live-coding instrument — from a single-sentence brief to a rendered YouTube video, a real-time DJ set, or an algorave written live with an LLM at the other end of the pen.
 
-ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. You describe the vibe. The agents handle harmonic mixing, BPM matching, energy arc planning, and audio quality validation. You stay in control at every checkpoint — through a CLI, a conversational agent, or the new **Ember web UI**.
+ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. You describe the vibe. The agents handle harmonic mixing, BPM matching, energy arc planning, and audio quality validation. You stay in control at every checkpoint — through a CLI, a conversational agent, or the **Ember web UI**.
+
+Since v4.0 there is a second way to perform: **`/algorave`**, a live-coding surface where you and an LLM write [Strudel](https://strudel.cc) patterns into the same buffer, taking turns.
 
 ---
 
@@ -66,6 +68,31 @@ uv run python agent/run.py
 ```
 
 → [Full Live Mode docs, thread architecture & cycle diagram](#live-mode-1)
+
+---
+
+## 🎛 Algorave — live coding with a mind
+
+> The other way to perform. You write patterns; so does Apollo. One buffer, one pen, and a rule about who holds it.
+
+`/algorave` is a live-coding surface built on [Strudel](https://strudel.cc). It is not a second app — it lives inside the Ember UI, shares its design, and reuses the same three-mode stage (`Audience` / `Booth` / `Immersive`) and read-only OBS view that Live Mode uses.
+
+**The pen.** Only one of you writes at a time. Hand it to the mind and it mutates the pattern on musical phrase boundaries — never mid-phrase, and a boundary missed because a request was still in flight is *skipped, not queued*. Turn on **B2B** and the pen alternates every N bars, like two DJs trading.
+
+**On a tie, the human wins.** A proposal only applies itself when the buffer is byte-identical to what the mind was shown. Type while it is thinking and your edit stands; its answer drops to a manual diff. And your edits are never lost on the mind: each evaluate is diffed and told to it as `human: ±N lines`, so it can see you moved something.
+
+**The palette is data, not code.** 61 sampled instruments and 6 drum machines come from one registry (`scripts/algorave-spike/palette.json`) that the validator, the LLM's prompt and the UI all read. Add a sound there and it is browsable, completable and playable with no code change.
+
+**The editor knows the rules.** Autocomplete offers sounds from the live registry, and inside `.bank("` it offers only the banks that actually carry the sound you named — a wrong pair plays silence rather than failing, so it is simply not suggested. As you type, the buffer is checked by the *same validator the LLM is held to*: invalid in red, out-of-key in amber, because one will not play and the other will play and clash.
+
+**MIDI out.** `.midi("port")` on any layer sends it to your own synths instead of the speakers. WebMIDI runs in the browser, so the notes reach the machine with the tab open.
+
+```bash
+# The registry, the validator and the mind's prompt share one vocabulary:
+npx vitest run          # in scripts/algorave-spike — 129 tests over the pen and the palette
+```
+
+Open `/algorave` from the dashboard. **A secure context is required** (HTTPS, or `localhost`): browsers withhold `AudioWorklet` and WebMIDI on a plain-HTTP origin, so over a bare IP the samples play and the synths do not.
 
 ---
 
