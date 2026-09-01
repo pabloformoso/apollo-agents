@@ -48,6 +48,13 @@ export interface StrudelModule {
   initAudio: () => Promise<void>;
   evaluate: (code: string) => Promise<unknown>;
   hush: () => void;
+  /**
+   * The running AudioContext. Needed to notice it has been SUSPENDED: a
+   * backgrounded tab or a sleeping device suspends it, `evaluate` then
+   * schedules onto a stopped clock, and the page reads "playing" in total
+   * silence. Found in the playground's first real practice (2026-08-30).
+   */
+  getAudioContext: () => { state: string; resume: () => Promise<void> } | null;
   /** Registers a sample map. `base` is prepended to every path inside it. */
   samples: (
     json: string | Record<string, unknown>,

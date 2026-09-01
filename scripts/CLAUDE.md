@@ -246,16 +246,18 @@ for OBS, and the same pen, phrase scheduler and B2B. But the plan's own rule is
 **do not delete before the replacement is proven in use**, and it has not been:
 nobody has played a real set on it yet.
 
-**Three things the playground has and `/algorave` does not.** Until these land,
-the playground is not redundant, and saying otherwise would be a lie in the
-repo:
+**All three gaps are CLOSED as of 2026-09-01** (kept below for the record).
+What still stands between the playground and retirement is the other half of
+the rule: **a real set has not been played on `/algorave` yet.** Do not delete
+before the replacement is proven in use — that condition was never about
+features.
 
 1. ~~**Persistence across a reload.**~~ **Closed 2026-09-01**: `/algorave`
    restores buffer, intent, phrase, b2bBars, bpm, genre and key — and, like the
    playground, deliberately restores neither the pen nor the B2B mode.
-2. **`summarizeHumanEdit`.** The playground tells the mind what the human just
-   changed, so the duet is informed. `/algorave` sends the buffer and the
-   intent and nothing about the edit.
+2. ~~**`summarizeHumanEdit`.**~~ **Closed 2026-09-01**: `/algorave` diffs each
+   evaluate against the last evaluated text and pushes a `human: …` entry into
+   the recent-reasons ring, exactly as the playground does.
 3. ~~**Genre and key.**~~ **Closed 2026-09-01**: `/algorave` has both as
    selects, sends them to the mind, and checks the buffer against them live.
 

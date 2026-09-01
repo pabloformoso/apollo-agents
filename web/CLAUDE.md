@@ -481,6 +481,30 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   prompt" to "whoever has the page open". Fine for a single-operator tool on a
   private tailnet; **revisit before `/algorave` is ever exposed publicly.**
 
+## Human edits become state (§9.1)
+
+- **A human edit is diffed, never typed.** Nobody live-coding narrates their
+  own edits into a text box mid-phrase, so every evaluate of a CHANGED buffer
+  becomes a `human: ±N lines — "…"` entry in the recent-reasons ring. The mind
+  then sees it beside its own reasons, and its "do not repeat the recent
+  reasons" rule notices that a human just moved something.
+- **The baseline is the last EVALUATED text, and it moves on every evaluate —
+  the mind's own included.** Without that, handing the pen back would report
+  the mind's last mutation as if a human had made it. The rule is the
+  playground's; `summarizeHumanEdit` is imported from the pen module, not
+  rewritten (§11.3 seam 2).
+- Nothing is attributed while the MIND holds the pen, and the first evaluate of
+  a session reports nothing because there is no baseline to diff against.
+- **Known limitation worth knowing before reading a summary:** adding a layer
+  to a `stack(...)` also changes the line above it (a trailing comma appears),
+  and the summary quotes the FIRST changed line — so it says "+1 line" and
+  shows the comma edit rather than the new layer. The direction is right, which
+  is what the ring is for, but it does not name the new sound.
+- **A suspended AudioContext is resumed on evaluate.** A backgrounded tab or a
+  sleeping device suspends it; `evaluate` then schedules onto a stopped clock
+  and the page reads "playing" in total silence. From the playground's first
+  real practice (2026-08-30) — the app had never carried the fix.
+
 ## Persistence, and `/algorave` being client-only
 
 - **What is NOT saved is the important half.** The pen and the B2B mode never

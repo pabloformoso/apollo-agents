@@ -65,7 +65,7 @@ export class MindError extends Error {
 
 export const MIND_ENDPOINT = "/api/algorave/mind";
 
-export { autoApplyDecision, diffLines, pushReason } from "@algorave/pen";
+export { autoApplyDecision, diffLines, pushReason, summarizeHumanEdit } from "@algorave/pen";
 
 export async function askMind(req: MindRequest): Promise<MindProposal> {
   // The wire shape is the pen module's job: it pins the field names the mind
