@@ -67,6 +67,23 @@ docker compose down -v          # also wipe venv + node_modules caches
 - One-off commands: `docker compose run --rm backend uv run pytest tests/`.
 - `--build-catalog` / `--fix-incomplete` need madmom — rebuild with
   `docker compose build --build-arg INSTALL_BEATGRID=1 backend`.
+- **The frontend container mirrors the REPO, not just `web/frontend`.**
+  The frontend reaches two levels up for things outside its own tree —
+  `@algorave/pen` (the one copy of the pen module), `turbopack.root`,
+  and the palette/validate routes' spike dir. Mounted as
+  `./web/frontend:/app` those resolved to `/`, and in `next dev` a
+  single unresolvable import is a GLOBAL compile error: every route
+  500s, the DJ lane included. It is `./:/repo` with the workdir at
+  `/repo/web/frontend` for that reason. Any new `../..` path from the
+  frontend needs the container to keep that shape.
+- **The frontend image is Node 22 because of the validator**, not
+  because of Next. `validate.mjs` imports `registerHooks` from
+  `node:module` (Node 22+) and the live-validation route spawns it; on
+  Node 20 the spawn dies and the route answers "validator produced no
+  verdict" — the editor silently stops checking what a performer types.
+- **CI cannot catch either of these.** It builds on the host layout and
+  never starts the compose stack, so the only proof is bringing the
+  stack up and hitting the routes. Both bugs shipped green (2026-09-02).
 
 ## Project structure
 
