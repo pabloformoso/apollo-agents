@@ -514,3 +514,34 @@ collide, and a test keeps it that way.
 **Selection is `.n(i)`, not `.note()`.** These hold many variants —
 `s("stab").n("<0 3 5>")` walks them. The prompt now says so; pitch-shifting is
 for when you actually want it.
+
+### Second pass — twenty-one more, by role (2026-09-01)
+
+The first fourteen proved the route; these fill the roles the catalogue still
+had nobody for. **330 more samples**, bringing the curated slice to 35 of the
+library's 218 folders.
+
+| role | added | why it was missing |
+|---|---|---|
+| kits & machines | `gretsch` (24), `bassdm` (24), `drumtraks` (13), `linnhats` (6), `hardkick` (6) | every drum was one of six machines; an acoustic kit was not available at all |
+| hand percussion | `tabla2` (46), `hand` (17) | one tabla set was the whole of it |
+| bass | `jungbass` (20), `bass3` (11) | `jvbass` alone |
+| melodic | `sitar` (8), `sid` (12), `fm` (17), `bleep` (13), `sequential` (8) | no plucked strings, no chip voices, no FM |
+| breaks | `breaks125` (2), `jungle` (13) | `amencutup` alone |
+| texture | `birds3` (19), `bottle` (13), `metal` (10) | the ambient lane had wind and space |
+| industrial | `industrial` (32), `dist` (16) | nothing for the cyberpunk end |
+
+Ten go into `genres.deep` — the kits, the hand percussion, the basses and the
+melodic voices that suit house. `sid`, `bleep`, `industrial`, `dist`, `jungle`,
+`breaks125`, `birds3`, `bottle` and `metal` stay registry-wide: the genre fence
+is there to be used, and a chip bleep in a deep house set should be a decision
+somebody made rather than something the mind could reach for by default.
+
+**Chosen by role and by what the catalogue lacked, not by ear.** These are
+well-known folders of the Tidal library and the counts are the map's own, but
+nobody has listened to them in this context yet — the palette browser auditions
+on click, and the ear test is the performer's. Expect this list to be edited.
+
+**The collision rule did the work again**: `bd`, `sd`, `hh`, `cp`, `perc` and
+the rest of the bank-prefixed drum names are all present in Dirt and all
+excluded, enforced by a test rather than by care.
