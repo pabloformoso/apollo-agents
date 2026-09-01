@@ -545,3 +545,53 @@ on click, and the ear test is the performer's. Expect this list to be edited.
 **The collision rule did the work again**: `bd`, `sd`, `hh`, `cp`, `perc` and
 the rest of the bank-prefixed drum names are all present in Dirt and all
 excluded, enforced by a test rather than by care.
+
+### Third pass — the remaining 173, triaged by twelve agents (2026-09-01)
+
+The first two passes were hand-picked. The remaining 173 folders were triaged
+by twelve Sonnet agents in parallel, ~15 folders each. **17 added, 156
+skipped**, bringing the curated slice to 52 of the library's 218 folders and
+`instruments` to 61.
+
+**The task had to be reshaped before a model could do it honestly.** "Pick the
+good ones" is unanswerable — nobody involved can hear these samples. What is
+answerable is *classification from evidence*, and the evidence that carries the
+most signal is the **filenames**:
+
+| evidence | reading |
+|---|---|
+| `808bd/BD0000.WAV` | a TR-808 bass drum family — already covered, skip |
+| `pluck/BS A1 PI.wav` | chromatic pitch names — a playable instrument |
+| `mute/FH A#2 SCF.wav` | French horn, chromatic — a muted brass stab |
+| `alphabet/a.wav` | the spoken alphabet — no use in a set |
+| `yeah/000_Sound0.wav` | says nothing at all — **unknown, not bad** |
+
+Three instructions did the work: state plainly that **you cannot hear these**
+and must cite evidence; make `unclear` / `confidence: low` a first-class answer,
+warning that a batch with none is a sign the agent is confabulating; and bias
+toward `skip`, because a palette that lists everything teaches the mind nothing.
+
+**It worked, and the measurement says so**: 71 of 173 came back low-confidence
+(41 %), and of the 17 adds only one is high-confidence. The agents also agreed
+with judgements this repo had already made without being shown them — `jazz`
+skipped as a generic kit that shadows the machine roles, `east` added but fenced
+OUT of deep house as Japanese rather than Latin percussion. Both are the
+handoff's own words about the b-cdn subset.
+
+**What was added**: three more drum machines the six did not cover (`dr2` Boss
+DR-110, `dr55` Roland DR-55, `incoming` Mattel Synsonics); four basses
+(`bass1` 30 sub-bass hits in C, `pluck`, `rave2`, `bass2`); pitched brass
+(`mute`) and leads (`casio`, `sax`); percussion (`east`, `click`); texture
+(`insect`, `bubble`, `sundance`); `invaders` and `auto`. Only `bass1`, `pluck`
+and `mute` enter `genres.deep`, and they join the bass and stabs roles.
+
+**The honest limitation, and it is the important line here.** Seventy-one
+folders were skipped for **lack of evidence, not for being bad** — `dr` (42
+samples), `lighter` (33), `yeah` (31), `psr` (30) all have mute filenames like
+`000_0.wav`. No amount of reasoning resolves those. They are exactly what the
+palette browser's audition-on-click is for, and they stay registered and
+playable whether or not the mind may reach for them.
+
+`sax` is the weakest entry: its case rests on the folder name, since
+`notes121a.wav` says nothing. Kept deliberately, and the first to drop if the
+ear disagrees.
