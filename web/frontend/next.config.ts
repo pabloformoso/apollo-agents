@@ -25,7 +25,28 @@ const nextConfig: NextConfig = {
   // 127.0.0.1 here, opening http://127.0.0.1:4010 leaves the page un-hydrated
   // (HMR WS + RSC payload both rejected) — symptoms: root /  doesn't redirect,
   // controlled inputs don't update state, submit buttons stay disabled.
-  allowedDevOrigins: ["127.0.0.1"],
+  //
+  // **The tailnet IP has to be here too, and its absence is quieter than the
+  // above.** This box is reached over Tailscale by IP, not by localhost, and an
+  // origin that is missing gets the HMR WebSocket refused — which the browser
+  // retries forever, so the console fills with `webpack-hmr failed` and the one
+  // honest check this project has (play something and READ THE CONSOLE) drowns
+  // in it. The devtools overlay font 403s for the same reason. Measured
+  // 2026-09-02: from 127.0.0.1 the HMR upgrade answers 101 and
+  // /__nextjs_font/geist-latin.woff2 answers 200; from 100.68.5.104 the upgrade
+  // is refused and the font 403s. The RSC payload still answers 200, so unlike
+  // the case above the PAGE works — this costs hot reload and a readable
+  // console, not hydration.
+  //
+  // `APOLLO_DEV_ORIGINS` (comma-separated) extends the list without a code
+  // change, which is how the eventual nginx subdomain gets added.
+  allowedDevOrigins: [
+    "127.0.0.1",
+    "100.68.5.104",
+    ...(process.env.APOLLO_DEV_ORIGINS?.split(",")
+      .map((o) => o.trim())
+      .filter(Boolean) ?? []),
+  ],
   async rewrites() {
     return [
       {
