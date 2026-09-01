@@ -849,3 +849,15 @@ silent page: **structural checks pass while the music is wrong.**
   pages already do this; CI now runs `npm run build`, so a sixth that
   forgets fails the PR instead of shipping.
 - `tests/web/test_youtube_chat.py` fails LOCALLY only; passes in CI.
+- **Every host this app is REACHED by needs an `allowedDevOrigins` entry**,
+  and the failure is quiet. The frontend runs `next dev` even in the compose
+  stack, so Next's dev-resource check applies: an origin that is not listed
+  gets the HMR WebSocket refused — which the browser retries forever, filling
+  the console with `webpack-hmr failed` — and 403s the devtools overlay font.
+  The RSC payload still answers, so the PAGE works; what is lost is hot reload
+  and a readable console. That console is the only honest check this project
+  has for audio, so drowning it is not cosmetic. 127.0.0.1 and the tailnet IP
+  are compiled in; `APOLLO_DEV_ORIGINS` (comma-separated, passed through by
+  compose) adds more without a code change — that is the hook for the nginx
+  subdomain. Verify a new origin with the font and an HMR upgrade, and check
+  an UNLISTED origin still 403s, or "fixed" and "check disabled" look alike.

@@ -88,6 +88,11 @@ services:
       # handles the latter — keep an eye here if you start hitting
       # blank pages on http://127.0.0.1:4010.
       HOSTNAME: "0.0.0.0"
+      # Extra origins for Next's dev-resource check, comma-separated. The
+      # tailnet IP is already compiled in; this is the hook for a hostname
+      # that does not exist yet (the nginx subdomain). Substituted from the
+      # project-root .env, empty when unset.
+      APOLLO_DEV_ORIGINS: "${APOLLO_DEV_ORIGINS:-}"
     depends_on:
       # Backend doesn't strictly need to be UP before Next starts (the
       # proxy resolves lazily), but ``depends_on`` makes ``compose up``
