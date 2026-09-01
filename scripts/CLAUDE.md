@@ -250,9 +250,9 @@ nobody has played a real set on it yet.
 the playground is not redundant, and saying otherwise would be a lie in the
 repo:
 
-1. **Persistence across a reload.** The playground keeps buffer, intent, phrase
-   and b2bBars in `localStorage`, so F5 — or a crash, or someone else driving
-   the tab — does not eat the jam. `/algorave` loses everything.
+1. ~~**Persistence across a reload.**~~ **Closed 2026-09-01**: `/algorave`
+   restores buffer, intent, phrase, b2bBars, bpm, genre and key — and, like the
+   playground, deliberately restores neither the pen nor the B2B mode.
 2. **`summarizeHumanEdit`.** The playground tells the mind what the human just
    changed, so the duet is informed. `/algorave` sends the buffer and the
    intent and nothing about the edit.

@@ -481,6 +481,30 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   prompt" to "whoever has the page open". Fine for a single-operator tool on a
   private tailnet; **revisit before `/algorave` is ever exposed publicly.**
 
+## Persistence, and `/algorave` being client-only
+
+- **What is NOT saved is the important half.** The pen and the B2B mode never
+  persist (§9.1, §9.2, the playground's rule kept): a freshly loaded page must
+  never fire an LLM call by itself and never wake up alternating, so it is
+  always HUMAN and always FREE on arrival. The transport is not saved either —
+  nothing should start making sound because a browser refreshed. The saved
+  shape has no field for any of them, so a reload cannot inherit an armed
+  scheduler even by mistake; a test asserts that on the DATA rather than on the
+  caller's discipline.
+- **`/algorave` is `ssr: false`, and that retired a class of bug.** Three times
+  in this lane a value only the browser knows — the run id, `midiSupport()`,
+  the saved session — could not be read during render without a hydration
+  mismatch, and each was worked around separately (mint in a click handler,
+  drop the render-time check, …). A client-only mount lets state be initialised
+  from the browser in a lazy `useState`: no effect, no `set-state-in-effect`,
+  nothing to reconcile. The route stops prerendering, which for a page that is
+  blank until an AudioContext exists is not a cost.
+- Anything client-only added here should go in `AlgoraveClient.tsx`;
+  `page.tsx` is only the dynamic wrapper.
+- A wrong TYPE in storage is replaced with the default, not passed through: a
+  string where `phraseBars` belongs would make `decide()` compare against NaN
+  and the mind would never fire again.
+
 ## The editor and its autocomplete
 
 - **Plain `@codemirror/*`, never `@strudel/codemirror`** — that package depends
