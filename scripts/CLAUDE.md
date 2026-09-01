@@ -256,8 +256,8 @@ repo:
 2. **`summarizeHumanEdit`.** The playground tells the mind what the human just
    changed, so the duet is informed. `/algorave` sends the buffer and the
    intent and nothing about the edit.
-3. **Genre and key.** The playground sets them; `/algorave` sends neither, so
-   the mind falls back to its server defaults (`deep`, and `DEFAULT_KEY`).
+3. ~~**Genre and key.**~~ **Closed 2026-09-01**: `/algorave` has both as
+   selects, sends them to the mind, and checks the buffer against them live.
 
 **What can still drift, and what cannot.** The two share the things that would
 hurt most: `patterns/pen.js` is imported by both (§11.3 seam 2) and

@@ -451,6 +451,36 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   decision, not a frontend one. The browser already renders it permanently
   disabled with "<bank> does not carry fx".
 
+## Live validation — the same gate, applied to the human
+
+- **The editor runs `validate.mjs`, not a checker of its own.** That process is
+  what decides whether the MIND's output may play; running it against what the
+  human types means both players are judged by one rule, and a disagreement
+  between the editor and what the mind is allowed to write becomes impossible
+  rather than merely unlikely. It answers in ~100 ms, which is what makes this
+  viable on a 500 ms debounce.
+- **`invalid` and `out of key` are different colours on purpose.** Invalid
+  means the pattern will NOT play; out-of-key means it WILL play and clash.
+  Flattening them would tell a performer to stop when they only need to listen,
+  and plenty of good music is out of key deliberately. `readVerdict` is a pure
+  fold and the distinction is tested, including the case where both are true —
+  the one that stops the music wins the colour.
+- **Genre and key are not decoration**: they are what the validator checks
+  against and what fences the mind. Adding the two selects is what closed the
+  last of the three gaps `scripts/CLAUDE.md` lists against the `:4031`
+  playground, and it is why the note check has anything to compare to.
+- **Turbopack claims `spawn()` arguments.** A literal `"validate.mjs"` in the
+  args array fails the build with `Can't resolve ('validate.mjs' | <dynamic>)`
+  — the bundler treats it as a module to resolve, when it is a sibling PROCESS.
+  The name is assembled (`["validate", "mjs"].join(".")`) to keep the extension
+  out of the literal. Any future `spawn` of a `.mjs` here needs the same.
+- **Security posture, stated rather than assumed.** The validator EVALUATES the
+  code in a Node subprocess; its screen (import/require/fetch/eval/process) is
+  a denylist, not a sandbox. This route does not weaken the posture the mind's
+  path already had, but it widens who supplies the input from "an LLM we
+  prompt" to "whoever has the page open". Fine for a single-operator tool on a
+  private tailnet; **revisit before `/algorave` is ever exposed publicly.**
+
 ## The editor and its autocomplete
 
 - **Plain `@codemirror/*`, never `@strudel/codemirror`** — that package depends

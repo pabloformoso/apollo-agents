@@ -24,6 +24,7 @@ import { PaletteBrowser } from "@/components/ember/PaletteBrowser";
 import { CodeEditor } from "@/components/ember/CodeEditor";
 import { insertIntoBuffer, readPalette, type Palette } from "@/lib/palette";
 import { enableMidi, type MidiPort } from "@/lib/strudel-midi";
+import { readVerdict, validateBuffer, type Verdict } from "@/lib/validate";
 import { boot, type StrudelModule } from "@/lib/strudel";
 import {
   fetchRun,
@@ -54,6 +55,12 @@ const OPENING_BUFFER = `stack(
 ).cpm(124/4)`;
 
 const DEFAULT_BPM = 124;
+
+/** What the key selector offers. Drives the validator's out-of-key check. */
+const KEYS = [
+  "A:minor", "C:major", "D:minor", "E:minor", "F:major", "G:major",
+  "F#:minor", "Bb:major", "C:minor", "D:dorian", "A:phrygian",
+];
 /** Cycles per second at 4/4 — one cycle is one bar, which is what the pen counts. */
 const cpsFor = (bpm: number) => bpm / 60 / 4;
 
@@ -137,6 +144,41 @@ export default function AlgoravePage() {
       reason: proposal?.reason ?? "",
     });
   }, [viewerResolved, isViewer, runId, buffer, pen, barsNow, phraseBars, proposal]);
+
+  // --- genre, key and live validation --------------------------------------
+  // The genre and key are not decoration: they are what the validator checks
+  // AGAINST, and what the mind is fenced by. Without them the note check has
+  // nothing to compare to and the mind falls back to server defaults.
+  const [genre, setGenre] = useState("deep");
+  const [key, setKey] = useState("A:minor");
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    // Debounced: the validator answers in ~100 ms, so the wait is for the
+    // typist, not the process. Checking every keystroke would flicker.
+    let cancelled = false;
+    const t = setTimeout(() => {
+      setChecking(true);
+      validateBuffer(buffer, { genre, key })
+        .then((v) => {
+          if (!cancelled) setVerdict(v);
+        })
+        .catch(() => {
+          // A validator we cannot reach must not look like invalid code.
+          if (!cancelled) setVerdict(null);
+        })
+        .finally(() => {
+          if (!cancelled) setChecking(false);
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [buffer, genre, key]);
+
+  const reading = readVerdict(verdict);
 
   // --- MIDI out ------------------------------------------------------------
   // WebMIDI runs in THIS browser, so the notes reach the ports of the machine
@@ -277,7 +319,14 @@ export default function AlgoravePage() {
       setProposal(null);
       try {
         const at = barsRef.current;
-        const out = await askMind({ code: seen, intent, recentReasons: reasons, barsElapsed: at });
+        const out = await askMind({
+          code: seen,
+          intent,
+          genre,
+          key,
+          recentReasons: reasons,
+          barsElapsed: at,
+        });
         const diff = diffLines(seen, out.code) as DiffRow[];
         setReasons((r) => pushReason(r, out.reason) as string[]);
 
@@ -301,7 +350,7 @@ export default function AlgoravePage() {
         setThinking(false);
       }
     },
-    [intent, reasons, evaluate, note],
+    [intent, genre, key, reasons, evaluate, note],
   );
 
   // Same reason: the interval must call the CURRENT `ask`, not the one that
@@ -470,6 +519,41 @@ export default function AlgoravePage() {
         >
           Stop
         </button>
+      </div>
+
+      <div className="flex gap-2">
+        <label className="flex flex-col gap-1 flex-1 min-w-0">
+          <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+            Genre
+          </span>
+          <select
+            data-testid="genre"
+            value={genre}
+            onChange={(e) => setGenre(e.target.value)}
+            className="bg-surf border border-line rounded px-2 py-1 font-mono text-[11px] text-ember-text outline-none focus:border-line2"
+          >
+            {/* An empty value means no fence: the registry-wide palette. */}
+            <option value="">no fence</option>
+            <option value="deep">deep</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 flex-1 min-w-0">
+          <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+            Key
+          </span>
+          <select
+            data-testid="key"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            className="bg-surf border border-line rounded px-2 py-1 font-mono text-[11px] text-ember-text outline-none focus:border-line2"
+          >
+            {KEYS.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
 
       <label className="flex flex-col gap-1">
@@ -785,13 +869,39 @@ export default function AlgoravePage() {
                   palette={palette}
                   className="flex-1 min-h-[380px] overflow-auto px-2"
                 />
-                <footer className="px-4 py-2 border-t border-line">
+                <footer className="flex items-center justify-between gap-3 px-4 py-2 border-t border-line flex-wrap">
                   <span
                     data-testid="status"
                     data-phase={phase}
                     className={"text-xs " + (phase === "failed" ? "text-ember" : "text-mute")}
                   >
                     {detail}
+                  </span>
+                  {/* The same verdict the mind is held to, applied as you
+                      type. `invalid` means it will not play; out-of-key means
+                      it WILL play and clash — different colours on purpose. */}
+                  <span
+                    data-testid="verdict"
+                    data-tone={reading.tone}
+                    className={
+                      "font-mono text-[10.5px] uppercase tracking-mono " +
+                      (reading.tone === "error"
+                        ? "text-ember"
+                        : reading.tone === "warn"
+                          ? "text-warn"
+                          : reading.tone === "ok"
+                            ? "text-ok"
+                            : "text-faint")
+                    }
+                    title={reading.facts.join(" · ")}
+                  >
+                    {checking ? "checking…" : reading.headline}
+                    {reading.facts.length > 0 && (
+                      <span className="text-faint normal-case tracking-normal">
+                        {" "}
+                        · {reading.facts.join(" · ")}
+                      </span>
+                    )}
                   </span>
                 </footer>
               </section>
