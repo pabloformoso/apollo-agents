@@ -94,13 +94,20 @@ services:
       # build them in the right order.
       - backend
     volumes:
-      # Bind the frontend source — but NOT the install artifacts. The
-      # anonymous volumes below shadow node_modules + .next inside the
-      # container so they keep using the Linux-built ones from the
-      # image, not whatever the host happens to have.
-      - ./web/frontend:/app
-      - /app/node_modules
-      - /app/.next
+      # Bind the WHOLE repo, not just web/frontend. The frontend resolves
+      # several things two levels up — the shared pen module
+      # (``@algorave/pen`` -> scripts/algorave-spike/patterns/pen.js),
+      # ``turbopack.root``, and the palette/validate routes' spike dir — so
+      # a container that only sees web/frontend resolves them to ``/`` and
+      # Next fails to compile. In dev mode that is not one broken page: a
+      # single unresolvable import 500s EVERY route. See the Dockerfile
+      # header.
+      - ./:/repo
+      # Still NOT the install artifacts. These anonymous volumes shadow
+      # node_modules + .next so the container keeps the Linux-built ones
+      # from the image instead of whatever the host has.
+      - /repo/web/frontend/node_modules
+      - /repo/web/frontend/.next
     tty: true
     stdin_open: true
 
