@@ -866,6 +866,15 @@ silent page: **structural checks pass while the music is wrong.**
 - **It persists**, unlike the pen and B2B — a preference arms nothing. A saved
   model the mind no longer offers is dropped against the published list rather
   than sent and refused.
+- **A declared model the endpoint does not list refuses to START** (exit 2,
+  naming it). Without that, a typo — or the easy mistake now that one gateway
+  serves several, naming a model that lives on a DIFFERENT endpoint — is
+  accepted by the allow-list, offered in the selector, and fails as a 500 on
+  the click meant to make music. One server talks to one endpoint. A listing
+  that cannot be fetched is a WARNING instead (some endpoints do not implement
+  it), and `--no-model-check` skips the check. Note LISTED IS NOT LOADABLE: LM
+  Studio lists models it will 400 on when the shared GPU is full, so this
+  catches a wrong NAME, never a model that is unavailable right now.
 - **No list, no selector.** `fetchMindModels` returns null when the mind cannot
   be asked and the page then plays on the mind's default: being unable to
   CHOOSE must never mean being unable to play.

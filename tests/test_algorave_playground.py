@@ -904,3 +904,54 @@ def test_model_is_repeatable_and_the_first_one_is_the_default():
         ["--model", "gpt-4o-mini", "--model", "google/gemma-4-e4b"]
     )
     assert args.model == ["gpt-4o-mini", "google/gemma-4-e4b"]
+
+
+# ─── the startup model check ───────────────────────────────────────────
+#
+# `parse_request` allow-lists whatever was declared, so a typo — or a model
+# that lives on a DIFFERENT endpoint — is accepted, offered in the selector,
+# and fails as a 500 on the click meant to make music. This moves that to
+# startup, where the operator is standing at the terminal.
+
+class _Listing:
+    """The slice of the OpenAI client this check touches."""
+
+    def __init__(self, ids=None, error=None):
+        self._ids, self._error = ids or [], error
+
+    @property
+    def models(self):
+        return self
+
+    def list(self):
+        if self._error:
+            raise self._error
+        return SimpleNamespace(data=[SimpleNamespace(id=i) for i in self._ids])
+
+
+def test_a_declared_model_the_endpoint_lists_is_not_missing():
+    client = _Listing(["gpt-4o-mini", "gpt-4o"])
+    assert playground.missing_models(client, ["gpt-4o-mini"]) == []
+
+
+def test_a_model_the_endpoint_does_not_serve_is_named():
+    # The real mistake this catches: gemma lives on LM Studio, not on the
+    # cloudpunk gateway, and one server talks to one endpoint.
+    client = _Listing(["gpt-4o-mini", "gpt-4o"])
+    assert playground.missing_models(client, ["gpt-4o-mini", "google/gemma-4-e4b"]) == [
+        "google/gemma-4-e4b"
+    ]
+
+
+def test_an_unaskable_endpoint_raises_rather_than_reporting_everything_missing():
+    # An endpoint with no /v1/models is unusual, not broken. Reporting every
+    # model as missing would ground a working setup over a guess.
+    client = _Listing(error=RuntimeError("404 page not found"))
+    with pytest.raises(playground.ModelsUnavailable):
+        playground.missing_models(client, ["gpt-4o-mini"])
+
+
+def test_the_check_can_be_skipped():
+    args = playground.build_parser().parse_args(["--no-model-check"])
+    assert args.no_model_check is True
+    assert playground.build_parser().parse_args([]).no_model_check is False

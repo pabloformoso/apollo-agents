@@ -390,7 +390,38 @@ def llm_mind_factory(
         )
 
     factory.models = tuple(models)  # type: ignore[attr-defined]
+    factory.client = client  # type: ignore[attr-defined]
     return factory
+
+
+class ModelsUnavailable(RuntimeError):
+    """The endpoint could not be asked what it serves. Not the same as a
+    mismatch: an endpoint that does not implement `/v1/models` is unusual but
+    not broken, and refusing to start over it would be a guess."""
+
+
+def missing_models(client, declared) -> list[str]:
+    """Which declared models the endpoint does NOT list.
+
+    **Why this runs at startup.** `parse_request` allow-lists whatever the
+    operator declared, so a typo — or a model that lives on a DIFFERENT
+    endpoint, the easy mistake once one gateway serves several — is accepted by
+    the server, offered in the page's selector, and fails as a 500 on the click
+    that was meant to make music. The operator is standing at the terminal when
+    the server starts and is on stage when it is used; this moves the error to
+    the first of those.
+
+    Raises `ModelsUnavailable` when the listing itself fails, which the caller
+    turns into a warning rather than a refusal. Note also that LISTED IS NOT
+    LOADABLE: LM Studio happily lists models it will 400 on when VRAM is gone
+    (see the root CLAUDE.md on the shared GPU). This catches the name being
+    wrong, never the model being unavailable at that moment.
+    """
+    try:
+        listed = {m.id for m in client.models.list().data}
+    except Exception as exc:  # noqa: BLE001 — every SDK failure means the same thing here
+        raise ModelsUnavailable(str(exc)) from exc
+    return [m for m in declared if m not in listed]
 
 
 def build_mind_factory(args) -> object:
@@ -601,6 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio",
         help="Local servers ignore it; a LiteLLM proxy 401s on anything but its key.",
     )
+    parser.add_argument(
+        "--no-model-check", action="store_true",
+        help="Skip the startup check that every --model is one the endpoint "
+             "actually lists. Only for an endpoint whose /v1/models is wrong.",
+    )
     parser.add_argument("--max-tokens", type=int,
                         default=int(os.getenv("GENERATIVE_MAX_TOKENS", "4096")),
                         help="Completion budget — reasoners think before they code.")
@@ -623,6 +659,29 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     factory = build_mind_factory(args)
 
+    # Refuse to serve a model the endpoint does not have. This is the one place
+    # the mistake is cheap: the alternative is a selector that offers it and a
+    # 500 on the click that was meant to make music. A listing we cannot GET is
+    # a warning instead — some endpoints do not implement it, and guessing
+    # would ground a working setup.
+    model_note: str | None = None
+    if not args.mock and not args.no_model_check:
+        try:
+            missing = missing_models(factory.client, args.model)
+        except ModelsUnavailable as exc:
+            model_note = f"could not verify models against the endpoint: {exc}"
+        else:
+            if missing:
+                print(
+                    f"{args.base_url} does not serve: {', '.join(missing)}\n"
+                    "Declared with --model but absent from its /v1/models. A "
+                    "model on a DIFFERENT endpoint is the usual cause — one "
+                    "server talks to one endpoint.\n"
+                    "Fix the name, or pass --no-model-check to serve it anyway.",
+                    file=sys.stderr,
+                )
+                return 2
+
     allowed_origins = resolve_allowed_origins(args.allow_origin)
     server = make_server(
         factory, args.host, args.port,
@@ -640,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
         banner.append(f"origins   : + {', '.join(extra_origins)}")
     if not args.mock:
         banner.append(f"endpoint  : {args.base_url}")
+        if model_note:
+            banner.append(f"WARNING   : {model_note}")
         if len(args.model) > 1:
             banner.append(
                 f"models    : {len(args.model)} offered, default {args.model[0]} "
