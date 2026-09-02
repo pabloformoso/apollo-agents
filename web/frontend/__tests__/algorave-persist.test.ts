@@ -17,6 +17,7 @@ const session = {
   bpm: 128,
   genre: "deep",
   key: "C:minor",
+  model: "gpt-4o-mini",
 };
 
 afterEach(() => {
@@ -32,6 +33,23 @@ describe("round trip", () => {
 
   it("is null when nothing was ever saved", () => {
     expect(loadSession()).toBeNull();
+  });
+
+  it("keeps the model — a preference, unlike the pen", () => {
+    // Safe to restore precisely because it arms nothing: a reloaded page still
+    // asks the mind nothing until a human presses something.
+    saveSession({ ...session, model: "gpt-4o" });
+    expect(loadSession()?.model).toBe("gpt-4o");
+  });
+
+  it("reads a snapshot written before the selector existed as 'the default'", () => {
+    // An older build saved no `model`. That must load as "" — meaning "ask the
+    // mind's default" — not as undefined, which would be sent as a choice.
+    localStorage.setItem(
+      "apollo-algorave-v1",
+      JSON.stringify({ v: 1, ...session, model: undefined }),
+    );
+    expect(loadSession()?.model).toBe("");
   });
 });
 

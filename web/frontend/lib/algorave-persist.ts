@@ -27,6 +27,16 @@ export interface SavedSession {
   bpm: number;
   genre: string;
   key: string;
+  /**
+   * Which model to ask. A PREFERENCE, like genre and key — not an armed
+   * scheduler, so unlike the pen and B2B it is safe to restore: a reloaded
+   * page still asks nothing until a human presses something.
+   *
+   * Empty means "the mind's default". A saved name the mind no longer offers
+   * must fall back to that rather than being sent and refused, and the page
+   * checks it against the published list for exactly that reason.
+   */
+  model: string;
 }
 
 export function saveSession(s: SavedSession): void {
@@ -72,6 +82,7 @@ export function loadSession(): SavedSession | null {
       bpm: num(o.bpm, 124),
       genre: str(o.genre, "deep"),
       key: str(o.key, "A:minor"),
+      model: str(o.model, ""),
     };
   } catch {
     return null;
