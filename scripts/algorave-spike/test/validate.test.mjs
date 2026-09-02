@@ -662,3 +662,55 @@ describe('scale / out_of_key helpers (in-process, no subprocess)', () => {
     expect(pcName(notePitchClass('df4'))).toBe('C#'); // flat in, canonical sharp out
   });
 });
+
+
+/*
+ * The engine's own complaints (2026-09-02).
+ *
+ * Found live: the mind wrote `.scale()` onto a layer carrying a sound and no
+ * note. The validator called it VALID — 40 events, nothing wrong on paper —
+ * and in the browser it logged the same tonal error once per event, several
+ * hundred times in a set, while that layer made no music. A gate that passes a
+ * pattern the engine refuses is not a gate.
+ */
+describe('what the engine says counts as a verdict', () => {
+  it('refuses .scale() on a layer that has a sound and no note', () => {
+    const verdict = runValidator('s("hh*8").bank("RolandTR909").scale("A:minor")', []);
+    expect(verdict.valid).toBe(false);
+    // The engine's own sentence, not a paraphrase: it names the actual keys it
+    // was handed, which is what tells a performer WHICH layer is wrong.
+    expect(verdict.error).toContain('[tonal]');
+    expect(verdict.error).toContain('received keys');
+  });
+
+  it('strips the console styling out of that message', () => {
+    // Strudel logs `%c[tonal] ...` plus a CSS string. Neither belongs in a
+    // sentence someone reads mid-set.
+    const verdict = runValidator('s("hh*8").bank("RolandTR909").scale("A:minor")', []);
+    expect(verdict.error).not.toContain('%c');
+    expect(verdict.error).not.toContain('background-color');
+  });
+
+  it('still accepts .scale() used correctly, on n()', () => {
+    // The guard has to discriminate, or it just refuses music that would play —
+    // strictly worse than the flood it prevents.
+    const verdict = runValidator('n("0 2 4 6").scale("A:minor").s("supersaw").gain(0.4)', []);
+    expect(verdict.valid).toBe(true);
+  });
+
+  it('still accepts a scale on a note-carrying synth layer', () => {
+    const verdict = runValidator(
+      'note("<7 5 3 5>").s("pulse").scale("A4:minor").gain(0.4)',
+      ['--key', 'A:minor'],
+    );
+    expect(verdict.valid).toBe(true);
+  });
+
+  it('leaves ordinary drum patterns alone', () => {
+    const verdict = runValidator(
+      'stack(s("bd*4").bank("RolandTR909"), s("hh*8").bank("RolandTR909")).cpm(124/4)',
+      [],
+    );
+    expect(verdict.valid).toBe(true);
+  });
+});

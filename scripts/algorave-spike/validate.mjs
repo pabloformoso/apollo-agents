@@ -438,6 +438,58 @@ async function loadStrudel() {
 }
 
 // ---------------------------------------------------------------------------
+// what the engine itself says
+// ---------------------------------------------------------------------------
+
+/**
+ * Complaints Strudel logged while the pattern was evaluated and queried.
+ *
+ * Deduped, because these arrive ONCE PER EVENT: the observed case produced the
+ * same two lines several hundred times in four cycles. Capped for the same
+ * reason — a verdict is a sentence a performer reads, not a log.
+ */
+const engineComplaints = new Set();
+const MAX_COMPLAINTS = 4;
+
+/**
+ * Which logged lines mean "this pattern is malformed".
+ *
+ * Deliberately NARROW. Strudel logs plenty through this channel that is not a
+ * problem, and a false positive here refuses music that would have played —
+ * strictly worse than the flood it is trying to prevent. So: `[tonal]` lines
+ * (music theory applied to something that is not a note) that name themselves
+ * an error. Widen only with a case in hand.
+ */
+function isEngineComplaint(line) {
+  return line.includes('[tonal]') && (line.includes('error') || line.includes('Invalid'));
+}
+
+/**
+ * Strudel logs styled: `console.log("%c[tonal] ...", "background-color: black;
+ * color:white;border-radius:15px")`. Joining the arguments verbatim would put
+ * that CSS in the verdict a performer reads, so the `%c` directives and the
+ * style arguments that feed them are dropped. Only the sentence survives.
+ */
+function cleanComplaint(args) {
+  const [first, ...rest] = args;
+  if (typeof first !== 'string') return args.map(String).join(' ').trim();
+  const styleCount = (first.match(/%c/g) || []).length;
+  const tail = rest.slice(styleCount).map((a) => String(a));
+  return [first.replace(/%c/g, ''), ...tail].join(' ').trim();
+}
+
+function recordEngineComplaint(...args) {
+  if (engineComplaints.size >= MAX_COMPLAINTS) return;
+  let line;
+  try {
+    line = cleanComplaint(args);
+  } catch {
+    return; // A value whose String() throws is not worth failing a verdict over.
+  }
+  if (isEngineComplaint(line)) engineComplaints.add(line);
+}
+
+// ---------------------------------------------------------------------------
 // main
 // ---------------------------------------------------------------------------
 
@@ -447,8 +499,15 @@ async function main() {
   // throttled `E(...)` logger), and the §8.1 contract is ONE line on stdout no
   // matter what the evaluated pattern does. console.error/warn are untouched
   // (they go to stderr, which this tool's contract has no opinion about).
-  console.log = () => {};
-  console.info = () => {};
+  //
+  // Silenced, but no longer DISCARDED. The engine complains about patterns it
+  // cannot make sense of — `.scale()` on a layer that carries a sound and no
+  // note, say — and it complains through this channel, once per event. Throwing
+  // that away is what let the mind write such a pattern, have it declared
+  // valid, and flood a performer's console at 30 lines a second while the layer
+  // made no music. See `engineComplaints`.
+  console.log = recordEngineComplaint;
+  console.info = recordEngineComplaint;
 
   const args = parseArgs(process.argv.slice(2));
 
@@ -564,6 +623,23 @@ async function main() {
     }
     parts.push(...stats.bankViolations);
     emit(makeVerdict(false, `palette violation: ${parts.join('; ')}`, reason, stats));
+    return;
+  }
+
+  // Last, because the checks above coach better: "sound not in the palette"
+  // names what DOES exist, while this can only repeat what the engine said.
+  // But it still REFUSES — a pattern the engine cannot make sense of is one
+  // whose layer makes no music, and letting it through is what put several
+  // hundred identical lines in a performer's console mid-set.
+  if (engineComplaints.size > 0) {
+    emit(
+      makeVerdict(
+        false,
+        `the engine refused part of this pattern: ${[...engineComplaints].join(' | ')}`,
+        reason,
+        stats,
+      ),
+    );
     return;
   }
 

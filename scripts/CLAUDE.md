@@ -204,6 +204,31 @@ Convention: scripts are operator-facing and safe to run against the
 main checkout; none of them mutate `tracks/` or `output/` without
 saying so in their `--help`.
 
+## The validator listens to the engine, not only to the events (2026-09-02)
+
+- **A gate that passes a pattern the engine refuses is not a gate.** The mind
+  wrote `.scale()` onto a layer carrying a sound and no note
+  (`s("hh*8").bank("RolandTR909").scale("A:minor")`). `validate.mjs` called it
+  VALID — the events are there, the sounds are in the palette, nothing is wrong
+  on paper — and in the browser Strudel logged the same tonal complaint ONCE PER
+  EVENT while that layer made no music. Several hundred lines in one set.
+- **So `console.log` is now recorded rather than discarded.** It is still never
+  written to stdout (the §8.1 contract is one JSON line), but a `[tonal]` line
+  naming itself an error or an invalid value makes the verdict false, carrying
+  the engine's own sentence — it names the keys it was handed, which is what
+  identifies the offending layer.
+- **The filter is deliberately NARROW.** Strudel logs plenty here that is not a
+  problem, and refusing music that would have played is worse than the flood.
+  Widen it only with a case in hand.
+- **Not everything the browser complains about is visible here.** Checked while
+  writing this: `note("<7 5 3 5>").s("pulse").scale(...)` produces no complaint
+  in Node at all, so this catches the drum-layer shape and not every misuse. The
+  browser console remains the only place some failures appear — which is the
+  §11 lesson again, in the tool built to avoid it.
+- The messages arrive styled (`%c[tonal] …` plus a CSS argument) and deduped,
+  since they repeat per event; `cleanComplaint` drops the styling so a performer
+  reads a sentence.
+
 ## The algorave spike's test suite (§11 S2)
 
 `scripts/algorave-spike` carries the validator, the pen, B2B and the palette
