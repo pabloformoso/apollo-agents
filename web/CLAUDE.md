@@ -832,6 +832,41 @@ silent page: **structural checks pass while the music is wrong.**
 - `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
   it to the mock server on 8801.
 
+## Serving this over HTTPS (2026-09-02)
+
+Set up by the jarvis web-server session, not here; this is what the app side
+has to know.
+
+- **Two subdomains, and that is load-bearing**: `apollo.pabloformoso.com` is the
+  frontend, `apollo-api.pabloformoso.com` is the backend. They are separate
+  because the backend CONTAINER owns `0.0.0.0:4020` — nginx cannot terminate TLS
+  on that port without stopping prod, so the WebSocket gets its own vhost on 443
+  instead.
+- **`NEXT_PUBLIC_WS_BASE` is mandatory under HTTPS, and must land in the SAME
+  restart that turns HTTPS on.** Without it `wsBase()` derives
+  `wss://<page host>:4020`, where there is no TLS and cannot be, and every
+  session and live socket dies. The value is `wss://apollo-api.pabloformoso.com`
+  — no port; `wsBase()` returns an origin and the callers append the path.
+- **Do not use `NEXT_PUBLIC_API_BASE` for this.** It also feeds `wsBase()`, but
+  it would push the app's HTTP calls out of Next's rewrite and make them
+  cross-origin for nothing.
+- **The WebSocket is cross-origin by design** (page on one subdomain, socket on
+  the other) and that is fine: none of the four `@app.websocket` routes reads
+  `Origin`, and auth is the token in the query string. Starlette's
+  `CORSMiddleware` does not gate WS handshakes, so `APOLLO_CORS_ORIGINS` has no
+  say here either.
+- **`APOLLO_DEV_ORIGINS` must carry the frontend hostname** or Next refuses its
+  own dev resources from it — the HMR socket loops and the overlay font 403s.
+- **Both subdomains are tailnet-only on purpose**: the allow-list is Pablo's own
+  devices plus the home LAN, and an undeclared SNI does not even negotiate TLS.
+  For a performance this matters — the machine you play from has to be on the
+  tailnet or at home. A borrowed laptop in a venue does not get in.
+- Debugging note from that session: `curl` without `--http1.1` reports 404
+  instead of 403 on the WS route, because the vhost serves HTTP/2 where
+  `Connection`/`Upgrade` are forbidden and curl drops them. Browsers open a
+  separate HTTP/1.1 connection for `wss://`, so this is a curl artefact, not a
+  proxy fault.
+
 ## The harness owns tempo (2026-09-02)
 
 - **It always said so; it only just became true.** The mind's prompt has always

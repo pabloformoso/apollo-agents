@@ -93,6 +93,22 @@ services:
       # that does not exist yet (the nginx subdomain). Substituted from the
       # project-root .env, empty when unset.
       APOLLO_DEV_ORIGINS: "${APOLLO_DEV_ORIGINS:-}"
+      # Where the BROWSER opens its WebSockets. Next does not proxy WS, so the
+      # browser dials the backend directly and `lib/ws-base.ts` defaults to
+      # <page host>:4020 — right over plain HTTP on the tailnet, and WRONG the
+      # moment the page is served over HTTPS: it would ask for
+      # wss://<host>:4020, where there is no TLS and cannot be. The backend
+      # container owns 0.0.0.0:4020, so nginx cannot terminate there without
+      # taking prod down.
+      #
+      # So an HTTPS deployment MUST set this, and set it in the same restart
+      # that turns HTTPS on — not after. For apollo.pabloformoso.com the value
+      # is wss://apollo-api.pabloformoso.com (no port: 443 is implicit).
+      #
+      # Use THIS and not NEXT_PUBLIC_API_BASE, which also feeds `wsBase()` but
+      # would additionally push the app's HTTP calls out of Next's rewrite and
+      # make them cross-origin for no reason.
+      NEXT_PUBLIC_WS_BASE: "${NEXT_PUBLIC_WS_BASE:-}"
     depends_on:
       # Backend doesn't strictly need to be UP before Next starts (the
       # proxy resolves lazily), but ``depends_on`` makes ``compose up``
