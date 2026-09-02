@@ -32,6 +32,16 @@ const MIND_URL =
   process.env.ALGORAVE_MIND_URL ?? "http://100.68.5.104:4032/mind";
 
 /**
+ * The same server's model list. Derived from `MIND_URL` rather than configured
+ * separately, so there is still exactly ONE address to change (seam 1) and the
+ * two can never point at different minds.
+ */
+const MODELS_URL = MIND_URL.replace(/\/mind\/?$/, "/models");
+
+/** The list is a cheap local call; a slow one means the mind is gone. */
+const MODELS_TIMEOUT_MS = 5_000;
+
+/**
  * Longer than the mind server's own `--timeout` (120 s), so a slow model is
  * the MIND's error and never ours. This abort exists for the hung socket —
  * a killed process, a dropped link — which without it leaves the request
@@ -39,6 +49,37 @@ const MIND_URL =
  * way in its first real practice (#148).
  */
 const TIMEOUT_MS = 130_000;
+
+/**
+ * Which models this mind will answer for. The page renders one option each and
+ * may send any of them back as `model`; the SERVER owns the list, so a browser
+ * cannot name a backend the operator did not declare.
+ *
+ * A failure here is reported, not smoothed over — but it is not fatal either:
+ * the page hides the selector and keeps using the mind's default, because
+ * being unable to CHOOSE a model must never mean being unable to play.
+ */
+export async function GET() {
+  try {
+    const res = await fetch(MODELS_URL, {
+      signal: AbortSignal.timeout(MODELS_TIMEOUT_MS),
+      cache: "no-store",
+    });
+    const text = await res.text();
+    return new NextResponse(text, {
+      status: res.status,
+      headers: { "content-type": "application/json" },
+    });
+  } catch (err) {
+    return NextResponse.json(
+      {
+        error: "could not reach the mind to ask which models it serves",
+        detail: String(err),
+      },
+      { status: 502 },
+    );
+  }
+}
 
 export async function POST(request: Request) {
   let body: string;

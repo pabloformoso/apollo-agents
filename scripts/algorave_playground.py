@@ -113,6 +113,7 @@ def parse_request(
     *,
     default_genre: str = DEFAULT_GENRE,
     default_key: str = DEFAULT_KEY,
+    allowed_models: tuple[str, ...] = (),
 ) -> dict:
     """Normalise a /mind body, or raise `BadRequest` naming the offending field.
 
@@ -173,6 +174,18 @@ def parse_request(
     if not isinstance(b2b, bool):
         raise BadRequest(f"'b2b' must be a boolean, got {type(b2b).__name__}")
 
+    # The model is chosen by the PAGE but owned by the SERVER: only a name the
+    # operator declared at startup is accepted. A free-form model field would
+    # let a browser pick which backend gets billed, and some of them are not
+    # free. Absent means "the default", which is what every older page sends.
+    model = payload.get("model")
+    if model is not None:
+        if not isinstance(model, str):
+            raise BadRequest(f"'model' must be a string, got {type(model).__name__}")
+        if model not in allowed_models:
+            available = ", ".join(allowed_models) or "none — this server was started with one model"
+            raise BadRequest(f"unknown model {model!r}; this server serves: {available}")
+
     return {
         "code": code,
         "intent": intent,
@@ -181,6 +194,7 @@ def parse_request(
         "bars_elapsed": bars,
         "recent_reasons": reasons,
         "b2b": b2b,
+        "model": model,
     }
 
 
@@ -336,35 +350,63 @@ def _make_llm_helper():
         return make_llm
 
 
-def llm_mind_factory(base_url: str, model: str, api_key: str, max_tokens: int, timeout: float):
+def llm_mind_factory(
+    base_url: str,
+    model: str | list[str],
+    api_key: str,
+    max_tokens: int,
+    timeout: float,
+):
     """`request -> StrudelMind` on an EXPLICIT client (never env detection).
 
     The client is built once, here, so a missing `openai` or a bad base URL
     fails at startup with a traceback the operator sees, rather than as a 500
-    on the first click.
+    on the first click. Several MODELS ride that one client: they differ only in
+    a string sent per call, so nothing is deferred to first use and the startup
+    guarantee above is unchanged.
+
+    `model` may be a single name (every earlier caller) or a list, in which case
+    the FIRST is the default and the rest are what a request may ask for. The
+    server publishes exactly this list on `GET /models`; `parse_request` refuses
+    anything outside it.
     """
     from openai import OpenAI  # noqa: PLC0415 — keeps import cost off --help
+
+    models = [model] if isinstance(model, str) else list(model)
+    if not models:
+        raise ValueError("llm_mind_factory needs at least one model")
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
     make_llm = _make_llm_helper()
 
     def factory(request: dict) -> StrudelMind:
+        # Already allow-listed by parse_request; the `or` is for the callers
+        # that build a request dict by hand (the bench, the tests).
+        chosen = request.get("model") or models[0]
         return StrudelMind(
-            llm=make_llm(client, model, max_tokens),
+            llm=make_llm(client, chosen, max_tokens),
             genre=request["genre"],
             key=request["key"],
         )
 
+    factory.models = tuple(models)  # type: ignore[attr-defined]
     return factory
 
 
 def build_mind_factory(args) -> object:
-    """Pick the factory `main` will serve with. `--mock` builds NO client."""
+    """Pick the factory `main` will serve with. `--mock` builds NO client.
+
+    `--model` is `action="append"`, so it arrives as None when unset rather
+    than as the default — normalising here keeps that argparse wart out of
+    every caller.
+    """
     if args.mock:
         return mock_mind_factory()
+    if not args.model:
+        args.model = [DEFAULT_MODEL]
     return llm_mind_factory(
         base_url=args.base_url,
-        model=args.model,
+        model=args.model,  # a list once --model is repeatable; first is default
         api_key=args.api_key,
         max_tokens=args.max_tokens,
         timeout=args.timeout,
@@ -382,8 +424,18 @@ def make_handler(
     default_key: str = DEFAULT_KEY,
     allowed_origins=SPIKE_ORIGINS,
     quiet: bool = False,
+    models: tuple[str, ...] | None = None,
 ):
-    """A handler class bound to one mind factory (the tests inject their own)."""
+    """A handler class bound to one mind factory (the tests inject their own).
+
+    `models` is what `GET /models` publishes and what a request may choose from.
+    It defaults to whatever the factory advertises, so a server built the normal
+    way needs no second source of truth; a test injecting a bare callable gets
+    an empty list, which reads as "this server serves one model" and refuses any
+    `model` field rather than pretending to honour it.
+    """
+    if models is None:
+        models = getattr(mind_factory, "models", ())
 
     class PlaygroundHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -425,6 +477,16 @@ def make_handler(
             self.end_headers()
 
         def do_GET(self) -> None:  # noqa: N802
+            if self.path.split("?")[0] == "/models":
+                # The page renders one option per entry and may send any of
+                # them back as `model`. First is the default — the one used
+                # when a request names none, which is every request from a
+                # page that predates this endpoint.
+                self._send_json(200, {
+                    "models": list(models),
+                    "default": models[0] if models else None,
+                })
+                return
             if self.path.split("?")[0] == "/mind":
                 self._send_json(405, {
                     "error": "/mind is POST only",
@@ -447,7 +509,12 @@ def make_handler(
                 return
 
             try:
-                request = parse_request(raw, default_genre=default_genre, default_key=default_key)
+                request = parse_request(
+                    raw,
+                    default_genre=default_genre,
+                    default_key=default_key,
+                    allowed_models=tuple(models),
+                )
             except BadRequest as exc:
                 self._send_json(400, {"error": "malformed request", "detail": str(exc)})
                 return
@@ -487,6 +554,10 @@ def make_handler(
                 "code": out.code,
                 "reason": out.reason,
                 "stats": out.stats or {},
+                # Which model actually answered. Without this a performer who
+                # switches mid-set cannot tell whether what they are hearing is
+                # the new one — the whole point of being able to switch.
+                "model": request.get("model") or (models[0] if models else None),
             })
 
     return PlaygroundHandler
@@ -519,8 +590,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help="OpenAI-compatible endpoint. Explicit on purpose — a stale env "
                              "var once redirected a whole bench to a dead host (2026-08-14).")
-    parser.add_argument("--model", default=DEFAULT_MODEL,
-                        help="Model id. The bench picks the final default; this is the current one.")
+    parser.add_argument(
+        "--model", action="append", default=None,
+        help="Model id. Repeat to offer several: the FIRST is the default and "
+             "the page may switch between them (GET /models publishes the list). "
+             "The bench picks the final default; this is the current one.",
+    )
     parser.add_argument(
         "--api-key",
         default=os.getenv("LITELLM_API_KEY") or os.getenv("OPENAI_API_KEY") or "lm-studio",
@@ -558,13 +633,18 @@ def main(argv: list[str] | None = None) -> int:
 
     banner = [
         f"playground: http://{host}:{port}/mind  (POST)",
-        f"mode      : {'MOCK — canned mutation, no LLM client built' if args.mock else args.model}",
+        f"mode      : {'MOCK — canned mutation, no LLM client built' if args.mock else ', '.join(args.model)}",
     ]
     extra_origins = [o for o in allowed_origins if o not in SPIKE_ORIGINS]
     if extra_origins:
         banner.append(f"origins   : + {', '.join(extra_origins)}")
     if not args.mock:
         banner.append(f"endpoint  : {args.base_url}")
+        if len(args.model) > 1:
+            banner.append(
+                f"models    : {len(args.model)} offered, default {args.model[0]} "
+                "(GET /models; the page may switch)"
+            )
     banner += [
         f"genre     : {args.genre}   key {args.key}",
         f"validator : {strudel_mind.VALIDATOR}",

@@ -35,7 +35,8 @@ import {
   type RunSnapshot,
 } from "@/lib/algorave-run";
 import { useViewerFlag, viewerUrlFor } from "@/lib/viewer";
-import { MindError, askMind, autoApplyDecision, diffLines, pushReason, summarizeHumanEdit } from "@/lib/mind";
+import { MindError, askMind, autoApplyDecision, diffLines, fetchMindModels, pushReason, summarizeHumanEdit } from "@/lib/mind";
+import type { MindModels } from "@/lib/mind";
 import {
   b2bDecide,
   barsElapsed,
@@ -75,6 +76,26 @@ interface Proposal {
   scheduled: boolean;
 }
 
+/**
+ * What each model COSTS, measured (2026-09-02, five intents through the real
+ * validator). Shown beside the option because without it the selector is a
+ * trap: pick the 27B mid-set and the mind goes quiet for two minutes with
+ * nothing to explain it — a boundary missed while a call is in flight is
+ * SKIPPED, silently and correctly.
+ *
+ * For scale: an 8-bar phrase at cpm(124/4) is about 15 s.
+ *
+ * A model absent from this map simply gets no hint. Inventing one would be
+ * worse than saying nothing.
+ */
+const MODEL_NOTES: Record<string, string> = {
+  "gpt-4o": "~1 s · inside the bar",
+  "gpt-4o-mini": "~2 s · inside the bar",
+  "google/gemma-4-e4b": "~8 s · half a phrase · stays on this box",
+  "qwen3.8-27b": "~120 s · eight phrases · not usable live",
+  "qwen3.6-27b": "a reasoner — expect minutes, not seconds",
+};
+
 export function AlgoraveClient() {
   // Read ONCE, during the first (client-only) render. No effect, nothing to
   // reconcile — see the note in page.tsx about why this route is `ssr: false`.
@@ -91,6 +112,14 @@ export function AlgoraveClient() {
   const [intent, setIntent] = useState(
     saved?.intent || "keep the groove moving — one clear change",
   );
+  // The mind publishes what it serves; null means it could not be asked, and
+  // the selector simply does not render. Being unable to CHOOSE a model must
+  // never mean being unable to play.
+  const [mindModels, setMindModels] = useState<MindModels | null>(null);
+  const [model, setModel] = useState(saved?.model ?? "");
+  /** Which model actually answered last — the only way to hear a switch. */
+  const [answeredBy, setAnsweredBy] = useState<string | null>(null);
+
   const [thinking, setThinking] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [proposal, setProposal] = useState<Proposal | null>(null);
@@ -187,17 +216,32 @@ export function AlgoraveClient() {
 
   const reading = readVerdict(verdict);
 
+  // Asked once. A saved model the mind no longer offers is dropped here rather
+  // than sent and refused — the list is the server's, and a preference that
+  // outlived it is stale data, not an error to show a performer mid-set.
+  useEffect(() => {
+    let cancelled = false;
+    void fetchMindModels().then((got) => {
+      if (cancelled || !got) return;
+      setMindModels(got);
+      setModel((m) => (m && !got.models.includes(m) ? "" : m));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Saved on a debounce. The PEN and the B2B mode are deliberately absent, and
   // so is the transport: a reloaded page must never fire an LLM call by
   // itself, never wake up alternating, and never start making sound because a
   // browser refreshed (§9.1, §9.2 — the playground's rule, kept).
   useEffect(() => {
     const t = setTimeout(
-      () => saveSession({ buffer, intent, phraseBars, b2bBars, bpm, genre, key }),
+      () => saveSession({ buffer, intent, phraseBars, b2bBars, bpm, genre, key, model }),
       500,
     );
     return () => clearTimeout(t);
-  }, [buffer, intent, phraseBars, b2bBars, bpm, genre, key]);
+  }, [buffer, intent, phraseBars, b2bBars, bpm, genre, key, model]);
 
   // --- MIDI out ------------------------------------------------------------
   // WebMIDI runs in THIS browser, so the notes reach the ports of the machine
@@ -267,11 +311,20 @@ export function AlgoraveClient() {
   const lastEvaluated = useRef<string | null>(null);
   const barsRef = useRef(0);
   const bufferRef = useRef(buffer);
+  // The model is read through a ref for the SAME reason `barsRef` is: `ask`
+  // runs from an interval, so a value captured in its closure is the one the
+  // closure was born with. Listing `model` in the deps instead would rebuild
+  // `ask` and re-arm the scheduler mid-set; this way a switch simply applies
+  // to the next boundary, which is what the UI promises.
+  const modelRef = useRef(model);
   // Mirrored in an effect, not during render: the scheduler's interval reads
   // this, and writing a ref while rendering is a tear waiting to happen.
   useEffect(() => {
     bufferRef.current = buffer;
   }, [buffer]);
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
 
   const cps = useMemo(() => cpsFor(bpm), [bpm]);
   const note = useCallback((bar: number, text: string) => {
@@ -378,7 +431,11 @@ export function AlgoraveClient() {
           key,
           recentReasons: reasons,
           barsElapsed: at,
+          // Empty means "the mind's default" — the field is then omitted
+          // entirely rather than sent as a choice nobody made.
+          model: modelRef.current || undefined,
         });
+        setAnsweredBy(out.model);
         const diff = diffLines(seen, out.code) as DiffRow[];
         setReasons((r) => pushReason(r, out.reason) as string[]);
 
@@ -607,6 +664,40 @@ export function AlgoraveClient() {
           </select>
         </label>
       </div>
+
+      {/* Only when the mind said what it serves. No list, no selector — the
+          page then plays on the mind's own default exactly as before. */}
+      {mindModels && mindModels.models.length > 1 && (
+        <label className="flex flex-col gap-1">
+          <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+            Mind{" "}
+            {answeredBy && (
+              <span className="text-faint normal-case tracking-normal">
+                · answered by {answeredBy}
+              </span>
+            )}
+          </span>
+          <select
+            data-testid="model"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            className="bg-surf border border-line rounded px-2 py-1 font-mono text-[11px] text-ember-text outline-none focus:border-line2"
+          >
+            <option value="">
+              default{mindModels.default ? ` · ${mindModels.default}` : ""}
+            </option>
+            {mindModels.models.map((m) => (
+              <option key={m} value={m}>
+                {m}
+                {MODEL_NOTES[m] ? ` — ${MODEL_NOTES[m]}` : ""}
+              </option>
+            ))}
+          </select>
+          <span className="font-mono text-[10px] text-faint">
+            Takes effect on the next ask, not the one in flight.
+          </span>
+        </label>
+      )}
 
       <label className="flex flex-col gap-1">
         <span className="font-mono uppercase tracking-mono text-[10px] text-faint">

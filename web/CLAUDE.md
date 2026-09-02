@@ -832,6 +832,44 @@ silent page: **structural checks pass while the music is wrong.**
 - `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
   it to the mock server on 8801.
 
+## Choosing the mind's model (/algorave only)
+
+- **The page chooses, the SERVER owns the list.** `algorave_playground.py` takes
+  `--model` repeatedly (first is the default), publishes them on `GET /models`,
+  and `parse_request` refuses any `model` outside that list with a 400 that
+  NAMES the valid ones. A free-form model field would let a browser pick which
+  backend gets billed, and `gpt-4o` is not free — the allow-list is the feature,
+  the dropdown is just its UI.
+- **One client, several models.** They differ only in a string sent per call, so
+  nothing is deferred to first use and the startup guarantee holds: a bad
+  base URL still fails with a traceback the operator sees, never as a 500 on the
+  first click.
+- **The response says which model answered**, and the page shows it. Without
+  that a performer who switches mid-set cannot tell whether what they are
+  hearing is the new one, which is the entire point of switching.
+- **The options carry their measured cost** (`MODEL_NOTES`), because otherwise
+  the selector is a trap: pick a reasoner mid-set and the mind goes quiet for
+  two minutes with nothing to explain it — a boundary missed while a call is in
+  flight is SKIPPED, silently and correctly. For scale, an 8-bar phrase at
+  `cpm(124/4)` is ~15 s. Numbers come from the bench in
+  `docs/reasoned-generative-engine.md` §3.1b; a model absent from the map gets
+  no hint rather than an invented one.
+- **`model` is read through a REF inside `ask`**, exactly like `barsRef`. `ask`
+  runs from an interval, so a value captured in its closure is the one the
+  closure was born with — the switch would silently keep asking the old model.
+  Listing it in the deps instead would rebuild `ask` and re-arm the scheduler
+  mid-set.
+- **`model` is added in `lib/mind.ts`, NOT in `mindRequest`.** That builder is
+  the shared pen module the :4031 playground also uses, and the selector is
+  /algorave's alone (seam 2: what is shared stays shared). It is emitted only
+  when set, the same rule `b2b` follows.
+- **It persists**, unlike the pen and B2B — a preference arms nothing. A saved
+  model the mind no longer offers is dropped against the published list rather
+  than sent and refused.
+- **No list, no selector.** `fetchMindModels` returns null when the mind cannot
+  be asked and the page then plays on the mind's default: being unable to
+  CHOOSE must never mean being unable to play.
+
 ## Testing
 
 - Unit: `npx vitest run` in `web/frontend` (hook tests use the

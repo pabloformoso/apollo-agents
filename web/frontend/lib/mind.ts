@@ -31,6 +31,18 @@ export interface MindRequest {
   recentReasons?: string[];
   /** True while the pen is alternating (§9.2). S6 sets this; S5 never does. */
   b2b?: boolean;
+  /**
+   * Which model to ask, from the list the mind published. Optional: absent
+   * means the mind's own default, which is what the :4031 playground sends and
+   * what every page sent before the selector existed.
+   */
+  model?: string;
+}
+
+/** What `GET /api/algorave/mind` answers: the models this mind will serve. */
+export interface MindModels {
+  models: string[];
+  default: string | null;
 }
 
 /** A successful answer. */
@@ -38,6 +50,12 @@ export interface MindProposal {
   code: string;
   reason: string;
   stats: Record<string, unknown>;
+  /**
+   * Which model actually answered. Without it a performer who switches
+   * mid-set cannot tell whether what they are hearing is the new one — which
+   * is the entire point of being able to switch.
+   */
+  model: string | null;
 }
 
 /**
@@ -71,8 +89,8 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
   // The wire shape is the pen module's job: it pins the field names the mind
   // validates by name, caps `recent_reasons`, and emits `b2b` only when true —
   // sending `b2b: false` would change the prompt of every free-mode call.
-  const body = JSON.stringify(
-    mindRequest({
+  const body = JSON.stringify({
+    ...mindRequest({
       code: req.code,
       intent: req.intent,
       genre: req.genre,
@@ -81,7 +99,14 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
       recentReasons: req.recentReasons,
       b2b: req.b2b,
     }),
-  );
+    // Added HERE rather than inside `mindRequest`, deliberately. That builder
+    // is the shared pen module, used by the :4031 playground too, and the
+    // selector is /algorave's alone — putting `model` in it would push a
+    // surface-specific field into the one file both surfaces share (seam 2).
+    // Emitted only when set, the same rule `b2b` follows: a `model: null` on
+    // every call would be the page naming a choice it has not made.
+    ...(req.model ? { model: req.model } : {}),
+  });
 
   let res: Response;
   try {
@@ -135,6 +160,32 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
       obj.stats && typeof obj.stats === "object"
         ? (obj.stats as Record<string, unknown>)
         : {},
+    model: typeof obj.model === "string" ? obj.model : null,
   };
+}
+
+/**
+ * The models this mind serves, or null when it could not be asked.
+ *
+ * Null is a degradation, never an error: a page that cannot list the models
+ * hides the selector and keeps playing on the mind's default. Being unable to
+ * CHOOSE must not mean being unable to play.
+ */
+export async function fetchMindModels(): Promise<MindModels | null> {
+  try {
+    const res = await fetch(MIND_ENDPOINT, { method: "GET" });
+    if (!res.ok) return null;
+    const obj = (await res.json()) as Record<string, unknown>;
+    const models = Array.isArray(obj.models)
+      ? obj.models.filter((m): m is string => typeof m === "string")
+      : [];
+    if (models.length === 0) return null;
+    return {
+      models,
+      default: typeof obj.default === "string" ? obj.default : null,
+    };
+  } catch {
+    return null;
+  }
 }
 

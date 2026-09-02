@@ -401,8 +401,11 @@ def test_a_valid_post_returns_code_reason_and_stats(serve, validator_ok):
     status, body, _ = post(url, {"code": "stack()", "intent": "darker"})
 
     assert status == 200
+    # `model` rides along so a performer who switches can tell WHICH model
+    # answered; None here because this test injects a bare factory that
+    # advertises no models.
     assert body == {"code": 'stack(s("bd*4"))', "reason": "pulled the master down",
-                    "stats": stats}
+                    "stats": stats, "model": None}
 
 
 def test_the_editor_buffer_reaches_the_mind_as_current_code(serve, validator_ok):
@@ -672,7 +675,10 @@ def test_default_arguments_match_the_documented_contract():
     assert args.port == 4032, "4010/4020 are prod, 4011/4021 dev, 4031 the spike page"
     assert args.host == "127.0.0.1"
     assert args.base_url == "http://100.68.5.104:1234/v1"
-    assert args.model == "google/gemma-4-e4b"
+    # `--model` is `action="append"`, so it is None until normalised — that is
+    # what makes repeating it additive instead of appending to a default.
+    assert args.model is None
+    assert playground.DEFAULT_MODEL == "google/gemma-4-e4b"
     assert args.genre == "deep" and args.key == "A:minor"
     assert args.mock is False
 
@@ -821,3 +827,80 @@ def test_code_the_real_validator_rejects_twice_comes_back_as_502(serve):
         "1st:" in body["detail"] and "2nd:" in body["detail"]
     )
     assert headers["Access-Control-Allow-Origin"] == ORIGIN
+
+
+# ─── the model selector ────────────────────────────────────────────────
+#
+# The page chooses, the SERVER owns the list. A free-form `model` field would
+# let a browser pick which backend gets billed, and gpt-4o is not free — so the
+# allow-list is the feature, not the dropdown.
+
+TWO_MODELS = ("google/gemma-4-e4b", "gpt-4o-mini")
+
+
+def _served(serve, models=TWO_MODELS):
+    factory = _factory(StrudelCode(code='s("bd*4")', reason="r", stats={}))
+    return serve(factory, models=models), factory
+
+
+def test_get_models_publishes_the_list_and_names_the_default(serve):
+    url, _ = _served(serve)
+    status, body, _ = _request(url, method="GET", body=None, path="/models")
+    assert status == 200
+    assert body == {"models": list(TWO_MODELS), "default": "google/gemma-4-e4b"}
+
+
+def test_a_request_may_choose_any_offered_model(serve, validator_ok):
+    url, factory = _served(serve)
+    status, body, _ = post(url, {"code": "", "intent": "darker", "model": "gpt-4o-mini"})
+    assert status == 200
+    # Reaches the factory, so the CALL uses it...
+    assert factory.calls[-1]["model"] == "gpt-4o-mini"
+    # ...and comes back, so a performer can tell which model they are hearing.
+    assert body["model"] == "gpt-4o-mini"
+
+
+def test_a_request_naming_no_model_gets_the_default(serve, validator_ok):
+    url, factory = _served(serve)
+    status, body, _ = post(url, {"code": "", "intent": "darker"})
+    assert status == 200
+    assert factory.calls[-1]["model"] is None      # the factory applies the default
+    assert body["model"] == "google/gemma-4-e4b"   # reported as what answered
+
+
+def test_an_unoffered_model_is_a_400_that_names_what_is_available(serve, validator_ok):
+    url, _ = _served(serve)
+    status, body, _ = post(url, {"code": "", "intent": "d", "model": "gpt-4o"})
+    assert status == 400
+    # The refusal has to be actionable: a bare "unknown model" would leave the
+    # operator guessing at a list only the server knows.
+    assert "gpt-4o-mini" in body["detail"] and "google/gemma-4-e4b" in body["detail"]
+
+
+def test_a_server_offering_one_model_still_refuses_a_different_one(serve, validator_ok):
+    url, _ = _served(serve, models=("google/gemma-4-e4b",))
+    status, _, _ = post(url, {"code": "", "intent": "d", "model": "gpt-4o-mini"})
+    assert status == 400
+
+
+def test_a_non_string_model_is_a_400_not_a_coerce(serve, validator_ok):
+    url, _ = _served(serve)
+    status, _, _ = post(url, {"code": "", "intent": "d", "model": 3})
+    assert status == 400
+
+
+def test_the_handler_takes_the_list_from_the_factory_when_not_told(serve):
+    # A server built the normal way has ONE source of truth for the list: the
+    # factory that can actually serve them.
+    factory = _factory(StrudelCode(code="s()", reason="", stats={}))
+    factory.models = ("a", "b")
+    url = serve(factory)
+    _, body, _ = _request(url, method="GET", body=None, path="/models")
+    assert body == {"models": ["a", "b"], "default": "a"}
+
+
+def test_model_is_repeatable_and_the_first_one_is_the_default():
+    args = playground.build_parser().parse_args(
+        ["--model", "gpt-4o-mini", "--model", "google/gemma-4-e4b"]
+    )
+    assert args.model == ["gpt-4o-mini", "google/gemma-4-e4b"]

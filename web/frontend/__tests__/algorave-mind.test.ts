@@ -11,6 +11,7 @@ import {
   MindError,
   askMind,
   autoApplyDecision,
+  fetchMindModels,
 } from "@/lib/mind";
 import { diffLines } from "@algorave/pen";
 
@@ -135,5 +136,68 @@ describe("diffLines — the shared implementation", () => {
   it("handles a pure insertion and a pure deletion", () => {
     expect(counts(diffLines("a", "a\nb") as { type: string }[])).toEqual({ added: 1, removed: 0 });
     expect(counts(diffLines("a\nb", "a") as { type: string }[])).toEqual({ added: 0, removed: 1 });
+  });
+});
+
+
+// ─── the model selector ────────────────────────────────────────────────
+//
+// The page may CHOOSE, but only from what the mind published. The wire rule
+// mirrors `b2b`: emitted when set, absent otherwise — a `model` on every call
+// would be the page naming a choice nobody made, and would take the mind off
+// its own default for free-mode requests.
+
+describe("choosing a model", () => {
+  it("sends `model` when one was picked", async () => {
+    const fetchSpy = stubFetch(200, { code: "x", reason: "", stats: {}, model: "gpt-4o-mini" });
+    await askMind({ code: "a", intent: "i", model: "gpt-4o-mini" });
+    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body));
+    expect(sent.model).toBe("gpt-4o-mini");
+  });
+
+  it("omits `model` entirely when none was picked", async () => {
+    const fetchSpy = stubFetch(200, { code: "x", reason: "", stats: {} });
+    await askMind({ code: "a", intent: "i" });
+    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body));
+    expect("model" in sent).toBe(false);
+  });
+
+  it("reads back WHICH model answered — the only way to hear a switch", async () => {
+    stubFetch(200, { code: "x", reason: "", stats: {}, model: "gpt-4o" });
+    expect((await askMind({ code: "a", intent: "i" })).model).toBe("gpt-4o");
+  });
+
+  it("reports a missing `model` as null rather than inventing one", async () => {
+    stubFetch(200, { code: "x", reason: "", stats: {} });
+    expect((await askMind({ code: "a", intent: "i" })).model).toBeNull();
+  });
+});
+
+describe("fetchMindModels", () => {
+  it("returns the published list and its default", async () => {
+    stubFetch(200, { models: ["a", "b"], default: "a" });
+    expect(await fetchMindModels()).toEqual({ models: ["a", "b"], default: "a" });
+  });
+
+  it("is null when the mind cannot be asked — the page then hides the selector", async () => {
+    // A degradation, never an error: unable to CHOOSE must not mean unable to
+    // play, so the page falls back to the mind's own default.
+    stubFetch(502, { error: "could not reach the mind" });
+    expect(await fetchMindModels()).toBeNull();
+  });
+
+  it("is null on an empty list, so a one-model mind renders no selector", async () => {
+    stubFetch(200, { models: [], default: null });
+    expect(await fetchMindModels()).toBeNull();
+  });
+
+  it("drops non-string entries instead of rendering them as options", async () => {
+    stubFetch(200, { models: ["a", 7, null, "b"], default: "a" });
+    expect(await fetchMindModels()).toEqual({ models: ["a", "b"], default: "a" });
+  });
+
+  it("survives a transport failure", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
+    expect(await fetchMindModels()).toBeNull();
   });
 });
