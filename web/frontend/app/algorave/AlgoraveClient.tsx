@@ -54,7 +54,7 @@ const OPENING_BUFFER = `stack(
   s("~ cp").bank("RolandTR909").room(0.3),
   s("hh*8").bank("RolandTR909").gain(0.4),
   note("c2 eb2 g2 bb2").s("supersaw").lpf(sine.range(400, 2000).slow(8)).gain(0.5)
-).cpm(124/4)`;
+)`;
 
 const DEFAULT_BPM = 124;
 
@@ -317,6 +317,10 @@ export function AlgoraveClient() {
   // `ask` and re-arm the scheduler mid-set; this way a switch simply applies
   // to the next boundary, which is what the UI promises.
   const modelRef = useRef(model);
+  // Tempo, read through a ref for the same reason as the model: `evaluate` is
+  // called from callbacks born at various times, and the CURRENT tempo is the
+  // one the engine must get.
+  const cpsRef = useRef(0);
   // Mirrored in an effect, not during render: the scheduler's interval reads
   // this, and writing a ref while rendering is a tear waiting to happen.
   useEffect(() => {
@@ -327,6 +331,14 @@ export function AlgoraveClient() {
   }, [model]);
 
   const cps = useMemo(() => cpsFor(bpm), [bpm]);
+  // Mirrored for `evaluate`, and pushed to a RUNNING engine so the BPM control
+  // changes the music immediately instead of at the next evaluate. Before the
+  // harness owned tempo this control moved only the phrase clock, which is why
+  // changing it appeared to do nothing to the sound.
+  useEffect(() => {
+    cpsRef.current = cps;
+    engine.current?.setcps?.(cps);
+  }, [cps]);
   const note = useCallback((bar: number, text: string) => {
     setLog((l) => [...l, { bar, text }].slice(-14));
   }, []);
@@ -371,6 +383,15 @@ export function AlgoraveClient() {
           await ctx.resume();
           note(barsRef.current, "audio context was suspended — resumed");
         }
+
+        // Tempo is set HERE, on every evaluate, and never carried in the
+        // buffer. The mind's prompt has always said "the harness owns tempo";
+        // until now nothing enforced it, so the tempo lived in `.cpm(124/4)`
+        // inside the buffer — which made the BPM control change only WHEN
+        // phrases fire, never how fast the music goes, and let the mind drop
+        // the tempo entirely (it is told not to write tempo calls, so it
+        // removed the one it was handed: measured at 2 of 4 mutations).
+        engine.current.setcps?.(cpsRef.current);
 
         await engine.current.evaluate(code);
 

@@ -55,6 +55,15 @@ export interface StrudelModule {
    * silence. Found in the playground's first real practice (2026-08-30).
    */
   getAudioContext: () => { state: string; resume: () => Promise<void> } | null;
+  /**
+   * Sets the global tempo, in cycles per second. THE HARNESS OWNS TEMPO —
+   * the mind's prompt says so and now it is true. Before this, nothing called
+   * it: the tempo rode inside the buffer as `.cpm(124/4)`, which meant the BPM
+   * control changed only when phrases fired and never the speed of the music,
+   * and the mind (correctly told never to write tempo calls) dropped the `.cpm`
+   * whenever it rewrote the buffer.
+   */
+  setcps: (cps: number) => void;
   /** Registers a sample map. `base` is prepended to every path inside it. */
   samples: (
     json: string | Record<string, unknown>,

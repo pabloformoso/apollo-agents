@@ -832,6 +832,31 @@ silent page: **structural checks pass while the music is wrong.**
 - `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
   it to the mock server on 8801.
 
+## The harness owns tempo (2026-09-02)
+
+- **It always said so; it only just became true.** The mind's prompt has always
+  carried "No `setcps`, `cps` or tempo calls of any kind: the harness owns
+  tempo" — and nothing in the page ever called `setcps`. The tempo rode inside
+  the buffer as `.cpm(124/4)`, which had two consequences nobody had connected:
+  the **BPM control changed only WHEN phrases fire, never how fast the music
+  goes** (`cps` was used solely for `barsElapsed`), and the mind — correctly
+  obeying "never write tempo calls" — DROPPED the `.cpm` it was handed whenever
+  it rewrote the buffer. Measured at 2 of 4 mutations. The audible effect was
+  small only by luck: Strudel's default 0.5 cps is 120 BPM against the seed's
+  124.
+- `evaluate` calls `setcps` before every evaluation, and a BPM change pushes to
+  a RUNNING engine so the control moves the music immediately. Tempo is read
+  through `cpsRef`, the same closure rule as `barsRef` and the model.
+- **A saved buffer is migrated on read, not refused.** `loadSession` strips a
+  TRAILING `.cpm(...)`; anything else stays, because a `.cpm` mid-buffer is a
+  performer's code and silently rewriting their work is worse than one stale
+  tempo call.
+- **The validator is deliberately NOT changed to reject tempo calls.** It would
+  be the consistent move — the prompt-only rule is the one this repo keeps
+  learning about — but it would turn every buffer saved before today into a red
+  verdict mid-set, and the migration above already removes the shape that
+  actually occurs. Revisit with a case in hand.
+
 ## Choosing the mind's model (/algorave only)
 
 - **The page chooses, the SERVER owns the list.** `algorave_playground.py` takes

@@ -74,8 +74,15 @@ export function loadSession(): SavedSession | null {
     // nothing worth restoring, so an absent one voids the whole snapshot.
     if (typeof o.buffer !== "string" || o.buffer.length === 0) return null;
 
+    // Migration: buffers saved before the harness owned tempo carry a trailing
+    // `.cpm(124/4)`. Left in, it would fight `setcps` for control of a value
+    // that now has exactly one owner — and it is the reason the BPM control
+    // used to do nothing. Stripped on read rather than refused: a performer's
+    // buffer is their work, and this is the one edit that makes it behave.
+    const buffer = o.buffer.replace(/\s*\.cpm\([^()]*(?:\([^()]*\)[^()]*)*\)\s*$/, "");
+
     return {
-      buffer: o.buffer,
+      buffer,
       intent: str(o.intent, ""),
       phraseBars: num(o.phraseBars, 8),
       b2bBars: num(o.b2bBars, 16),
