@@ -199,6 +199,10 @@ OUTPUT CONTRACT — obey it exactly:
   cycle is one bar of 4/4.
 - Express key musically with `.scale("{DEFAULT_KEY}")` (add an octave digit to the
   root — `.scale("A1:minor")` — to place the register) instead of hand-picking notes.
+- `.scale()` belongs on a layer that carries NOTES — `n(...)` or `note(...)`. On a
+  drum layer, `s("hh*8").bank(...).scale(...)`, there is nothing for it to
+  transpose: the layer makes no music and the engine complains once per event.
+  The validator refuses this now, so it costs a whole turn.
 
 Sampled instruments come in two shapes and are written differently. A CHROMATIC
 one (its map is keyed by note name — piano, balafon) is played with
