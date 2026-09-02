@@ -77,6 +77,52 @@ decides at coarse cadence, talking only through `LiveEngineProtocol`. The new wo
 third implementation, provisionally **`LiveEngineGenerative`**, where "clips" are
 live-generated MIDI patterns instead of WAV files.
 
+### 3.1b Latency picks the plane, not quality (measured 2026-09-02)
+
+The two planes above are separated by CADENCE, and that makes model latency a
+structural property rather than a preference: a mind that cannot answer inside a
+phrase does not belong on the phrase boundary, however good its music is.
+
+The arithmetic that decides it: at `cpm(124/4)` a bar is ~1.94 s, so an 8-bar
+phrase is **~15 s**. And a boundary missed because a call is in flight is
+SKIPPED, never queued (§11.3 of the algorave plan) — so a slow mind does not
+play late, it does not play at all.
+
+Two models, the same five intents, through `StrudelMind.next_code` with the real
+validator in the loop:
+
+| model | where | valid | first try | median | range |
+|---|---|---|---|---|---|
+| `google/gemma-4-e4b` | LM Studio on jarvis, shared 16 GB | 5/5 | 5/5 | **7.2 s** | 2.7–9.3 s |
+| `qwen3.8-27b` | LiteLLM on deusito, 48 GB / 2×4090 Ti | 4/5 | 3/5 | **122.9 s** | 16.8–503 s |
+
+The e4b answers inside the phrase. The 27B takes ~8 phrases at its median and 17
+at the budget it actually needs — it is not a slower partner, it is an absent
+one. **Tokens/s is not the metric**; a reasoner spends most of them thinking
+before it writes a note, which is why this is measured in seconds-to-a-valid-
+pattern instead.
+
+**The 4096-token budget failed SILENTLY, which is the part worth carrying.** At
+`--max-tokens 4096` the 27B twice returned an EMPTY completion — it reasoned
+until the budget was gone and never emitted code — surfacing as
+`no code in LLM reply: ''`, a message that reads like a broken model rather than
+a small envelope. At 16384 both previously-failing cases pass on the FIRST
+attempt (680 and 339 characters, 136 and 64 events) and the wall clock *drops*
+from 503 s to 252 s, because one retry costs more than a generous budget. So:
+any reasoning model wired in here needs 16384, and a reasoner on 4096 is a trap
+that looks like incapacity.
+
+What this does NOT say is that the big model is worse. It says the phrase
+boundary is the wrong place for it. A **third tier above the slow plane** — the
+opening pattern, section-level arc, decisions where nobody is waiting on a bar —
+is where 252 s with 2/2 accuracy is fine, and it has a second advantage that
+survives regardless: it runs off-box, leaving jarvis's shared 16 GB entirely to
+ACE-Step and dissolving the VRAM protocol for the algorave lane.
+
+Reproduce before trusting: the bench is five intents against
+`llm_mind_factory`, counting attempts by wrapping `mind._llm`. A model swap is
+`--base-url` + `--model` + `--api-key`, no code change.
+
 ### 3.2 The pattern-spec (slow plane → fast plane contract)
 The LLM never emits notes in real time. It emits a small spec the fast plane loops:
 ```jsonc
