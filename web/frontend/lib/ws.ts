@@ -2,19 +2,10 @@
 import { useEffect, useRef, useCallback, useEffectEvent } from "react";
 import { getToken } from "./auth";
 import type { ServerEvent } from "./types";
+// Next does not proxy WebSockets, so the browser dials the backend directly.
+// Where that is lives in ONE place — see lib/ws-base.ts.
+import { wsBase } from "./ws-base";
 
-function deriveWsBase(): string {
-  const explicit = process.env.NEXT_PUBLIC_WS_BASE;
-  if (explicit) return explicit;
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE;
-  if (apiBase) return apiBase.replace(/^http/, "ws");
-  // Next doesn't proxy WebSockets, so the browser connects directly to the
-  // backend. Default to the canonical dev port (matches the /api rewrite in
-  // next.config.ts). For prod or non-default ports set NEXT_PUBLIC_WS_BASE.
-  return "ws://localhost:4020";
-}
-
-const WS_BASE = deriveWsBase();
 
 export function useSessionWS(
   sessionId: string | null,
@@ -36,7 +27,7 @@ export function useSessionWS(
     const token = getToken();
     if (!token) return;
 
-    const ws = new WebSocket(`${WS_BASE}/ws/sessions/${sessionId}?token=${token}`);
+    const ws = new WebSocket(`${wsBase()}/ws/sessions/${sessionId}?token=${token}`);
     wsRef.current = ws;
     let opened = false;
     let cancelled = false;
