@@ -43,6 +43,9 @@ import {
   useState,
 } from "react";
 import { getToken } from "./auth";
+// Next does not proxy WebSockets, so the browser dials the backend directly.
+// Where that is lives in ONE place — see lib/ws-base.ts.
+import { wsBase } from "./ws-base";
 import { streamUrl } from "./api";
 import {
   BufferCache,
@@ -531,15 +534,6 @@ const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
 // more than 2-3 active at once.
 const CRITIC_WARNINGS_MAX = 10;
 
-function deriveWsBase(): string {
-  const explicit = process.env.NEXT_PUBLIC_WS_BASE;
-  if (explicit) return explicit;
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE;
-  if (apiBase) return apiBase.replace(/^http/, "ws");
-  return "ws://localhost:4020";
-}
-
-const WS_BASE = deriveWsBase();
 const PLAYBACK_POS_INTERVAL_MS = 250;
 
 // v2.7.3 — WS auto-reconnect with exponential backoff. Mirrors the
@@ -1715,7 +1709,7 @@ export function useLiveSession(
     // ``onConnected``.
     const connect = (attempt: number) => {
       if (cancelled) return;
-      const ws = new WebSocket(`${WS_BASE}${wsPath}?token=${token}`);
+      const ws = new WebSocket(`${wsBase()}${wsPath}?token=${token}`);
       currentWs = ws;
       wsRef.current = ws;
       let opened = false;

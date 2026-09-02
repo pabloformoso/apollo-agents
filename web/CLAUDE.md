@@ -807,6 +807,31 @@ silent page: **structural checks pass while the music is wrong.**
   page. Nav lives in `Shell`'s `ROUTES` — the one place pages register —
   and the wizard dialog carries a `view all generations` link.
 
+## WebSockets and the host the page came from
+
+- **`lib/ws-base.ts` is the ONE place that decides where a WebSocket goes**, and
+  it is a function called at CONNECT time, not a module constant. `lib/ws.ts`
+  and `lib/live.ts` each used to carry their own copy, both defaulting to
+  `ws://localhost:4020` — a string baked into the CLIENT bundle, so it means
+  "the machine with the tab open". From any browser that is not on the server,
+  every socket dialled the viewer's own laptop.
+- **The failure is silent in the worst way**: `/api/*` is same-origin through
+  the Next rewrite, so HTTP keeps working and only the live half dies. The
+  session page sits on "no brief yet" forever with nothing in the log; the
+  console shows one `WebSocket connection to 'ws://localhost:4020/...' failed`
+  that is easy to read as noise. Found 2026-09-02 from a tailnet browser.
+- **The default is derived from `window.location`** — the host that served the
+  page is the one host known to reach this deployment, whatever it is called.
+  Only the PORT is assumed (4020, what compose publishes). Protocol follows the
+  page, so an HTTPS page gets `wss:`; that only starts working once something
+  terminates TLS in front of the backend, and until then such a page needs
+  `NEXT_PUBLIC_WS_BASE`.
+- **Never read `location` at module scope.** These modules are imported during
+  SSR, so a module-level constant either throws or freezes the server's answer —
+  the same class of bug `ssr: false` retired on /algorave.
+- `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
+  it to the mock server on 8801.
+
 ## Testing
 
 - Unit: `npx vitest run` in `web/frontend` (hook tests use the
