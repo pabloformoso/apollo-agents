@@ -104,3 +104,29 @@ describe("storage that is not there", () => {
     expect(loadSession()).toBeNull();
   });
 });
+
+describe("the harness owns tempo (migration)", () => {
+  it("strips a legacy .cpm() off a saved buffer", () => {
+    // Buffers saved before the harness owned tempo carry it inline. Left in, it
+    // fights `setcps` for a value that now has one owner — and it is why the
+    // BPM control used to change only when phrases fired, never the music.
+    localStorage.setItem(
+      "apollo-algorave-v1",
+      JSON.stringify({ v: 1, ...session, buffer: 'stack(s("bd*4")).cpm(124/4)' }),
+    );
+    expect(loadSession()?.buffer).toBe('stack(s("bd*4"))');
+  });
+
+  it("leaves a buffer with no .cpm untouched", () => {
+    saveSession({ ...session, buffer: 'stack(s("bd*4"))' });
+    expect(loadSession()?.buffer).toBe('stack(s("bd*4"))');
+  });
+
+  it("does not eat a .cpm that is not the trailing call", () => {
+    // Only a TRAILING tempo call is the legacy shape. Anything else is a
+    // performer's code and stripping it would silently rewrite their work.
+    const b = 'stack(s("bd*4").cpm(120/4), s("hh*8"))';
+    saveSession({ ...session, buffer: b });
+    expect(loadSession()?.buffer).toBe(b);
+  });
+});
