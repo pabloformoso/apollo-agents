@@ -832,6 +832,33 @@ silent page: **structural checks pass while the music is wrong.**
 - `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
   it to the mock server on 8801.
 
+## The shared-GPU status panel (2026-09-04)
+
+- **`available` and RESIDENT are different questions**, and confusing them cost
+  hours twice. `GET /api/generator/health` answers "can we reach ACE";
+  `GET /api/generator/engines` answers "is it holding the 16 GB". A box started
+  with `--no-init` is reachable and weighing nothing — the intended resting
+  state, and invisible from `available` alone.
+- **It reports what each box says about itself, never a guess.** ACE's own
+  `/health` body (`models_initialized`, `loaded_model`, …) and LM Studio's
+  `/api/v0/models` (`state=loaded`). `loaded` and `known` stay separate numbers
+  because LISTED IS NOT LOADABLE — the root CLAUDE.md records that one after LM
+  Studio 400'd on every model it was still listing.
+- **The LLM URL is DERIVED from `OLLAMA_BASE_URL`**, not configured separately:
+  two addresses for one server is how they end up disagreeing. Note it uses
+  `/api/v0/models`, not the OpenAI-compatible `/v1/models` — the latter lists
+  what exists, which is not the question.
+- **Free VRAM is deliberately NOT shown.** Neither server exposes it and
+  `nvidia-smi` is not in the backend's container, so any figure would be an
+  inference dressed as a measurement. It needs a host-side helper — the same
+  one that would make LOAD/UNLOAD buttons possible, since ACE exposes
+  `POST /v1/init` but no unload, LM Studio's unload lives in the `lms` CLI, and
+  the container has neither `lms` nor sight of ACE's repo.
+- **Never 5xx, and renders nothing when it cannot be read**: a status panel that
+  can take the creation dialog down is worse than no panel.
+- `readAce`/`readLlm` are pure folds, so the readings are tested without a DOM —
+  including the one that matters, reachable-but-idle.
+
 ## Serving this over HTTPS (2026-09-02)
 
 Set up by the jarvis web-server session, not here; this is what the app side

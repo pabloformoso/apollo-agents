@@ -438,6 +438,30 @@ class AceStepClient:
             return False
         return True
 
+    async def engine_state(self) -> dict[str, Any] | None:
+        """``GET /health``'s BODY — what the box currently HOLDS.
+
+        `health()` answers "can I reach it"; this answers "is it holding the
+        GPU". They are different questions and today they were confused twice:
+        a box that answers /health while `models_initialized` is false is up and
+        weighing nothing, which is the whole point of starting it with
+        `--no-init`. Without this the panel can only say "reachable", which is
+        exactly the half that was never in doubt.
+
+        Total like `health()`: `None` for disabled, unreachable or malformed,
+        because a status panel must never be the thing that breaks.
+        """
+        if not self.enabled():
+            return None
+        timeout = httpx.Timeout(
+            HEALTH_TIMEOUT_SEC, connect=HEALTH_CONNECT_TIMEOUT_SEC
+        )
+        try:
+            data = await self._request("GET", "/health", timeout=timeout)
+        except AceStepError:
+            return None
+        return data if isinstance(data, dict) else None
+
     async def stats(self) -> dict[str, Any]:
         """``GET /v1/stats`` — queue depth + ``avg_job_seconds`` (ETA source)."""
         data = await self._request("GET", "/v1/stats")

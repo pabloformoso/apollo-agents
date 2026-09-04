@@ -54,6 +54,7 @@ import { Banner, Spinner } from "./feedback";
 // renders exactly the same rows, and one definition is what keeps a take
 // behaving identically in both frames.
 import { Field, FIELD_CLS, TakeRow, playableFor } from "./GeneratorTakes";
+import { EngineStatusPanel } from "./EngineStatus";
 
 const DURATION_MIN = 120;
 const DURATION_MAX = 300;
@@ -230,6 +231,10 @@ export function GeneratorDialog({
           </Link>
         </span>
       </div>
+
+      {/* What the shared 16 GB is holding, on the panel where you would act
+          on it. Renders nothing when it cannot be read — never a blocker. */}
+      <EngineStatusPanel />
 
       {showForm ? (
         <form onSubmit={onSubmit} className="flex flex-col gap-4">

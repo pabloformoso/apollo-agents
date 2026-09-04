@@ -76,6 +76,8 @@ import posixpath
 import shutil
 import tempfile
 from dataclasses import dataclass
+import httpx
+
 from typing import Any, Literal
 from urllib.parse import quote, unquote
 
@@ -1002,6 +1004,111 @@ async def _record_publish(user_id: int, decoded_path: str, track_id: str) -> Non
 
 
 router = APIRouter()
+
+
+#: Bound on the LLM-server probe. It is a local box on the tailnet; anything
+#: slower than this is "not answering" for a panel that renders on mount.
+ENGINES_TIMEOUT_SEC = 3.0
+
+
+def _llm_models_url() -> str | None:
+    """Where to ask the local LLM server which models it HOLDS.
+
+    Derived from `OLLAMA_BASE_URL` (the one place the app's OpenAI-compatible
+    endpoint is configured) rather than a second variable: two addresses for
+    one server is how they end up disagreeing. LM Studio serves the state under
+    `/api/v0/models`; the OpenAI-compatible `/v1/models` lists what EXISTS,
+    which is not the question — a listed model is not a loaded one, and that
+    distinction is written into the root CLAUDE.md in blood.
+
+    Read at CALL time (the `brief_parser` lesson).
+    """
+    base = os.getenv("OLLAMA_BASE_URL", "").strip()
+    if not base:
+        return None
+    return base.rstrip("/").removesuffix("/v1") + "/api/v0/models"
+
+
+async def _llm_engine_state() -> dict[str, Any]:
+    """Which local models are loaded. Never raises: unreachable is an answer."""
+    url = _llm_models_url()
+    if not url:
+        return {"configured": False, "reachable": False, "loaded": [], "known": 0}
+    try:
+        async with httpx.AsyncClient(timeout=ENGINES_TIMEOUT_SEC) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as exc:  # noqa: BLE001 — every failure means "no answer"
+        print(f"[generator] LLM state probe failed: {exc}", flush=True)
+        return {"configured": True, "reachable": False, "loaded": [], "known": 0}
+
+    entries = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(entries, list):
+        return {"configured": True, "reachable": True, "loaded": [], "known": 0}
+    loaded = [
+        m.get("id")
+        for m in entries
+        if isinstance(m, dict) and m.get("state") == "loaded" and m.get("id")
+    ]
+    return {
+        "configured": True,
+        "reachable": True,
+        "loaded": loaded,
+        "known": len(entries),
+    }
+
+
+@router.get("/api/generator/engines")
+async def generator_engines(
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """What the two GPU tenants are HOLDING right now.
+
+    The panel this feeds exists because the shared 16 GB is managed by a
+    protocol nobody can see: ACE wants ~12.5 GB and the live DJ's model ~6, so
+    they cannot both be resident, and the failure when they collide is silent —
+    LM Studio answers 400 for every model while still LISTING them, and the
+    first brief after an unload simply takes a long time for no visible reason.
+    Both cost hours on 2026-09-02/04.
+
+    Reports what each side SAYS about itself, never a guess:
+
+    * `ace.loaded` — `models_initialized` from ACE's own /health. Started with
+      `--no-init` it is reachable and holding nothing, which is the intended
+      resting state and is invisible from `available` alone.
+    * `llm.loaded` — the ids LM Studio reports as `state=loaded`.
+
+    Deliberately NOT reported: free VRAM. Neither box exposes it and
+    `nvidia-smi` is not in this container, so any number here would be an
+    inference dressed as a measurement. It needs a host-side helper.
+
+    Never 5xx: a status panel that can take the page down is worse than no
+    panel. Every unreachable path answers with flags, not an error.
+    """
+    client = _client()
+    ace_state = await client.engine_state()
+
+    ace: dict[str, Any] = {
+        "configured": client.enabled(),
+        "reachable": ace_state is not None,
+        "loaded": False,
+        "llm_loaded": False,
+        "model": None,
+        "lm_model": None,
+    }
+    if ace_state:
+        body = ace_state.get("data") if isinstance(ace_state.get("data"), dict) else ace_state
+        ace["loaded"] = bool(body.get("models_initialized"))
+        ace["llm_loaded"] = bool(body.get("llm_initialized"))
+        ace["model"] = body.get("loaded_model")
+        ace["lm_model"] = body.get("loaded_lm_model")
+
+    return {
+        "ace": ace,
+        "llm": await _llm_engine_state(),
+        "blocked_by_live": live_session_active(),
+    }
 
 
 @router.get("/api/generator/health")

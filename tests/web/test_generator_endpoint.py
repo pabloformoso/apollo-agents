@@ -294,3 +294,91 @@ def test_guard_flips_with_a_real_live_websocket(
         assert generator.live_session_active(sid) is True
 
     assert generator.live_session_active() is False
+
+
+# ── GET /api/generator/engines — what the two GPU tenants HOLD ────────
+#
+# `available` answers "can I reach ACE". This answers "is it holding the
+# 12.5 GB", which is a different question and the one the shared-GPU
+# protocol actually turns on. Started with `--no-init`, ACE is reachable
+# and resident in nothing — a state `available` cannot express.
+
+def _ace_holding(loaded: bool):
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json=_envelope({
+                "status": "ok",
+                "models_initialized": loaded,
+                "llm_initialized": loaded,
+                "loaded_model": "acestep-v15-turbo",
+                "loaded_lm_model": "acestep-5Hz-lm-0.6B" if loaded else None,
+            }))
+        return httpx.Response(404, json=_envelope(None, code=404, error="nope"))
+    return responder
+
+
+def _stub_llm(monkeypatch, payload, *, fail: bool = False):
+    """Stand in for LM Studio's /api/v0/models."""
+    async def fake():
+        if fail:
+            return {"configured": True, "reachable": False, "loaded": [], "known": 0}
+        return payload
+    monkeypatch.setattr(generator, "_llm_engine_state", fake)
+
+
+def test_engines_requires_auth(client):
+    assert client.get("/api/generator/engines").status_code == 401
+
+
+def test_reachable_but_holding_nothing_is_reported_as_such(auth_client, ace_on, monkeypatch):
+    # The resting state of a box started with --no-init. Reporting it as
+    # merely "available" is what hid, twice, that nothing was loaded.
+    _install_ace(monkeypatch, _ace_holding(False))
+    _stub_llm(monkeypatch, {"configured": True, "reachable": True,
+                            "loaded": [], "known": 6})
+    ace = auth_client.get("/api/generator/engines").json()["ace"]
+    assert ace["reachable"] is True
+    assert ace["loaded"] is False
+    assert ace["model"] == "acestep-v15-turbo"   # what it WOULD load
+
+
+def test_a_loaded_box_names_both_models(auth_client, ace_on, monkeypatch):
+    _install_ace(monkeypatch, _ace_holding(True))
+    _stub_llm(monkeypatch, {"configured": True, "reachable": True,
+                            "loaded": [], "known": 6})
+    ace = auth_client.get("/api/generator/engines").json()["ace"]
+    assert ace["loaded"] is True and ace["llm_loaded"] is True
+    assert ace["lm_model"] == "acestep-5Hz-lm-0.6B"
+
+
+def test_an_unreachable_ace_is_an_answer_not_a_500(auth_client, ace_on, monkeypatch):
+    # A status panel that can take the page down is worse than no panel.
+    def dead(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("box is off")
+    _install_ace(monkeypatch, dead)
+    _stub_llm(monkeypatch, {}, fail=True)
+    r = auth_client.get("/api/generator/engines")
+    assert r.status_code == 200
+    assert r.json()["ace"] == {
+        "configured": True, "reachable": False, "loaded": False,
+        "llm_loaded": False, "model": None, "lm_model": None,
+    }
+
+
+def test_the_llm_side_reports_which_model_is_loaded(auth_client, ace_on, monkeypatch):
+    # LISTED IS NOT LOADED — the distinction the root CLAUDE.md records in
+    # blood, so `known` and `loaded` are separate numbers.
+    _install_ace(monkeypatch, _ace_holding(False))
+    _stub_llm(monkeypatch, {"configured": True, "reachable": True,
+                            "loaded": ["google/gemma-4-e4b"], "known": 6})
+    llm = auth_client.get("/api/generator/engines").json()["llm"]
+    assert llm["loaded"] == ["google/gemma-4-e4b"]
+    assert llm["known"] == 6
+
+
+def test_the_models_url_is_derived_from_the_one_configured_endpoint(monkeypatch):
+    # Two addresses for one server is how they end up disagreeing.
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://100.68.5.104:1234/v1")
+    assert generator._llm_models_url() == "http://100.68.5.104:1234/api/v0/models"
+    monkeypatch.delenv("OLLAMA_BASE_URL")
+    assert generator._llm_models_url() is None
