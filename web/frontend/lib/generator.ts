@@ -8,6 +8,7 @@
  *
  * Contract (docs/acestep-wizard-plan.md, "G1 contract"):
  *   - `GET  /api/generator/health`      → {available, blocked_by_live, stats}
+ *   - `GET  /api/generator/engines`     → what each GPU tenant is HOLDING
  *   - `POST /api/generator/tasks`       → {task_id, queue_position, eta_seconds}
  *   - `GET  /api/generator/tasks/{id}`  → {status, takes[], eta_seconds, degraded?}
  *   - `GET  /api/generator/audio?path=` → streaming proxy
@@ -267,10 +268,45 @@ async function gfetch<T>(path: string, options: RequestInit = {}): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** One GPU tenant's own account of itself. */
+export interface EngineStatus {
+  ace: {
+    /** ACESTEP_BASE_URL is set. False means the feature is off, not broken. */
+    configured: boolean;
+    reachable: boolean;
+    /** Resident in VRAM. The number that matters for the shared-GPU protocol. */
+    loaded: boolean;
+    llm_loaded: boolean;
+    /** What it holds, or would load on first use. */
+    model: string | null;
+    lm_model: string | null;
+  };
+  llm: {
+    configured: boolean;
+    reachable: boolean;
+    /** Ids reported as `state=loaded`. LISTED IS NOT LOADED. */
+    loaded: string[];
+    /** How many it knows about — deliberately a different number. */
+    known: number;
+  };
+  blocked_by_live: boolean;
+}
+
 // ── Endpoints ─────────────────────────────────────────────────────────────
 
 export const getGeneratorHealth = () =>
   gfetch<GeneratorHealth>("/generator/health");
+
+/**
+ * What ACE and the local LLM server are HOLDING, as each reports about itself.
+ *
+ * Different question from `health`: that one answers "can we reach ACE", this
+ * one "is it resident in the shared 16 GB". A box started with `--no-init` is
+ * reachable and holding nothing, which is the intended resting state and is
+ * invisible from `available` alone — a confusion that cost hours twice.
+ */
+export const getEngineStatus = () =>
+  gfetch<EngineStatus>("/generator/engines");
 
 export const createGeneratorTask = (body: CreateTaskRequest) =>
   gfetch<CreateTaskResponse>("/generator/tasks", {
