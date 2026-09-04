@@ -32,6 +32,13 @@ vids/
 # macOS metadata
 .DS_Store
 tracks/.DS_Store
+# Half-finished browser downloads. One rode into the catalog inside a 24 GB
+# tar from a Windows box and showed up as an untracked genre folder — the
+# audio itself was already covered by `tracks/**/*.wav`, so this stray was the
+# only thing git could see.
+tracks/**/*.crdownload
+tracks/**/*.part
+tracks/**/*.download
 
 # Claude project config
 .claude/
@@ -65,6 +72,10 @@ playwright-report/
 # Catalog backups + local debug build dirs
 tracks/tracks.json.bak
 tracks/tracks.json.*.bak
+# `ingest_track` stamps its backup as `tracks.json.bak-<stamp>` — a DASH, so
+# the two patterns above miss it. Found one in the working tree that had been
+# untracked since July.
+tracks/tracks.json.bak-*
 web/frontend/.next-debug/
 
 # Misc local screenshots
