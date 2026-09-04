@@ -18,6 +18,7 @@ import AddToPlaylistMenu from "@/components/AddToPlaylistMenu";
 import { Shell } from "@/components/ember/Shell";
 import { Crumb, Stripe } from "@/components/ember/primitives";
 import type { Track } from "@/lib/types";
+import { GenerateSongs } from "@/components/ember/GenerateSongs";
 
 function formatDuration(sec: number | null | undefined) {
   if (!sec) return "—";
@@ -153,6 +154,10 @@ export default function CatalogPage() {
               The catalog<span className="text-ember">.</span>
             </h1>
           </div>
+          {/* Making songs belongs where the library is, not only inside the
+              session wizard. Renders nothing when ACE is unreachable. The
+              genre filter you are looking at preselects the form. */}
+          <GenerateSongs defaultGenre={genre || null} />
           <input
             type="text"
             value={search}
