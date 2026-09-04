@@ -48,6 +48,7 @@ import { Shell } from "@/components/ember/Shell";
 import { Btn, Crumb } from "@/components/ember/primitives";
 import { Banner, Spinner } from "@/components/ember/feedback";
 import { TakeRow, playableFor } from "@/components/ember/GeneratorTakes";
+import { GenerateSongs } from "@/components/ember/GenerateSongs";
 
 /** The badge. `stale` is deliberately the quietest of the four — it is not
  *  a fault, just a record that aged out. */
@@ -350,6 +351,12 @@ function GenerationsFeed() {
           the tab they were asked for in — play them, score them, edit them,
           and publish the keepers into the catalog.
         </p>
+        {/* The feed is where you come back to look at what you made, so it is
+            also where wanting another one happens. Renders nothing when ACE
+            is unreachable. */}
+        <div className="mt-6">
+          <GenerateSongs kind="primary" />
+        </div>
       </section>
 
       <section className="px-[60px] py-8 flex-1 flex flex-col gap-6">

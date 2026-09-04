@@ -832,6 +832,28 @@ silent page: **structural checks pass while the music is wrong.**
 - `NEXT_PUBLIC_WS_BASE` still wins over everything: `playwright.config.ts` pins
   it to the mock server on 8801.
 
+## Where generation is reached from (2026-09-04)
+
+- **Two doors, two different questions.** `GenerateTrackTile` in the editor
+  answers "fill THIS slot in the set I am building" — generation as a step
+  inside a session, and it stays. `GenerateSongs` in `/catalog` and
+  `/generations` answers the other half: sit down, write a prompt, make songs,
+  keep the ones that work. That has nothing to do with a session, and while its
+  only door was inside the session wizard it was unreachable from where anyone
+  actually thinks about their library.
+- **Nothing had to be decoupled.** `GeneratorDialog` takes
+  `{open, onClose, defaultGenre}` and knows nothing about sessions, and publish
+  already ran `main.ingest_track` straight into the catalog. The missing piece
+  was the door, not the room — worth checking before assuming a refactor.
+- **The absence rule is the one with teeth**: unavailable renders NOTHING, not
+  a disabled button and not an error. The ACE box is off most of the time by
+  design. `blocked_by_live` is different and renders DISABLED — the box is
+  there, the GPU is busy, and hiding it would read as "the feature is gone"
+  instead of "not right now". Tested, including the no-flicker case where the
+  health answer is still in flight.
+- The catalog's genre filter preselects the form's genre: the thing you are
+  looking at is usually the thing you want more of.
+
 ## The shared-GPU status panel (2026-09-04)
 
 - **`available` and RESIDENT are different questions**, and confusing them cost
