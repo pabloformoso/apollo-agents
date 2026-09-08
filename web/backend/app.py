@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
-from . import covers, db, auth, pipeline, youtube_auth
+from . import covers, db, auth, keycloak, permissions, pipeline, youtube_auth
 from .generator import router as generator_router
 from .render import router as render_router
 from .models import (
@@ -30,6 +30,7 @@ from .models import (
     PlaylistReorder,
     RatingRequest,
     RatingUpdate,
+    KeycloakExchangeRequest,
     RegisterRequest,
     SessionEditorCommand,
     SessionTrackInsert,
@@ -161,8 +162,26 @@ def _should_emit_genre_error(history: list[dict]) -> bool:
 # Auth
 # ---------------------------------------------------------------------------
 
+def _require_local_login() -> None:
+    """403 when this deployment has handed identity to the realm.
+
+    A 403 rather than a 404: the route exists, the deployment has
+    decided not to use it, and a client that gets a clear refusal can
+    show the right button instead of guessing.
+    """
+    if not auth.LOCAL_LOGIN_ENABLED:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Local accounts are disabled on this deployment — sign in "
+                "through the identity provider."
+            ),
+        )
+
+
 @app.post("/api/auth/register", response_model=TokenResponse)
 async def register(req: RegisterRequest):
+    _require_local_login()
     if db.get_user_by_username(req.username):
         raise HTTPException(status_code=400, detail="Username already taken")
     user_id = db.create_user(req.username, req.email, auth.hash_password(req.password))
@@ -175,6 +194,7 @@ async def register(req: RegisterRequest):
 
 @app.post("/api/auth/login", response_model=TokenResponse)
 async def login(req: LoginRequest):
+    _require_local_login()
     user = db.get_user_by_username(req.username)
     if not user or not auth.verify_password(req.password, user["hashed_password"]):
         raise HTTPException(status_code=400, detail="Invalid credentials")
@@ -185,9 +205,58 @@ async def login(req: LoginRequest):
     )
 
 
+@app.post("/api/auth/keycloak", response_model=TokenResponse)
+async def keycloak_exchange(req: KeycloakExchangeRequest):
+    """Trade a verified realm token for an Apollo one.
+
+    This exchange is why the realm token never has to travel again. The
+    audio, cover and live-stream endpoints take their token in the query
+    string — an ``<audio>``, an ``<img>`` and a ``WebSocket`` cannot set
+    an Authorization header — and a realm access token in a URL ends up
+    in browser history, proxy logs and nginx access logs, where it is
+    the key to every other client in the realm. Apollo's token is
+    useless anywhere but here.
+
+    The realm roles are read once, here, and minted into the Apollo
+    token as capabilities. A role change therefore takes effect at the
+    user's next login, which the token lifetime bounds.
+    """
+    if not auth.KEYCLOAK_LOGIN_ENABLED:
+        raise HTTPException(
+            status_code=403, detail="Identity-provider login is disabled here"
+        )
+    if not keycloak.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Identity provider is not configured on this deployment",
+        )
+    user = auth.user_from_keycloak_token(req.token)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid identity token")
+    token = auth.create_access_token(
+        {"sub": str(user["id"]), "caps": sorted(user.get("capabilities") or ())}
+    )
+    return TokenResponse(
+        access_token=token,
+        user={
+            "id": user["id"],
+            "username": user["username"],
+            "email": user["email"],
+        },
+    )
+
+
 @app.get("/api/auth/me")
 async def me(current_user: dict = Depends(auth.get_current_user)):
-    return {"id": current_user["id"], "username": current_user["username"], "email": current_user["email"]}
+    # ``capabilities`` lets the UI hide what this account cannot do. It
+    # is a convenience, never the check: every guarded endpoint verifies
+    # server-side, because a hidden button is not a permission.
+    return {
+        "id": current_user["id"],
+        "username": current_user["username"],
+        "email": current_user["email"],
+        "capabilities": sorted(current_user.get("capabilities") or ()),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1069,6 +1138,14 @@ async def live_session_ws(
     """
     user = auth.user_from_query_token(token)
     if user is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    # v3.11 — a live set goes out on air and holds the shared 16 GB GPU
+    # for hours. On 2026-09-07 that starved ACE-Step of VRAM and made
+    # every generation fail with an unexplained error, so broadcasting is
+    # a realm role rather than merely being logged in.
+    if not permissions.has_capability(user, permissions.START_LIVE_SESSION):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
