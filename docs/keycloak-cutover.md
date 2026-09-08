@@ -77,6 +77,13 @@ directly on the tailnet at `:8180` instead. The issuer stays the *public*
 URL regardless: it is what Keycloak stamps into every token, and the backend
 compares it character for character.
 
+The two `NEXT_PUBLIC_` values reach the browser through an explicit
+passthrough in `docker-compose.yml`. The frontend service does not use
+`env_file`, so a variable that is not named there never reaches the page —
+and the symptom is a login page that keeps showing the local form while the
+backend has already started refusing it. A login that fails with no error
+anywhere.
+
 Then recreate the backend — `restart` does **not** re-read `env_file`:
 
 ```bash

@@ -109,6 +109,15 @@ services:
       # would additionally push the app's HTTP calls out of Next's rewrite and
       # make them cross-origin for no reason.
       NEXT_PUBLIC_WS_BASE: "${NEXT_PUBLIC_WS_BASE:-}"
+      # Identity provider, read by the browser bundle. The frontend
+      # service does NOT use env_file — it has this explicit list — so a
+      # variable that is not named here simply never reaches the page.
+      # Both of these gate the realm sign-in button: without them the
+      # login page silently keeps showing the local form while the
+      # backend has already started refusing it with a 403, which is a
+      # login that fails with no error anywhere.
+      NEXT_PUBLIC_KEYCLOAK_ISSUER: "${NEXT_PUBLIC_KEYCLOAK_ISSUER:-}"
+      NEXT_PUBLIC_KEYCLOAK_CLIENT_ID: "${NEXT_PUBLIC_KEYCLOAK_CLIENT_ID:-}"
     depends_on:
       # Backend doesn't strictly need to be UP before Next starts (the
       # proxy resolves lazily), but ``depends_on`` makes ``compose up``
