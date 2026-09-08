@@ -38,7 +38,15 @@ export const login = (username: string, password: string) =>
   );
 
 export const me = () =>
-  req<{ id: number; username: string; email: string }>("/auth/me");
+  req<{
+    id: number;
+    username: string;
+    email: string;
+    // What this account may do, from its realm roles. A convenience for
+    // hiding controls — never the check. Every guarded endpoint verifies
+    // server-side, because a hidden button is not a permission.
+    capabilities: string[];
+  }>("/auth/me");
 
 // Sessions
 export const createSession = () =>
@@ -240,6 +248,18 @@ export const streamUrl = (trackId: string): string => {
   const token = getToken() ?? "";
   return `${BASE}/tracks/${encodeURIComponent(trackId)}/stream?token=${encodeURIComponent(token)}`;
 };
+
+// Trade a verified realm token for an Apollo one. The realm token is
+// used exactly here and never stored — Apollo's token is the one that
+// ends up in query strings for audio, covers and the live socket.
+export const keycloakExchange = (token: string) =>
+  req<{
+    access_token: string;
+    user: { id: number; username: string; email: string };
+  }>("/auth/keycloak", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
 
 // Locally generated cover art. Same query-string token trick as
 // streamUrl — an <img> can't set Authorization either. Only tracks

@@ -12,6 +12,16 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { login } from "@/lib/api";
 import { saveAuth } from "@/lib/auth";
+import {
+  buildAuthorizeUrl,
+  CALLBACK_PATH,
+  challengeFor,
+  createState,
+  createVerifier,
+  isConfigured as realmConfigured,
+  safeReturnTo,
+  stashFlow,
+} from "@/lib/oidc";
 import { ApolloMark, Btn, Crumb, Stripe } from "@/components/ember/primitives";
 
 export default function LoginPage() {
@@ -20,6 +30,33 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  // When this build is pointed at a realm, the local form is not merely
+  // hidden — the backend answers 403 to /api/auth/login. Showing a form
+  // that cannot work would be a worse experience than showing none.
+  const useRealm = realmConfigured();
+
+  async function signInWithRealm() {
+    setError("");
+    setLoading(true);
+    try {
+      const verifier = createVerifier();
+      const state = createState();
+      const params = new URLSearchParams(window.location.search);
+      stashFlow(verifier, state, safeReturnTo(params.get("returnTo")));
+      const url = buildAuthorizeUrl({
+        challenge: await challengeFor(verifier),
+        state,
+        redirectUri: `${window.location.origin}${CALLBACK_PATH}`,
+      });
+      window.location.assign(url);
+    } catch (err) {
+      // Left visible: an exception here means the browser refused
+      // crypto.subtle (an insecure origin, typically), and a spinner
+      // that never resolves would say nothing about why.
+      setLoading(false);
+      setError((err as Error).message);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -46,6 +83,29 @@ export default function LoginPage() {
           Sign in<span className="text-ember">.</span>
         </h1>
 
+        {useRealm ? (
+          <div className="mt-8 flex flex-col gap-5 max-w-[360px]">
+            <p className="text-sm text-faint leading-relaxed">
+              Apollo uses your identity provider account. You will be sent
+              there to sign in and returned here.
+            </p>
+            {error && (
+              <p className="font-mono text-[11px] text-ember uppercase tracking-mono">
+                {error}
+              </p>
+            )}
+            <div className="mt-4">
+              <Btn
+                type="button"
+                onClick={signInWithRealm}
+                disabled={loading}
+                className="font-display italic text-lg"
+              >
+                {loading ? "Redirecting…" : "Continue to sign in"}
+              </Btn>
+            </div>
+          </div>
+        ) : (
         <form
           onSubmit={handleSubmit}
           className="mt-8 flex flex-col gap-5 max-w-[360px]"
@@ -101,6 +161,7 @@ export default function LoginPage() {
             </Btn>
           </div>
         </form>
+        )}
       </section>
 
       {/* ── Right: stripe poster ── */}
