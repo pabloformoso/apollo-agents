@@ -85,7 +85,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import acestep_client, auth, covers, db
+from . import acestep_client, auth, covers, db, permissions
 from .brief_parser import detect_provider
 from .ws_manager import ws_manager
 
@@ -1462,6 +1462,18 @@ async def publish_take(
     file up first, so the loser of a race loses one entry, not the
     catalog.
     """
+
+    # v3.11 — publishing writes into tracks/, which every future session
+    # of every user then draws from. That is shared state, so it needs a
+    # realm role rather than merely being logged in.
+    if not permissions.has_capability(current_user, permissions.PUBLISH_TO_CATALOG):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "This account cannot publish to the catalog. Publishing "
+                "adds a track every session can draw from."
+            ),
+        )
     client = _client()
     if not client.enabled():
         raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)

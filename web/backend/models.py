@@ -16,6 +16,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class KeycloakExchangeRequest(BaseModel):
+    """A realm token the browser just obtained, to be traded for Apollo's.
+
+    Capped at 8 KB: a Keycloak access token with a few realm roles runs
+    to a couple of kilobytes, and an unbounded field on an unauthenticated
+    endpoint is somewhere to push megabytes at a signature verifier.
+    """
+
+    token: str = Field(..., min_length=1, max_length=8192)
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

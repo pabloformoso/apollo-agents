@@ -15,6 +15,31 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
+#: Stored in ``hashed_password`` for accounts that authenticate through
+#: Keycloak. The column is NOT NULL on every database created before
+#: 2026-09-08 and SQLite cannot drop that constraint with ALTER, so the
+#: schema stays as it is and the value carries the meaning instead.
+#:
+#: It is not a hash and cannot be one: bcrypt output always starts with
+#: ``$2``, so ``verify_password`` rejects this for any password anyone
+#: could ever type. That is the point — a Keycloak account must not be
+#: reachable through the local login form.
+KEYCLOAK_PASSWORD_SENTINEL = "!keycloak-no-local-password"
+
+
+def _add_column_if_missing(c, table: str, column: str, decl: str) -> None:
+    """Idempotent ALTER TABLE — this schema has no migration mechanism.
+
+    Every table is created with ``IF NOT EXISTS``, which silently does
+    nothing when the table already exists, so a column added later never
+    appears on an existing database. PRAGMA table_info is the check that
+    makes adding one safe to run on every boot.
+    """
+    cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def init_db() -> None:
     with _conn() as c:
         c.execute("""
@@ -132,6 +157,18 @@ def init_db() -> None:
         c.commit()
 
 
+        # v3.11 — Keycloak identity. Nullable and UNIQUE: local accounts
+        # keep NULL (SQLite allows many NULLs in a UNIQUE column), while a
+        # federated account is keyed by the realm's immutable ``sub``.
+        # Never key on email or username — both are editable in Keycloak
+        # and re-pointing a row at a different human is a whole-account
+        # takeover, ratings and playlists included.
+        _add_column_if_missing(c, "users", "keycloak_sub", "TEXT")
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_keycloak_sub "
+            "ON users(keycloak_sub) WHERE keycloak_sub IS NOT NULL"
+        )
+
 def create_user(username: str, email: str, hashed_password: str) -> int:
     with _conn() as c:
         cur = c.execute(
@@ -143,6 +180,51 @@ def create_user(username: str, email: str, hashed_password: str) -> int:
         if user_id is None:
             raise RuntimeError("INSERT returned no lastrowid")
         return user_id
+
+
+def get_user_by_keycloak_sub(sub: str) -> dict | None:
+    """Look up a federated account by the realm's immutable subject id."""
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM users WHERE keycloak_sub = ?", (sub,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def create_keycloak_user(sub: str, username: str, email: str) -> int:
+    """Create the local row that mirrors a Keycloak account.
+
+    Apollo keeps a local ``users`` row per person because five tables
+    hold a foreign key to ``users(id)`` — sessions, ratings, playlists,
+    oauth tokens, generations. Federating identity does not mean
+    discarding that graph; it means the row stops owning a password.
+
+    ``username``/``email`` are UNIQUE, and Keycloak lets a realm admin
+    change both. A collision here means a DIFFERENT local row already
+    holds that name, so the caller gets an IntegrityError rather than
+    this function silently attaching one person's history to another.
+    """
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO users (username, email, hashed_password, keycloak_sub) "
+            "VALUES (?, ?, ?, ?)",
+            (username, email, KEYCLOAK_PASSWORD_SENTINEL, sub),
+        )
+        return int(cur.lastrowid)
+
+
+def link_user_to_keycloak(user_id: int, sub: str) -> None:
+    """Attach an existing local account to a Keycloak subject.
+
+    This is the migration path for an account that predates the realm:
+    it keeps its id — and therefore its ratings, playlists and sessions —
+    and stops being reachable through the local login form.
+    """
+    with _conn() as c:
+        c.execute(
+            "UPDATE users SET keycloak_sub = ?, hashed_password = ? WHERE id = ?",
+            (sub, KEYCLOAK_PASSWORD_SENTINEL, user_id),
+        )
 
 
 def get_user_by_username(username: str) -> dict | None:
