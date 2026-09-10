@@ -40,15 +40,59 @@ from .models import (
 from .session_store import store
 from .ws_manager import ws_manager
 
+try:
+    import deus_obs
+except ModuleNotFoundError:  # pragma: no cover - the uninstrumented install
+    # The `obs` dependency group is not in default-groups, so CI and a plain
+    # ``uv sync`` do not have this package at all. That is deliberate (see
+    # pyproject.toml): it makes "the backend runs untraced" a state that is
+    # exercised on every CI run rather than one nobody tries. The cost is this
+    # guard, and it must stay.
+    deus_obs = None
+
 
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
 
+_OBS_ENDPOINT_VARS = (
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OBS_ENDPOINT",
+)
+
+
+def _start_tracing() -> None:
+    """Configure tracing and say, in one line, what happened.
+
+    Printed rather than logged: uvicorn's log config forwards nothing from this
+    module by default, and a startup banner nobody sees cannot tell an operator
+    that the endpoint they put in .env never reached the process.
+
+    Silent in exactly one case — the package is not installed AND nobody asked
+    for tracing. That is CI and every plain ``uv sync``, where a line about a
+    package that is not there would be noise on thousands of test runs. The
+    case that is NOT silent is the dangerous one: an endpoint configured in the
+    environment and no package to honour it, which otherwise presents as a
+    trace store that simply stays empty.
+    """
+    if deus_obs is not None:
+        print(deus_obs.install().status_line())
+    elif any(os.getenv(name) for name in _OBS_ENDPOINT_VARS):
+        print("deus_obs: tracing disabled (an endpoint is set, but `uv sync --group obs` is not)")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init_db()
+    _start_tracing()
     yield
+    if deus_obs is not None:
+        # The batch exporter ships on a five-second schedule, so without this
+        # the spans of the last seconds of a run — the end of a live session,
+        # the error that stopped it — are still in the buffer when the process
+        # goes away. Nothing else ran after the yield before now.
+        deus_obs.shutdown()
 
 
 app = FastAPI(title="ApolloAgents API", version="2.0.0", lifespan=lifespan)

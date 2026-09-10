@@ -89,6 +89,10 @@ docker compose down -v          # also wipe venv + node_modules caches
 
 ```
 main.py                        # Single-file pipeline (~2600 lines)
+packages/
+  py-obs/                      # `deus_obs` — OTel traces to Phoenix.
+                               #   Standalone, zero-dependency, NOT apollo_*
+                               #   on purpose. Its own README.
 agent/
   run.py                       # Apollo orchestrator + all agent loops
   tools.py                     # Tool functions (catalog, playlist, validator, memory)
@@ -170,6 +174,35 @@ Hard rules:
   :4032, benches) first. A single playground /mind click mid-batch
   JIT-loads a model and OOMs ACE's 5 Hz LM at init (first real batch,
   2026-08-29). LLM work resumes when ACE frees the GPU.
+
+## Observability (`packages/py-obs`, stage 1)
+
+Traces go to the **Arize Phoenix on this box** (`http://localhost:6006`,
+OTLP/HTTP on that same port — 20.x has no separate receiver port, and its
+gRPC 4317 is exposed but not published, so gRPC cannot work here). That
+Phoenix is **SHARED with eOS/SynapseFlow**: always set `OBS_PROJECT`, or
+Apollo's spans land in `default` next to theirs.
+
+- Opt-in by design: `uv sync --group obs`. The group is NOT in
+  `default-groups`, so CI never installs the OTel SDK and "unconfigured is
+  a no-op" is enforced structurally rather than by a runtime flag.
+  Unconfigured saves ~80 ms of interpreter start per process — the whole
+  reason the SDK import lives inside `install()`.
+- **`localhost:6006` in `.env` is the HOST's Phoenix and would be the
+  CONTAINER itself.** Both compose files pin `OTEL_EXPORTER_OTLP_*` and
+  `OBS_ENDPOINT` to empty under `environment:` (which beats `env_file:`)
+  and read `APOLLO_OTLP_ENDPOINT` instead — a different name, so the host
+  value cannot leak in. Turning it on in a container means putting
+  `APOLLO_OTLP_ENDPOINT=http://host.docker.internal:6006` in `.env`;
+  `extra_hosts: host-gateway` is what makes that name resolve on Linux.
+- `OBS_CAPTURE` defaults to `metadata` — argument names and return types,
+  never values. Apollo passes `context_variables` (which carries API keys)
+  into every agent tool, and the trace store is shared.
+- Stage 1 wires the bootstrap only: `install()`/`shutdown()` in the FastAPI
+  lifespan. Nothing is instrumented yet, so a configured backend that has
+  served no explicitly-spanned code sends no spans at all.
+- Everything else — precedence table, the ten public names, why this is not
+  `arize-phoenix-otel` — is in `packages/py-obs/README.md`.
 
 ## Known issues / backlog
 

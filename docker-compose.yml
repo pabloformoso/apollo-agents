@@ -50,10 +50,39 @@ services:
     env_file:
       # ANTHROPIC_API_KEY, AZURE_OPENAI_*, etc. — same .env the CLI uses.
       - .env
+    extra_hosts:
+      # The address of the DOCKER HOST from inside this container. Docker
+      # Desktop provides it; plain Linux Docker does not, which is why
+      # host.docker.internal does not resolve here today. Needed because the
+      # trace collector (Arize Phoenix, :6006) runs on the host, not in this
+      # compose project.
+      - "host.docker.internal:host-gateway"
     environment:
       # Friendly defaults so the container has sane fallbacks even if
       # .env is missing. Real keys must come from .env.
       PYTHONUNBUFFERED: "1"
+      # --- tracing (packages/py-obs) -----------------------------------------
+      # `localhost` inside this container IS this container. The .env above is
+      # shared with the host CLI, where `localhost:6006` is correct, so an
+      # unguarded inherit makes the backend POST its spans to itself, take a
+      # connection-refused on the exporter's background thread, drop every span
+      # — and look perfectly healthy while doing it.
+      #
+      # `environment:` wins over `env_file:`, so naming all three endpoint
+      # variables here shuts that door structurally instead of by convention.
+      # The interpolated variable is deliberately a DIFFERENT name: whatever
+      # OTEL_EXPORTER_OTLP_ENDPOINT says in .env cannot leak in through it.
+      #
+      # Empty (the default) = no tracing in the container. To turn it on, put
+      # APOLLO_OTLP_ENDPOINT=http://host.docker.internal:6006 in .env.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${APOLLO_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
+      OBS_ENDPOINT: ""
+      # The project spans land in. Phoenix is SHARED with other projects on
+      # this box — without this, Apollo's spans go to "default" and mix with
+      # theirs.
+      OBS_PROJECT: "${OBS_PROJECT:-apollo-agents}"
+      OBS_SERVICE: "apollo-backend"
     volumes:
       # Bind the project root so hot reload picks up edits to main.py,
       # agent/, web/backend/, tests/, etc. immediately. The venv at

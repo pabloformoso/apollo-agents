@@ -66,6 +66,19 @@ youtube = [
     "google-auth>=2.0.0",
     "google-auth-oauthlib>=1.0.0",
 ]
+# OpenTelemetry traces to Arize Phoenix (packages/py-obs, README there).
+#
+# Deliberately NOT in default-groups, and that is the design and not an
+# oversight: CI syncs `--all-extras --group web --group dev --group youtube`,
+# so it never installs the OTel SDK, so "unconfigured is a no-op" is proved
+# structurally on every run instead of by a flag someone can flip. `import
+# deus_obs` is guarded in web/backend/app.py for the same reason.
+#
+#   uv sync --group obs
+obs = ["deus-obs[otel]"]
+
+[tool.uv.sources]
+deus-obs = { path = "packages/py-obs", editable = true }
 
 [tool.uv]
 # `uv run` syncs default groups only — anything not listed here gets

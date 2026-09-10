@@ -265,6 +265,36 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   whenever the endless queue is dry) and the second is gated by LLM
   latency, so both drift by a minute or more.
 
+## Tracing (`packages/py-obs`, stage 1)
+
+- **`import deus_obs` in `app.py` is inside a `try`, and the guard must
+  stay.** The `obs` dependency group is deliberately NOT in
+  `default-groups`, so CI (`uv sync --all-extras --group web --group
+  dev --group youtube`) and every plain `uv sync` run the backend with
+  the package absent. That is what makes "the backend runs untraced" a
+  state exercised on every CI run instead of one nobody tries — and it
+  means an unguarded import would break the app for everyone who has
+  not opted in. To opt in: `uv sync --group obs`.
+- **Startup prints exactly one line, and prints it rather than logging
+  it.** Uvicorn's log config forwards nothing from `backend.app`, so an
+  `INFO` record here goes nowhere and an operator cannot tell that the
+  endpoint they put in `.env` never reached the process. `_start_tracing`
+  is silent in exactly one case — package absent AND no endpoint
+  configured, i.e. CI — because a line about a package that is not there
+  would be noise on thousands of test runs. It is NOT silent when an
+  endpoint is set and the package is missing: that is the
+  configured-but-not-effective failure, and it presents as a trace store
+  that simply stays empty.
+- **`shutdown()` after the `yield` is not decoration.** The batch
+  exporter ships on a five-second schedule, so without it the spans of
+  the last seconds — the end of a live session, the error that stopped
+  it — are still buffered when the process goes away. Nothing else ran
+  after the `yield` before this.
+- Nothing is instrumented yet. Stage 1 is the bootstrap; the spans in
+  Phoenix so far come only from explicit `deus_obs.span()` /
+  `@deus_obs.tool` call sites, of which there are none in the backend.
+- Config, precedence and the container gotcha: `packages/py-obs/README.md`.
+
 ## Strudel in the app (§11 S3)
 
 - **Strudel is NOT bundled, and that is load-bearing.** Its dist resolves its
