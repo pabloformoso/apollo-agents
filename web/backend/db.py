@@ -6,12 +6,45 @@ import os
 import sqlite3
 from pathlib import Path
 
+from . import migrations
+
 DB_PATH = Path(os.getenv("APOLLO_DB_PATH") or (Path(__file__).parent / "apollo.db"))
+
+#: How long a connection waits for the write lock before giving up with
+#: "database is locked". The backend's writes are single-statement and
+#: sub-millisecond; three seconds is far past any of them, so hitting
+#: this means something is genuinely stuck rather than merely busy.
+BUSY_TIMEOUT_MS = 3000
 
 
 def _conn() -> sqlite3.Connection:
     c = sqlite3.connect(str(DB_PATH))
     c.row_factory = sqlite3.Row
+    # busy_timeout FIRST: switching the journal mode needs the write lock
+    # itself, and on a database another connection is using, doing it
+    # before the timeout is set turns a momentary overlap into an
+    # immediate SQLITE_BUSY.
+    c.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # WAL — readers no longer block on the writer, and vice versa. This
+    # backend reads constantly (every request resolves a user, the
+    # session store rehydrates, the catalog UI hydrates ratings) against
+    # a handful of small writes, which is the exact shape WAL is for.
+    #
+    # It is a PERSISTENT property of the file, not of this connection:
+    # the first open flips apollo.db to WAL for good, and it stays that
+    # way even if this code is rolled back. It also gives the file two
+    # siblings, apollo.db-wal and apollo.db-shm — both gitignored, both
+    # dockerignored, and both meaningless without the main file, so a
+    # backup must use SQLite's backup API rather than copying one file
+    # (see migrations._backup).
+    c.execute("PRAGMA journal_mode = WAL")
+    # DELIBERATELY NOT `PRAGMA foreign_keys = ON`. Six tables declare a
+    # foreign key and none of them has ever been enforced, so turning it
+    # on is not a hardening — it is a behaviour change that would start
+    # rejecting writes this app currently makes. `delete_playlist` below
+    # deletes its children BY HAND precisely because ON DELETE CASCADE
+    # does nothing here. Enforcing them is worth doing and gets its own
+    # PR, with `PRAGMA foreign_key_check` run against prod first.
     return c
 
 
@@ -24,150 +57,38 @@ def _conn() -> sqlite3.Connection:
 #: ``$2``, so ``verify_password`` rejects this for any password anyone
 #: could ever type. That is the point — a Keycloak account must not be
 #: reachable through the local login form.
+#:
+#: Since 2026-09-10 the constraint COULD be relaxed —
+#: ``migrations._helpers.rebuild_table`` is exactly the tool this comment
+#: said did not exist. Doing so is a separate change with its own
+#: migration; the sentinel stays until then, and is left here as the
+#: worked example of what a missing migration mechanism costs.
 KEYCLOAK_PASSWORD_SENTINEL = "!keycloak-no-local-password"
 
 
-def _add_column_if_missing(c, table: str, column: str, decl: str) -> None:
-    """Idempotent ALTER TABLE — this schema has no migration mechanism.
-
-    Every table is created with ``IF NOT EXISTS``, which silently does
-    nothing when the table already exists, so a column added later never
-    appears on an existing database. PRAGMA table_info is the check that
-    makes adding one safe to run on every boot.
-    """
-    cols = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
-    if column not in cols:
-        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+#: Re-exported for the callers that predate the migrations package.
+#: "Add a nullable column" is still the common case and this is still the
+#: right tool for it — what changed on 2026-09-10 is that it stopped
+#: being the MECHANISM. Its home is now
+#: :mod:`web.backend.migrations._helpers`, alongside the 12-step table
+#: rebuild that handles everything ALTER cannot.
+_add_column_if_missing = migrations.add_column_if_missing
 
 
 def init_db() -> None:
-    with _conn() as c:
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                username         TEXT    UNIQUE NOT NULL,
-                email            TEXT    UNIQUE NOT NULL,
-                hashed_password  TEXT    NOT NULL,
-                created_at       TEXT    NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                id         TEXT    PRIMARY KEY,
-                user_id    INTEGER NOT NULL,
-                created_at TEXT    NOT NULL,
-                data       TEXT    NOT NULL
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)")
-        # Playlists (v2.2.1) — named track collections per user.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS playlists (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id    INTEGER NOT NULL,
-                name       TEXT    NOT NULL,
-                created_at TEXT    NOT NULL,
-                updated_at TEXT    NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        c.execute("CREATE INDEX IF NOT EXISTS idx_playlists_user ON playlists(user_id)")
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS playlist_tracks (
-                playlist_id INTEGER NOT NULL,
-                track_id    TEXT    NOT NULL,
-                position    INTEGER NOT NULL,
-                PRIMARY KEY (playlist_id, position),
-                FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE
-            )
-        """)
-        # Track ratings (v2.2.2) — per-user 1–5 score, drives favorites filter.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS track_ratings (
-                user_id    INTEGER NOT NULL,
-                track_id   TEXT    NOT NULL,
-                rating     INTEGER NOT NULL CHECK(rating BETWEEN 1 AND 5),
-                updated_at TEXT    NOT NULL,
-                PRIMARY KEY (user_id, track_id),
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        """)
-        # v2.7 — OAuth refresh tokens for third-party providers (YouTube
-        # today, room for more). Refresh tokens are Fernet-encrypted at
-        # rest with a key derived from JWT_SECRET (see
-        # web/backend/youtube_auth._fernet); the access_token cache is
-        # also stored so we avoid a refresh round-trip when it's fresh.
-        # G6 — the Generations Library. ACE-Step's job records are mortal
-        # (in-memory, 24 h, gone with the process the VRAM protocol stops
-        # between batches) while its result FILES are not, so this is the
-        # only durable record that a generation ever happened. `id` IS the
-        # ACE task_id: there is no second identity to keep in sync, and it
-        # is what the poll/refresh lanes already hold.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS generations (
-                id           TEXT    PRIMARY KEY,
-                user_id      INTEGER NOT NULL,
-                created_at   TEXT    NOT NULL,
-                status       TEXT    NOT NULL,
-                request_json TEXT    NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-            )
-        """)
-        # The feed's one query: newest-first for ONE user.
-        c.execute(
-            "CREATE INDEX IF NOT EXISTS idx_generations_user "
-            "ON generations(user_id, created_at)"
-        )
-        # No separate index on generation_takes(generation_id): the
-        # PRIMARY KEY's own index is (generation_id, idx), whose leading
-        # column already serves every lookup this table gets. A second
-        # index on the same prefix would only cost writes.
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS generation_takes (
-                generation_id      TEXT    NOT NULL,
-                idx                INTEGER NOT NULL,
-                file               TEXT,
-                decoded_path       TEXT,
-                metas_json         TEXT,
-                prompt             TEXT,
-                lyrics             TEXT,
-                seed_value         TEXT,
-                state              TEXT    NOT NULL DEFAULT 'fresh',
-                published_track_id TEXT,
-                PRIMARY KEY (generation_id, idx),
-                FOREIGN KEY (generation_id) REFERENCES generations(id)
-                    ON DELETE CASCADE
-            )
-        """)
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS oauth_tokens (
-                user_id       INTEGER NOT NULL,
-                provider      TEXT    NOT NULL,
-                refresh_token TEXT    NOT NULL,
-                access_token  TEXT,
-                expires_at    TEXT,
-                scope         TEXT,
-                channel_id    TEXT,
-                channel_title TEXT,
-                connected_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (user_id, provider),
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        """)
-        c.commit()
+    """Bring the database up to the latest schema version.
 
+    A thin alias for :func:`migrations.migrate`, kept for one release so
+    the app's lifespan hook and the four test conftests that call it do
+    not have to change in the same commit that introduces the runner.
+    New code should call ``migrations.migrate`` with its own connection.
+    """
+    c = _conn()
+    try:
+        migrations.migrate(c)
+    finally:
+        c.close()
 
-        # v3.11 — Keycloak identity. Nullable and UNIQUE: local accounts
-        # keep NULL (SQLite allows many NULLs in a UNIQUE column), while a
-        # federated account is keyed by the realm's immutable ``sub``.
-        # Never key on email or username — both are editable in Keycloak
-        # and re-pointing a row at a different human is a whole-account
-        # takeover, ratings and playlists included.
-        _add_column_if_missing(c, "users", "keycloak_sub", "TEXT")
-        c.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_keycloak_sub "
-            "ON users(keycloak_sub) WHERE keycloak_sub IS NOT NULL"
-        )
 
 def create_user(username: str, email: str, hashed_password: str) -> int:
     with _conn() as c:

@@ -265,6 +265,78 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   whenever the endless queue is dry) and the second is gated by LLM
   latency, so both drift by a minute or more.
 
+## Schema migrations and the SQLite connection (2026-09-10)
+
+`db.init_db()` used to BE the schema: `CREATE TABLE IF NOT EXISTS`
+throughout, re-run on every boot, plus one guarded `ALTER TABLE`. That
+expresses exactly one change — "add a thing that was not there" — and
+nothing else. `db.KEYCLOAK_PASSWORD_SENTINEL` exists ONLY because
+`users.hashed_password NOT NULL` could not be relaxed without a
+mechanism; read its comment before adding a second sentinel.
+
+- **The version counter is `PRAGMA user_version`, not a table.** A
+  `schema_migrations` table would itself need a migration to exist. The
+  pragma is 4 bytes in the database header: it cannot be half-written
+  and reading it needs no schema at all. Prod was at 0 and is at 1 after
+  the baseline.
+- **`m0001_baseline.py` is the old `init_db` body, byte for byte** —
+  including the odd four-extra-spaces indentation on the SQL literals.
+  SQLite stores a `CREATE` statement's TEXT in `sqlite_master.sql`, so
+  re-indenting the string changes what a NEW database records and a
+  schema diff against an existing one lights up for no reason.
+  `tests/web/test_db_migrations.py` compares those strings against a
+  frozen copy of the pre-runner `init_db` and fails on one space. Do not
+  let a formatter near that file.
+- **Adding a migration is one file**: `mNNNN_name.py` exporting
+  `VERSION`, `NAME`, `up(c)`. Discovery is a directory scan, and
+  `load_migrations()` refuses to run unless the versions are unique,
+  contiguous from 1, and match the filename — the guard against two
+  branches both shipping an `m0007`. It runs on every boot, so a bad
+  merge fails at startup instead of halfway through a migration.
+- **`up()` runs inside the runner's transaction.** No `BEGIN`, no
+  `COMMIT`, no `VACUUM`, and no PRAGMA that SQLite ignores mid-
+  transaction (`foreign_keys`, `journal_mode`). The whole run is one
+  `BEGIN IMMEDIATE`, so two backends booting at once cannot both
+  migrate, and a raise anywhere leaves the DDL *and* the counter
+  untouched.
+- **There is no `down()`, by decision.** The rollback is the file:
+  `migrations._backup` writes `apollo.db.<stamp>.bak` before touching
+  anything, same convention as `main.py._catalog_backup_path`. It uses
+  SQLite's backup API, not `cp` — under WAL the committed truth is split
+  across `apollo.db` and `apollo.db-wal`, so copying the first alone can
+  hand you a database missing its latest commits.
+- **`migrations.rebuild_table` is the 12-step rebuild** (create new,
+  copy, drop, rename) — the only way to relax a constraint. Nothing
+  calls it yet; that is the point, since the sentinel above is what
+  happens when there is nowhere for such a change to live. DROP comes
+  before RENAME: since SQLite 3.25 a rename rewrites references to the
+  table in triggers and views.
+- **`db._conn()` sets `journal_mode=WAL` and `busy_timeout=3000`**, in
+  that order — flipping the journal mode needs the write lock, so the
+  timeout has to be in place first. WAL is a PERSISTENT property of the
+  file: the first open converts `apollo.db` for good and it stays
+  converted even if this code is reverted. The `-wal`/`-shm` siblings
+  are gitignored and dockerignored.
+- **The one thing to check the first time the compose stack comes up.**
+  `apollo.db` lives under the `./:/app` bind mount, and WAL needs a
+  shared-memory file (`apollo.db-shm`) that it mmaps. Every native Linux
+  filesystem supports that; a Docker Desktop mount backed by
+  virtiofs/9p over a Windows host historically has not, and the failure
+  is asymmetric — converting the file on the host succeeds, and the
+  CONTAINER is then the one that cannot open it ("disk I/O error" /
+  "unable to open database file") because the conversion travelled with
+  the file. Bringing the stack up and hitting `/api/auth/login` is the
+  only proof; CI builds on the host layout and never starts compose, so
+  it cannot catch this — the same blind spot that shipped the two
+  frontend-container bugs on 2026-09-02. If it does bite, the fix is
+  `PRAGMA journal_mode=DELETE` once on the host, not a code revert.
+
+- **`foreign_keys` stays OFF, deliberately.** Six tables declare an FK
+  and none has ever been enforced; `db.delete_playlist` deletes its
+  children by hand *because* cascade does nothing. Turning it on is a
+  behaviour change, not a hardening — its own PR, with `PRAGMA
+  foreign_key_check` run against prod first (it comes back clean today).
+
 ## Strudel in the app (§11 S3)
 
 - **Strudel is NOT bundled, and that is load-bearing.** Its dist resolves its
