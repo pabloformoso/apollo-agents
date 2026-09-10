@@ -206,33 +206,55 @@ asserts every `GENRE_THEMES` entry points at a real `ARTWORK_PROMPTS` key.
 
 ## Adding a new genre
 
+One definition, in `agent/genres.py`. It used to be six edits across three
+files — `BPM_GENRE_RANGES` and `GENRE_THEMES` in both `main.py` and
+`agent/tools.py`, `GENRE_STYLE_PROMPTS` in `agent/tools.py`,
+`GENRE_NEIGHBOURS` in `agent/live_engine.py` — and five of the six omissions
+failed silently. Those four names still exist and still work; they are now
+read-only VIEWS of the one definition, so they cannot drift.
+
 1. Create `tracks/<genre-name>/` and add WAV files
-2. Add a `BPM_GENRE_RANGES` entry in `main.py` **before** building the catalog.
-   This is not optional for slow or beatless material: librosa locks onto
-   2-4× the real pulse on drones and pads, and the range drives the octave
-   ladder that corrects it. Make the window exactly one octave wide
-   (`hi == 2 * lo`) so only one rung of the ladder can qualify. A genre with
-   no range gets its raw detection stored verbatim, which poisons BPM
-   matching for every set that touches it.
+2. Add an entry to `GENRE_DEFAULTS` in `agent/genres.py` **before** building
+   the catalog. All four fields, or `tests/test_genres_source_of_truth.py`
+   fails — deliberately, because each omission is invisible at runtime:
+
+   | field | what a missing one costs |
+   |---|---|
+   | `bpm` | the raw detection is stored verbatim, poisoning tempo matching for every set that touches the genre |
+   | `theme` | artwork falls back to `abstract` without a word |
+   | `style_prompt` | ACE generates off-genre and the take cannot be promoted |
+   | `neighbours` | an endless set cannot widen out of the genre |
+
+   Make the BPM window exactly one octave wide (`hi == 2 * lo`) for slow or
+   beatless material: librosa locks onto 2-4x the real pulse on drones and
+   pads, and the window drives the octave ladder that corrects it. One octave
+   means only one rung can qualify.
+
+   Write `neighbours` symmetrically — the test suite enforces it. Never let
+   adjacency be inferred from tempo: a soul jazz entry stored at 165 BPM
+   matched a 164 BPM synthware track and put twenty techno tracks on a live
+   "meditación non stop" broadcast (2026-09-07).
+
 3. Run `python main.py --build-catalog` (see the Docker note below — madmom
    is not installed on the host)
-4. Add a theme entry to `GENRE_THEMES` in `main.py`, and a new
-   `ARTWORK_PROMPTS` template if no existing style fits
-5. Mirror the genre into `agent/tools.py` — it keeps its **own copies** of
-   `_BPM_GENRE_RANGES` and `GENRE_THEMES` for the web render endpoint and the
-   playlist energy curve. These have drifted from `main.py` before; a missing
-   entry degrades silently rather than raising
+4. If no existing `artwork_style` fits, add an `ARTWORK_PROMPTS` template in
+   `main.py` and point the theme at it. An unknown style falls back to
+   `abstract` **silently**, so a typo costs a whole session's artwork.
 
-`--build-catalog` needs madmom, which only exists in the backend image. Run it
-detached so it survives the host shell, layering worktree code over the main
-checkout:
+### Genres added by an installation
 
-```bash
-docker compose run -d --no-deps --name apollo-build -v "$PWD/main.py:/app/main.py" backend python main.py --build-catalog
-```
+`GENRE_DEFAULTS` is layer one: shipped, versioned, reviewable in a PR, and it
+reaches every installation on the next update. Layer two is genres added by a
+running installation (from the catalog UI), which live in SQLite and are
+merged over the defaults per FIELD — an override of one BPM window keeps the
+shipped theme and prompt.
 
-It is strictly serial (~1-2 min/track) and writes `tracks.json` **only at the
-very end** — back the catalog up first, an interrupted run loses everything.
+The layering is not incidental. Seeding the database with today's defaults
+instead would freeze them into every install forever, so a BPM window found
+to be wrong could never be corrected for anyone. Register the source with
+`genres.register_loader()`; with none registered — `main.py --build-catalog`,
+worktrees, CI — the defaults are the whole answer, which is why the CLI needs
+no database.
 
 ## Agent tool conventions
 

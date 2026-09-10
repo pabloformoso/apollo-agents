@@ -3006,31 +3006,14 @@ def _autoplay_pick(
 #:
 #: A genre missing from this map cannot widen at all: it recycles within
 #: itself, which is the conservative failure and the old behaviour.
-GENRE_NEIGHBOURS: dict[str, frozenset[str]] = {
-    # The calm cluster. This is what a "non stop meditation" broadcast
-    # must never leave, so it is CLOSED: no member reaches a genre with a
-    # dancefloor kick, in one hop or otherwise (there is no transitivity —
-    # widen_pool looks exactly one step out).
-    "healing": frozenset({"aural", "lofi - ambient", "chillout"}),
-    "aural": frozenset({"healing", "lofi - ambient", "chillout"}),
-    "lofi - ambient": frozenset({"healing", "aural", "chillout"}),
-    # Chillout is the one bridge between calm and lounge, which is why
-    # healing cannot reach cocktail house: that would take two hops.
-    "chillout": frozenset(
-        {"healing", "aural", "lofi - ambient", "cocktail house", "soul jazz"}
-    ),
-    # Warm, live-instrument, lounge.
-    "soul jazz": frozenset({"cocktail house", "chillout"}),
-    "cocktail house": frozenset({"soul jazz", "chillout", "deep house"}),
-    # Four-to-the-floor and up.
-    "deep house": frozenset({"cocktail house", "techno", "synthware"}),
-    "techno": frozenset({"deep house", "synthware", "cyberpunk"}),
-    "synthware": frozenset({"techno", "cyberpunk", "deep house"}),
-    "cyberpunk": frozenset({"techno", "synthware"}),
-    # NOTE: the legacy `lofi` alias from BPM_GENRE_RANGES is deliberately
-    # absent. No catalog folder uses it, and an unmapped genre simply
-    # cannot widen — the conservative failure, not a wrong neighbour.
-}
+#: Which genres may stand in for which when a set has exhausted its own.
+#: Defined in ``agent/genres.py``, which also repairs any asymmetry an
+#: installation introduced — a UI that adds "my ambient" next to healing
+#: cannot be expected to also edit healing, and a one-way neighbour is
+#: the door that put techno on a meditation broadcast.
+from agent import genres as _genres
+
+GENRE_NEIGHBOURS = _genres.NEIGHBOURS
 
 
 def widen_pool(genre: str | None) -> frozenset[str]:

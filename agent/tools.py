@@ -92,25 +92,12 @@ def _camelot_step_distance(key_a: str, key_b: str) -> int:
     return 6  # unreachable on a 24-node wheel → treat as max clash
 
 
-_BPM_GENRE_RANGES = {
-    "lofi - ambient": (60, 110),
-    "lofi": (60, 110),
-    "techno": (120, 160),
-    "cyberpunk": (120, 160),
-    "deep house": (115, 135),
-    "cocktail house": (102, 126),
-    "soul jazz": (75, 140),
-    # Keep in sync with ``BPM_GENRE_RANGES`` in main.py. Only used here to
-    # scale the energy curve, so a missing genre degrades to the (60, 200)
-    # fallback rather than crashing — but for a 50-100 BPM genre that
-    # fallback flattens every track to near-zero energy and the arranger
-    # can no longer tell a drone from a build.
-    "healing": (50, 100),
-    "chillout": (60, 120),
-    # Mirrors main.BPM_GENRE_RANGES — see the reasoning there.
-    "aural": (48, 96),
-    "synthware": (85, 170),
-}
+#: Mirror of main's windows — now literally the same object, so the two
+#: can no longer drift. Kept under the private name because the web
+#: generator binds to it deliberately (see ``_genre_bpm_windows``).
+from agent import genres as _genres
+
+_BPM_GENRE_RANGES = _genres.BPM_RANGES
 
 
 #: What each genre SOUNDS like, in the words ACE-Step understands.
@@ -137,55 +124,9 @@ _BPM_GENRE_RANGES = {
 #:
 #: A genre missing from this map degrades to the bare user prompt — the
 #: old behaviour — so an unlisted folder still generates.
-GENRE_STYLE_PROMPTS: dict[str, str] = {
-    "lofi - ambient": (
-        "lo-fi ambient: warm tape saturation, soft dusty drums, mellow "
-        "jazz-tinged chords, gentle vinyl crackle, unhurried and hazy"
-    ),
-    "lofi": (
-        "lo-fi ambient: warm tape saturation, soft dusty drums, mellow "
-        "jazz-tinged chords, gentle vinyl crackle, unhurried and hazy"
-    ),
-    "healing": (
-        "healing meditation music: slow binaural drones, breathy flutes "
-        "and soft chimes, long reverb tails, no percussion, deeply calm "
-        "and spacious"
-    ),
-    "aural": (
-        "ethereal beatless ambient: weightless evolving pads, submarine "
-        "and cosmic textures, very long reverb, no drums, dark and "
-        "spacious with slow swells"
-    ),
-    "synthware": (
-        "retro synth electro: analog synth leads, acid bassline, crisp "
-        "electro drums, glitch artefacts and tape hiss, neon and driving"
-    ),
-    "deep house": (
-        "deep house: rolling four-on-the-floor kick, warm sub bass, "
-        "smooth pad chords, subtle percussion, hypnotic late-night groove"
-    ),
-    "cocktail house": (
-        "cocktail lounge house: laid-back nu-disco groove, brushed "
-        "percussion, warm Rhodes and muted guitar, sophisticated and "
-        "unhurried"
-    ),
-    "soul jazz": (
-        "soul jazz: live drums with brushes, upright bass walking lines, "
-        "Rhodes and Hammond organ, muted trumpet or sax, smoky and warm"
-    ),
-    "chillout": (
-        "downtempo chillout: relaxed broken beat, mellow synth pads, "
-        "soft bass, airy and melodic"
-    ),
-    "techno": (
-        "techno: driving four-on-the-floor kick, hypnotic sequenced "
-        "synths, industrial textures, relentless and dark"
-    ),
-    "cyberpunk": (
-        "cyberpunk electronic: gritty synth arpeggios, distorted bass, "
-        "industrial percussion, neon-noir and menacing"
-    ),
-}
+#: What each genre sounds like, in the words ACE-Step understands.
+#: Defined in ``agent/genres.py``.
+GENRE_STYLE_PROMPTS = _genres.STYLE_PROMPTS
 
 
 def genre_style_prompt(genre_key: str) -> str | None:
@@ -1136,120 +1077,11 @@ def _parse_build_progress_line(line: str) -> dict | None:
 # main.py's _get_session_theme applies as its TOP layer, above main.py's own
 # genre defaults — so a value that drifts here doesn't merely degrade, it
 # silently overrides the canonical theme at render time.
-GENRE_THEMES: dict[str, dict] = {
-    "lofi - ambient": {
-        "artwork_style": "anime",
-        "title_color": "#E8D5B7",
-        "title_stroke_color": "#5C4A32",
-        "bg_color": [18, 15, 12],
-        "waveform_color": [180, 160, 130],
-        "particle_color": [200, 180, 150],
-        "bg_darken": 0.85,
-        "title_font_size": 36,
-    },
-    "lofi": {
-        "artwork_style": "anime",
-        "title_color": "#E8D5B7",
-        "title_stroke_color": "#5C4A32",
-        "bg_color": [18, 15, 12],
-        "waveform_color": [180, 160, 130],
-        "particle_color": [200, 180, 150],
-        "bg_darken": 0.85,
-        "title_font_size": 36,
-    },
-    "deep house": {
-        "artwork_style": "deep-house-neon",
-        "title_color": "#6A5AFF",
-        "title_stroke_color": "#1A0A3E",
-        "bg_color": [12, 8, 28],
-        "waveform_color": [106, 90, 255],
-        "particle_color": [140, 120, 255],
-        "bg_darken": 0.7,
-        "title_font_size": 32,
-    },
-    "techno": {
-        "artwork_style": "dark-techno",
-        "title_color": "#FF1744",
-        "title_stroke_color": "#4A0010",
-        "bg_color": [5, 2, 8],
-        "waveform_color": [255, 23, 68],
-        "particle_color": [255, 50, 80],
-        "bg_darken": 0.85,
-        "title_font_size": 32,
-    },
-    "cyberpunk": {
-        "artwork_style": "dark-techno",
-        "title_color": "#00FF88",
-        "title_stroke_color": "#004422",
-        "bg_color": [8, 8, 14],
-        "waveform_color": [0, 255, 136],
-        "particle_color": [0, 200, 100],
-        "bg_darken": 0.75,
-        "title_font_size": 32,
-    },
-    "cocktail house": {
-        "artwork_style": "deep-house-neon",
-        "title_color": "#E8B86C",
-        "title_stroke_color": "#3A1F1A",
-        "bg_color": [22, 10, 16],
-        "waveform_color": [232, 184, 108],
-        "particle_color": [255, 210, 140],
-        "bg_darken": 0.75,
-        "title_font_size": 32,
-    },
-    "soul jazz": {
-        "artwork_style": "organic-zen",
-        "title_color": "#D98E3B",
-        "title_stroke_color": "#2A140A",
-        "bg_color": [20, 12, 8],
-        "waveform_color": [217, 142, 59],
-        "particle_color": [240, 180, 100],
-        "bg_darken": 0.8,
-        "title_font_size": 32,
-    },
-    "chillout": {
-        "artwork_style": "organic-zen",
-        "title_color": "#DCE7E3",
-        "title_stroke_color": "#2F4440",
-        "bg_color": [14, 20, 19],
-        "waveform_color": [150, 190, 180],
-        "particle_color": [180, 215, 205],
-        "bg_darken": 0.85,
-        "title_font_size": 36,
-    },
-    # Mirrors main.GENRE_THEMES exactly — _get_session_theme applies THIS
-    # copy as the top layer at render time, so a drifted value here does
-    # not degrade, it silently overrides the canonical theme.
-    "aural": {
-        "artwork_style": "abstract",
-        "title_color": "#8FD8F0",
-        "title_stroke_color": "#07202C",
-        "bg_color": [6, 16, 26],
-        "waveform_color": [143, 216, 240],
-        "particle_color": [190, 232, 248],
-        "bg_darken": 0.8,
-    },
-    "synthware": {
-        "artwork_style": "dark-techno",
-        "title_color": "#F45BD0",
-        "title_stroke_color": "#1A0322",
-        "bg_color": [18, 4, 24],
-        "waveform_color": [244, 91, 208],
-        "particle_color": [120, 240, 232],
-        "bg_darken": 0.4,
-    },
-    "healing": {
-        "artwork_style": "healing-aura",
-        "title_color": "#9FE0D0",
-        "title_stroke_color": "#0C2A2A",
-        "bg_color": [8, 18, 22],
-        "waveform_color": [159, 224, 208],
-        "particle_color": [200, 240, 230],
-        "bg_darken": 0.85,
-        "video_bg_darken": 0.45,
-        "title_font_size": 32,
-    },
-}
+#: Mirror of main's themes — the same object now. This copy is written
+#: into the draft session.json and applied as the TOP layer at render
+#: time, so a value that drifted here used to override the canonical
+#: theme silently. It cannot drift any more.
+GENRE_THEMES = _genres.THEMES
 
 
 def _write_draft_session(session_name: str, context_variables: dict) -> Path:
