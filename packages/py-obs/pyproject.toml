@@ -1,0 +1,44 @@
+[project]
+name = "deus-obs"
+version = "0.1.0"
+description = "Portable OpenTelemetry bootstrap + span helpers for LLM apps (Phoenix-compatible)"
+readme = "README.md"
+requires-python = ">=3.10"
+# Deliberately none. `import deus_obs` runs in every process this package is
+# ever vendored into — a CLI that renders video, a pytest collection, a
+# --build-catalog run — and none of those are asking for telemetry. A package
+# whose premise is "unconfigured costs nothing" cannot start by installing
+# 30 MB of SDK and protobuf. Everything OpenTelemetry lives behind [otel] and
+# is imported inside install(), after the endpoint check.
+dependencies = []
+
+[project.optional-dependencies]
+# `deus_obs.runtime` is the only module that knows OpenTelemetry exists.
+#
+# proto-http and NOT the `opentelemetry-exporter-otlp` meta-package: that one
+# also drags in the gRPC exporter and grpcio, a ~10 MB C extension, to reach a
+# port most Phoenix deployments never publish (4317 is EXPOSEd and unmapped in
+# the standard image). Paying for a wheel that cannot reach the collector.
+otel = [
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp-proto-http>=1.29",
+]
+# Auto-instrumentation for LLM clients. Nothing in this package imports these
+# yet — they are the seam for the stage that instruments the model calls
+# themselves. Kept out of [otel] because span helpers and client patching are
+# separate decisions: a project may want the first without the second.
+llm = [
+    "openinference-instrumentation-openai>=0.1",
+    "openinference-instrumentation-anthropic>=0.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deus_obs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

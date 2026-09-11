@@ -34,8 +34,22 @@ services:
       - "4021:4020"
     env_file:
       - .env
+    extra_hosts:
+      # See docker-compose.yml — the trace collector runs on the host.
+      - "host.docker.internal:host-gateway"
     environment:
       PYTHONUNBUFFERED: "1"
+      # Same shape and the same reason as the prod stack: `localhost` in the
+      # shared .env is the HOST's Phoenix, and inside here it is this
+      # container. `environment:` wins over `env_file:`.
+      OTEL_EXPORTER_OTLP_ENDPOINT: "${APOLLO_OTLP_ENDPOINT:-}"
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ""
+      OBS_ENDPOINT: ""
+      # A DIFFERENT project from prod on purpose. Both stacks would otherwise
+      # write into one project on a shared Phoenix, and a branch under test
+      # would be indistinguishable from what is broadcasting.
+      OBS_PROJECT: "${OBS_PROJECT:-apollo-agents}-dev"
+      OBS_SERVICE: "apollo-backend-dev"
     volumes:
       # Bind THIS worktree's project root for source — prod stack mounts
       # the main checkout, so each stack tests its own branch in isolation.
