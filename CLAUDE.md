@@ -152,6 +152,14 @@ Hard rules:
   so a merge mid-stream kills the broadcast. Check first:
   `docker logs --since 30m apollo-backend | grep live-ws`.
 - Ports **4010/4020 are the prod stack** — dev servers go on 4011/4021.
+- **The first backend start after the migrations PR converts
+  `web/backend/apollo.db` to WAL and writes one
+  `apollo.db.<stamp>.bak` beside it.** The conversion is one-way and a
+  property of the FILE, so rolling the code back does not undo it (any
+  SQLite since 3.7 reads it fine). Verified on a copy of the live 782 KB
+  database: schema byte-identical, all 82 rows intact, `user_version`
+  0 → 1. Keep the `.bak` until the stack has served real traffic — there
+  is no `down()`, by design; see `web/CLAUDE.md`.
 - Worktrees have no `tracks/`, `.env`, or venv — copy `.env` from the
   main checkout; run anything runtime-ish from the main checkout.
 - `--build-catalog` needs madmom → run it in detached Docker
