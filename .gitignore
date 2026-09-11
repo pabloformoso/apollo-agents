@@ -52,6 +52,18 @@ apolloagents_paper.pdf
 
 # Web UI (v2.0)
 web/backend/apollo.db
+# WAL sibling files (v3.12 — db._conn sets journal_mode=WAL). They are
+# recreated on every open and are meaningless without apollo.db itself.
+web/backend/apollo.db-wal
+web/backend/apollo.db-shm
+# Snapshots of it. `migrations._backup` writes `apollo.db.<stamp>.bak`,
+# the same `<name>.<stamp>.bak` shape as the tracks.json backups below,
+# but this pattern is deliberately wider than that one: the hand-made
+# `apollo.db.pre-keycloak-20260908-174011` in the main checkout has been
+# untracked noise in `git status` since the day it was written, and the
+# next person snapshotting before a risky migration will not stop to
+# check the naming convention either.
+web/backend/apollo.db.*
 web/frontend/node_modules/
 web/frontend/.next/
 web/frontend/.next-e2e/

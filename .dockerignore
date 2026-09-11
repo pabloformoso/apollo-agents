@@ -70,7 +70,13 @@ agent/memory*.json
 !.env.example
 
 # --- Databases ---
+# The WAL siblings need their own patterns: `*.db` does not match
+# `apollo.db-wal`, the dash puts it outside the glob. Same for the
+# pre-migration snapshots, which end in `.bak`.
 *.db
+*.db-wal
+*.db-shm
+*.db.*.bak
 *.sqlite
 *.sqlite3
 
