@@ -5,6 +5,15 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## Architecture decisions
 
+- **Automatic published-track preparation**: `track_processing.py` owns a
+  single lifespan worker with durable queued/running/ready/failed catalog
+  state. The initial ingest write includes the queued marker; automatic
+  session eligibility excludes pending/failed entries. Per-track CPU analysis
+  runs in a bounded subprocess; web publishes and result commits share a
+  lock and atomic catalog replacement. The take row polls status and offers
+  retry/legacy preparation. See `docs/track-preparation.md` for limits,
+  notably single-worker operation and no concurrent CLI catalog writers.
+
 - **S0 ACE control** (`ace_control.py`, `ace_supervisor.py`): opt-in via
   `ACESTEP_CONTROL_URL`; deployment and limits in `docs/s0-ace-control.md`.
   The supervisor runs on the GPU host and only manages the fixed user unit

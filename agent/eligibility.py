@@ -44,6 +44,8 @@ def is_session_eligible(track: dict) -> bool:
     silent genre shrink would be worse than an occasional short piece;
     run ``--fix-incomplete`` to backfill and make the screen bite.
     """
+    if track.get("processing_status") not in {None, "ready"}:
+        return False
     dur = track.get("duration_sec")
     if dur is None:
         return True
@@ -66,6 +68,8 @@ def ineligibility_reason(track: dict) -> str | None:
     """
     if is_session_eligible(track):
         return None
+    if track.get("processing_status") not in {None, "ready"}:
+        return "track audio preparation is not ready — choose another track"
     dur = track.get("duration_sec")
     return (
         f"track is {float(dur):.0f}s long — shorter than the "

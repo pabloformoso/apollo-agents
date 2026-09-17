@@ -489,16 +489,9 @@ class PublishRequest(BaseModel):
         return value
 
 
-#: Appended to every successful publish. The ingest is deliberately
-#: madmom-free, so the entry lands without duration, beatgrid, waveform
-#: peaks or an MP3 sibling — everything the live engine's beatmatching
-#: wants. Saying so in the payload is the only thing standing between a
-#: fresh take and a contrabombo on air.
-FIX_INCOMPLETE_NOTE = (
-    "Ingested without madmom: duration, beatgrid, waveform peaks and the MP3 "
-    "sibling are still missing. Run `python main.py --fix-incomplete` (in the "
-    "main checkout, in Docker) before this track goes into a set."
-)
+#: Publishing persists the queued marker; the preparation worker completes
+#: the audio metadata before automatic session selection can use the track.
+FIX_INCOMPLETE_NOTE = "Published. Apollo prepares the audio automatically; follow its preparation status below."
 
 #: Streaming chunk for the take download. A 3-minute 48 kHz WAV is
 #: ~35 MB — never buffered whole, same rule as the proxy.
@@ -1455,12 +1448,10 @@ async def publish_take(
     writes a WAV plus a tracks.json entry. Refusing it during a set
     would cost the operator a take for no VRAM saved.
 
-    Concurrency, on the other hand, is real but not enforceable here —
-    see the ``--build-catalog`` note in ``web/CLAUDE.md``. The cheap
-    freshness the ingest already provides is that it re-reads
-    tracks.json inside the same call that appends to it and backs the
-    file up first, so the loser of a race loses one entry, not the
-    catalog.
+    Web ingestion and preparation commits share a lock and replace the
+    catalog atomically. External CLI catalog writers must still not run
+    concurrently with the service. Analysis runs outside this lock and
+    merges its fields into the latest catalog, preserving other publishes.
     """
 
     # v3.11 — publishing writes into tracks/, which every future session
@@ -1533,8 +1524,11 @@ async def publish_take(
         # catalog conventions and drifting from them.
         main = await asyncio.to_thread(importlib.import_module, "main")
 
+        from . import track_processing
+
         try:
             entry = await asyncio.to_thread(
+                track_processing.ingest,
                 main.ingest_track,
                 wav_path,
                 req.genre_folder,

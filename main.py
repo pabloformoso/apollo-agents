@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import wave
 from dataclasses import dataclass
@@ -685,7 +686,7 @@ def _ffmpeg_available():
 _STREAM_MP3_BITRATE = "192k"
 
 
-def _ensure_mp3_for(audio_path):
+def _ensure_mp3_for(audio_path, *, output_path=None):
     """Encode an MP3 streaming sibling alongside ``audio_path`` and return its rel path.
 
     Why this exists
@@ -724,7 +725,7 @@ def _ensure_mp3_for(audio_path):
         return None  # unknown source format
     # Sibling path. Use ``.stream.mp3`` to make the intent obvious and
     # to never collide with an existing ``.mp3`` source.
-    stream_path = base + ".stream.mp3"
+    stream_path = output_path or base + ".stream.mp3"
     if os.path.exists(stream_path):
         return os.path.relpath(stream_path).replace("\\", "/")
     if not _ffmpeg_available():
@@ -1799,7 +1800,8 @@ def _ingest_write_wav(src, dst, conformant):
 
 
 def ingest_track(audio_path, genre_folder, display_name=None, bpm=None, keyscale=None,
-                 sidecar=None, variant_of=None, lyrics=None, dry_run=False):
+                 sidecar=None, variant_of=None, lyrics=None, dry_run=False,
+                 prepare_for_sessions=False):
     """Append ONE externally generated track to the catalog. Returns its entry.
 
     The ingest counterpart to ``--build-catalog``: instead of scanning a
@@ -1957,6 +1959,8 @@ def ingest_track(audio_path, genre_folder, display_name=None, bpm=None, keyscale
         "bpm": bpm,
         "variant_of": variant_of if is_variant else None,
     }
+    if prepare_for_sessions:
+        entry.update(processing_status="queued", processing_error=None)
     lrc_path = os.path.splitext(dest_path)[0] + ".lrc" if lyrics_text else None
     backup_path = _catalog_backup_path(CATALOG_PATH) if os.path.exists(CATALOG_PATH) else None
 
@@ -1995,10 +1999,25 @@ def ingest_track(audio_path, genre_folder, display_name=None, bpm=None, keyscale
     entries.append(entry)
     catalog["tracks"] = entries
     os.makedirs(os.path.dirname(CATALOG_PATH) or ".", exist_ok=True)
-    with open(CATALOG_PATH, "w", encoding="utf-8") as f:
-        json.dump(catalog, f, indent=2, ensure_ascii=False)
+    fd, pending_catalog = tempfile.mkstemp(dir=os.path.dirname(CATALOG_PATH) or ".", suffix=".tmp")
+    try:
+        previous = os.stat(CATALOG_PATH) if os.path.exists(CATALOG_PATH) else None
+        os.chmod(pending_catalog, (previous.st_mode & 0o777) if previous else 0o644)
+        if previous and getattr(os, "geteuid", lambda: -1)() == 0:
+            os.chown(pending_catalog, previous.st_uid, previous.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(catalog, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(pending_catalog, CATALOG_PATH)
+    finally:
+        if os.path.exists(pending_catalog):
+            os.unlink(pending_catalog)
     print(f"Ingested '{display_name}' as {track_id} → {CATALOG_PATH} ({len(entries)} entries)")
-    print("Run --fix-incomplete to backfill duration, beatgrid and the MP3 sibling.")
+    if prepare_for_sessions:
+        print("Audio preparation queued by Apollo; excluded from automatic session selection until ready.")
+    else:
+        print("Run --fix-incomplete to backfill duration and beatgrid.")
     return entry
 
 
