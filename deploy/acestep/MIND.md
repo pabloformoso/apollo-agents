@@ -40,6 +40,9 @@ Model-operation timeouts are uncertain: do not blindly retry. Verify `lms ps --j
 and the LM Studio server logs first. A timed-out load can reconcile when its alias
 appears; unresolved unloads require operator verification and controller restart
 after the operation has genuinely finished. Avoid controller restarts during work.
+Inference transport timeouts also leave state uncertain: the model server may
+still be processing after the HTTP client disconnects. Verify completion on the
+host before restarting the controller; no unload is admitted in the meantime.
 
 Rollout must wait for a performance-safe window: frontend reloads may interrupt
 browser audio. This feature does not restore autoplay or automatically resume B2B.

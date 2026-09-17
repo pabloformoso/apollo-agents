@@ -204,8 +204,18 @@ async def action(action: Literal["start", "stop", "load", "unload"]):
 
 
 async def infer_request(payload: dict):
-    async with httpx.AsyncClient(timeout=260, trust_env=False) as client:
-        response = await client.post(MIND_URL + "/mind", json=payload)
+    global _uncertain, _error
+    try:
+        async with httpx.AsyncClient(timeout=260, trust_env=False) as client:
+            response = await client.post(MIND_URL + "/mind", json=payload)
+    except httpx.ConnectError:
+        raise
+    except httpx.HTTPError:
+        # A transport timeout/disconnect does not cancel work inside the
+        # HTTP service or LM Studio. Do not unload underneath that work.
+        _uncertain = True
+        _error = "Mind transport failed after dispatch. Verify inference has finished on the host before restarting the controller."
+        raise
     try:
         result = response.json()
     except ValueError as exc:

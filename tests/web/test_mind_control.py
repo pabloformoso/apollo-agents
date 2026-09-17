@@ -1,6 +1,7 @@
 """Mind lifecycle safety: fake host only, no real model loads."""
 import asyncio
 from unittest.mock import AsyncMock
+import httpx
 
 import pytest
 from fastapi import HTTPException
@@ -82,6 +83,18 @@ def test_load_fixed_argv(monkeypatch):
 def test_timeout_blocks_further_mutations(monkeypatch):
     monkeypatch.setattr(mind, "command", AsyncMock(side_effect=TimeoutError))
     asyncio.run(mind.perform("load", mind.Settings()))
+    with pytest.raises(HTTPException):
+        mind.ensure_idle()
+
+
+def test_inference_transport_timeout_is_uncertain(monkeypatch):
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.post.side_effect = httpx.ReadTimeout("late")
+    monkeypatch.setattr(mind.httpx, "AsyncClient", lambda **kwargs: client)
+    with pytest.raises(httpx.ReadTimeout):
+        asyncio.run(mind.infer_request({}))
+    assert mind._uncertain
     with pytest.raises(HTTPException):
         mind.ensure_idle()
 
