@@ -56,6 +56,7 @@ import { Btn, Crumb } from "./primitives";
 import { Banner, Spinner } from "./feedback";
 import { Scrubber } from "./Scrubber";
 import { Waveform } from "./Waveform";
+import { TrackPreparation } from "./TrackPreparation";
 
 /** G3 — the three edits, in the operator's words (API spec §3.3). */
 const EDIT_MODES: ReadonlyArray<[EditMode, string, string]> = [
@@ -761,6 +762,10 @@ export function TakeRow({
           )}
           <span className="font-mono text-[10px] text-mute">in the catalog</span>
         </div>
+      )}
+
+      {(pub.result?.track_id || publishedTrackId) && (
+        <TrackPreparation trackId={(pub.result?.track_id || publishedTrackId)!} />
       )}
 
       {/* The lineage IS the nesting: an edit of this take lives inside its

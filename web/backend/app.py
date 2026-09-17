@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
-from . import ace_control, covers, db, auth, keycloak, permissions, pipeline, youtube_auth
+from . import ace_control, covers, db, auth, keycloak, permissions, pipeline, youtube_auth, track_processing
 from .generator import router as generator_router
 from .render import router as render_router
 from .models import (
@@ -86,7 +86,8 @@ def _start_tracing() -> None:
 async def lifespan(_: FastAPI):
     db.init_db()
     _start_tracing()
-    yield
+    async with track_processing.worker():
+        yield
     if deus_obs is not None:
         # The batch exporter ships on a five-second schedule, so without this
         # the spans of the last seconds of a run — the end of a live session,
@@ -117,6 +118,7 @@ app.include_router(render_router)
 # G0 — ACE-Step generator feature flag (+ the VRAM guard G1 enforces).
 app.include_router(generator_router)
 app.include_router(ace_control.router)
+app.include_router(track_processing.router)
 
 
 # --- beatmatch feedback loop (W1) ------------------------------------------

@@ -214,7 +214,8 @@ def test_publish_lands_the_take_in_the_catalog(
     assert payload["camelot_key"] == "8A"
     assert payload["bpm"] == 138.0
     assert payload["variant_of"] is None
-    assert "--fix-incomplete" in payload["note"]
+    assert "automatically" in payload["note"]
+    assert next(e for e in _read_catalog(tmp_catalog) if e["id"] == payload["track_id"])["processing_status"] == "queued"
 
     # The WAV really landed, bit-exact (a conformant source is copied).
     dest = tmp_catalog / "techno" / "Neon Rain.wav"
