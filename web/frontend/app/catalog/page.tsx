@@ -20,6 +20,7 @@ import { Crumb, Stripe } from "@/components/ember/primitives";
 import type { Track } from "@/lib/types";
 import { GenerateSongs } from "@/components/ember/GenerateSongs";
 import { Waveform } from "@/components/ember/Waveform";
+import { CatalogPlayer } from "@/components/ember/CatalogPlayer";
 
 function formatDuration(sec: number | null | undefined) {
   if (!sec) return "—";
@@ -147,8 +148,8 @@ export default function CatalogPage() {
 
   return (
     <Shell username={user.username}>
-      <section className="px-[60px] pt-10 pb-6 border-b border-line">
-        <div className="flex items-end justify-between gap-6">
+      <section className="px-6 md:px-[60px] pt-10 pb-6 border-b border-line">
+        <div className="flex flex-wrap items-end justify-between gap-6">
           <div>
             <Crumb>library · {loading ? "loading…" : `${filtered.length} tracks`}</Crumb>
             <h1 className="font-display italic font-normal text-[64px] leading-[0.95] tracking-display-tight m-0 mt-2">
@@ -211,7 +212,7 @@ export default function CatalogPage() {
       )}
 
       {/* Grid */}
-      <section className="px-[60px] py-8 flex-1">
+      <section className="px-6 md:px-[60px] pt-8 pb-56 sm:pb-48 md:pb-40 flex-1">
         {loading ? (
           <p className="font-mono text-xs text-faint uppercase tracking-mono">
             loading catalog…
@@ -235,6 +236,8 @@ export default function CatalogPage() {
           </div>
         )}
       </section>
+
+      <CatalogPlayer tracks={filtered} loading={loading} label={search.trim() ? "Search results" : favoritesOnly ? "Favorites" : genre || "Catalog"} />
 
       {selected && (
         <TrackDetail
@@ -300,6 +303,7 @@ function TrackCard({
       tabIndex={0}
       data-testid="track-card"
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onClick();
@@ -342,11 +346,11 @@ function TrackCard({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            play(track, list);
+            play(track, list, "catalog");
           }}
           aria-label={`Play ${track.display_name}`}
           data-testid="track-card-play"
-          className="absolute bottom-1.5 right-1.5 w-8 h-8 rounded-full bg-ember text-cream text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 hover:scale-110 transition-all shadow"
+          className="absolute bottom-1.5 right-1.5 w-8 h-8 rounded-full bg-ember text-cream text-xs flex items-center justify-center hover:scale-110 transition-all shadow"
         >
           ▶
         </button>
@@ -465,7 +469,7 @@ function TrackDetail({
 
         <div className="flex gap-2 mb-6 relative">
           <button
-            onClick={() => play(track, list)}
+            onClick={() => play(track, list, "catalog")}
             data-testid="track-detail-play"
             className="flex-1 bg-ember text-cream font-sans text-sm font-medium py-3 hover:brightness-110 transition-all"
           >
