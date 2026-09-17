@@ -14,6 +14,14 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   before its results are persisted. The Generations service panel remains
   visible while ACE is down and refreshes generation availability when ready.
 
+- **Catalog playback queue**: the always-visible `CatalogPlayer` uses the
+  shared player, not a second audio element. Catalog card/detail playback and
+  Play results set `queueSource="catalog"`; search, genre and favorites then
+  update the queue without seeking/restarting the song. If the song leaves
+  the results, Next/end advances to the first result; empty/loading results
+  stop auto-advance. Other pages' queues remain untouched until explicit
+  catalog playback. The bar is catalog-only; audio still survives navigation.
+
 - **Catalog loaders here must NOT filter session eligibility.**
   `pipeline.load_catalog` feeds stream-by-id, ratings and the library
   UI — a short track must still resolve. The eligibility screen lives

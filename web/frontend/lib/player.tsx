@@ -38,10 +38,12 @@ export interface PlayerState {
   durationSec: number;
   volume: number;
   queue: Playable[];
+  queueSource: string | null;
 }
 
 export interface PlayerApi extends PlayerState {
-  play: (track: Playable, queue?: Playable[]) => void;
+  play: (track: Playable, queue?: Playable[], source?: string | null) => void;
+  updateQueue: (queue: Playable[]) => void;
   pause: () => void;
   resume: () => void;
   toggle: () => void;
@@ -66,6 +68,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [currentTrack, setCurrentTrack] = useState<Playable | null>(null);
   const [queue, setQueue] = useState<Playable[]>([]);
+  const [queueSource, setQueueSource] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [progressSec, setProgressSec] = useState(0);
   const [durationSec, setDurationSec] = useState(0);
@@ -96,9 +99,11 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       const idx = currentTrack
         ? queue.findIndex((t) => t.id === currentTrack.id)
         : -1;
-      if (idx >= 0 && idx < queue.length - 1) {
+      if (idx < queue.length - 1) {
         const nxt = queue[idx + 1];
         setCurrentTrack(nxt);
+        setProgressSec(0);
+        setDurationSec(0);
         if (audioRef.current) {
           audioRef.current.src = srcFor(nxt);
           audioRef.current.play().catch(() => {});
@@ -120,11 +125,14 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     };
   }, [currentTrack, queue]);
 
-  const play = useCallback((track: Playable, list?: Playable[]) => {
+  const play = useCallback((track: Playable, list?: Playable[], source: string | null = null) => {
     const el = audioRef.current;
     if (!el) return;
     setCurrentTrack(track);
     setQueue(list && list.length > 0 ? list : [track]);
+    setQueueSource(source);
+    setProgressSec(0);
+    setDurationSec(0);
     el.src = srcFor(track);
     el.currentTime = 0;
     el.play().catch(() => {
@@ -150,18 +158,18 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
   const next = useCallback(() => {
     if (!currentTrack) return;
     const idx = queue.findIndex((t) => t.id === currentTrack.id);
-    if (idx >= 0 && idx < queue.length - 1) {
-      play(queue[idx + 1], queue);
+    if (idx < queue.length - 1) {
+      play(queue[idx + 1], queue, queueSource);
     }
-  }, [currentTrack, queue, play]);
+  }, [currentTrack, queue, queueSource, play]);
 
   const prev = useCallback(() => {
     if (!currentTrack) return;
     const idx = queue.findIndex((t) => t.id === currentTrack.id);
     if (idx > 0) {
-      play(queue[idx - 1], queue);
+      play(queue[idx - 1], queue, queueSource);
     }
-  }, [currentTrack, queue, play]);
+  }, [currentTrack, queue, queueSource, play]);
 
   const seek = useCallback((sec: number) => {
     const el = audioRef.current;
@@ -185,6 +193,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
     }
     setCurrentTrack(null);
     setQueue([]);
+    setQueueSource(null);
     setIsPlaying(false);
     setProgressSec(0);
     setDurationSec(0);
@@ -198,6 +207,8 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       durationSec,
       volume,
       queue,
+      queueSource,
+      updateQueue: setQueue,
       play,
       pause,
       resume,
@@ -215,6 +226,7 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
       durationSec,
       volume,
       queue,
+      queueSource,
       play,
       pause,
       resume,
