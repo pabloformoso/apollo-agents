@@ -85,7 +85,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import acestep_client, auth, covers, db, permissions
+from . import ace_control, acestep_client, auth, covers, db, permissions
 from .brief_parser import detect_provider
 from .ws_manager import ws_manager
 
@@ -1178,7 +1178,7 @@ async def generator_health(
     }
 
 
-@router.post("/api/generator/tasks")
+@router.post("/api/generator/tasks", dependencies=[Depends(ace_control.generation_access)])
 async def create_generation_task(
     req: GenerationRequest,
     current_user: dict = Depends(auth.get_current_user),
@@ -1638,7 +1638,7 @@ async def _release_edit(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-@router.post("/api/generator/edit")
+@router.post("/api/generator/edit", dependencies=[Depends(ace_control.generation_access)])
 async def edit_take(
     req: EditRequest,
     current_user: dict = Depends(auth.get_current_user),

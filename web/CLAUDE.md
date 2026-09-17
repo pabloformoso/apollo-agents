@@ -5,6 +5,15 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
 
 ## Architecture decisions
 
+- **S0 ACE control** (`ace_control.py`, `ace_supervisor.py`): opt-in via
+  `ACESTEP_CONTROL_URL`; deployment and limits in `docs/s0-ace-control.md`.
+  The supervisor runs on the GPU host and only manages the fixed user unit
+  `apollo-acestep.service`. Apollo needs one worker: a shared admission lock
+  covers task/edit release, lifecycle commands and live WS registration.
+  Queue UNKNOWN is never idle. A pending generation record prevents stopping
+  before its results are persisted. The Generations service panel remains
+  visible while ACE is down and refreshes generation availability when ready.
+
 - **Catalog loaders here must NOT filter session eligibility.**
   `pipeline.load_catalog` feeds stream-by-id, ratings and the library
   UI — a short track must still resolve. The eligibility screen lives

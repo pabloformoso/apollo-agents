@@ -285,7 +285,9 @@ def test_a_pre_realm_local_account_keeps_everything_it_had():
     air, which is the same class of mistake as defaulting AUTH_MODE to
     keycloak before a realm exists.
     """
-    assert permissions.capabilities_for(None) == permissions.ALL_CAPABILITIES
+    assert permissions.capabilities_for(None) == (
+        permissions.ALL_CAPABILITIES - {permissions.MANAGE_GENERATOR}
+    )
 
 
 def test_an_empty_role_set_is_not_the_same_as_no_realm():

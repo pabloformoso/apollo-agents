@@ -49,6 +49,7 @@ import { Btn, Crumb } from "@/components/ember/primitives";
 import { Banner, Spinner } from "@/components/ember/feedback";
 import { TakeRow, playableFor } from "@/components/ember/GeneratorTakes";
 import { GenerateSongs } from "@/components/ember/GenerateSongs";
+import { AceServicePanel } from "@/components/ember/AceServicePanel";
 
 /** The badge. `stale` is deliberately the quietest of the four — it is not
  *  a fault, just a record that aged out. */
@@ -357,6 +358,7 @@ function GenerationsFeed() {
         <div className="mt-6">
           <GenerateSongs kind="primary" />
         </div>
+        <AceServicePanel />
       </section>
 
       <section className="px-[60px] py-8 flex-1 flex flex-col gap-6">

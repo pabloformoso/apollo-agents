@@ -1481,6 +1481,22 @@ describe("useLiveSession", () => {
   describe("WS reconnect", () => {
     const BACKOFFS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
+    it("waits for operator action after ACE refuses GPU admission", async () => {
+      vi.useFakeTimers();
+      try {
+        const { result } = renderHook(() => useLiveSession("sid-ace"));
+        await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+        const ws = FakeWebSocket.lastInstance!;
+        act(() => { ws.triggerClose(4002); });
+        expect(result.current.wsExhausted).toBe(true);
+        expect(result.current.wsRetryAttempt).toBe(0);
+        await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+        expect(FakeWebSocket.lastInstance).toBe(ws);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     async function burnRetries(advance: typeof vi.advanceTimersByTimeAsync) {
       // Caller must have already triggered the FIRST close (which sets
       // wsRetryAttempt=1 and schedules connect(1)). This walks through

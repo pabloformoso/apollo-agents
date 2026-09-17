@@ -32,6 +32,7 @@ PUBLISH_TO_CATALOG = "publish_to_catalog"
 START_LIVE_SESSION = "start_live_session"
 GENERATE_MUSIC = "generate_music"
 LISTEN_AND_RATE = "listen_and_rate"
+MANAGE_GENERATOR = "manage_generator"
 
 #: Granted to every authenticated account, no role needed. These are
 #: per-user and reversible: a bad rating is a bad rating, not a mess
@@ -46,7 +47,7 @@ ROLE_CAPABILITIES: dict[str, frozenset[str]] = {
     "apollo-broadcaster": frozenset({START_LIVE_SESSION}),
 }
 
-ALL_CAPABILITIES: frozenset[str] = BASE_CAPABILITIES | frozenset(
+ALL_CAPABILITIES: frozenset[str] = BASE_CAPABILITIES | {MANAGE_GENERATOR} | frozenset(
     c for caps in ROLE_CAPABILITIES.values() for c in caps
 )
 
@@ -66,7 +67,9 @@ def capabilities_for(roles: set[str] | None) -> frozenset[str]:
         # worked before roles existed stops working. Once a deployment is
         # pointed at a realm, every account arrives WITH a role set (even
         # an empty one) and the grants below apply.
-        return ALL_CAPABILITIES
+        # Host process control is NEW, not a legacy permission. A locally
+        # registered account must never gain it just by authenticating.
+        return ALL_CAPABILITIES - {MANAGE_GENERATOR}
     if ADMIN_ROLE in roles:
         return ALL_CAPABILITIES
     granted = set(BASE_CAPABILITIES)
