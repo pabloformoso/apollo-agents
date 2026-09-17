@@ -78,8 +78,16 @@ async def llm_idle() -> None:
             raise ValueError("Unknown model state")
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(409, "Cannot verify that the DJ / LLM has released the GPU.") from exc
+    from . import mind_supervisor
+    if mind_supervisor._uncertain or (mind_supervisor.busy() and mind_supervisor._operation in {"load", "unload"}):
+        raise HTTPException(409, "A Mind model residency operation is running. Wait for it to finish.")
     if any(m["state"] == "loaded" for m in models):
-        raise HTTPException(409, "The DJ / LLM still holds the GPU. Unload its models before using ACE.")
+        shared = mind_supervisor.read_settings().allow_shared_gpu
+        if shared:
+            _, loaded = await mind_supervisor.inventory()
+            shared = bool(loaded) and all(m["identifier"] == mind_supervisor.MODEL_ID for m in loaded)
+        if not shared:
+            raise HTTPException(409, "The DJ / LLM still holds the GPU. Unload its models before using ACE.")
 
 
 async def observe() -> ServiceState:
@@ -163,3 +171,7 @@ async def service_action(action: str):
         except TimeoutError as exc:
             raise HTTPException(503, "Service command timed out. Refresh status before retrying.") from exc
         return ServiceState(state="starting" if action == "start" else "stopping")
+
+
+from . import mind_supervisor  # noqa: E402 — callbacks import this module lazily
+app.include_router(mind_supervisor.router, dependencies=[Depends(authorize)])

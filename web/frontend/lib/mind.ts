@@ -17,6 +17,7 @@
  */
 
 import { mindRequest } from "@algorave/pen";
+import { getToken } from "./auth";
 
 /** What the page knows when it asks. Mirrors `parse_request` in the mind. */
 export interface MindRequest {
@@ -112,7 +113,7 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
   try {
     res = await fetch(MIND_ENDPOINT, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", Authorization: `Bearer ${getToken() ?? ""}` },
       body,
     });
   } catch (err) {
@@ -173,7 +174,7 @@ export async function askMind(req: MindRequest): Promise<MindProposal> {
  */
 export async function fetchMindModels(): Promise<MindModels | null> {
   try {
-    const res = await fetch(MIND_ENDPOINT, { method: "GET" });
+    const res = await fetch(MIND_ENDPOINT, { method: "GET", headers: { Authorization: `Bearer ${getToken() ?? ""}` } });
     if (!res.ok) return null;
     const obj = (await res.json()) as Record<string, unknown>;
     const models = Array.isArray(obj.models)
@@ -188,4 +189,3 @@ export async function fetchMindModels(): Promise<MindModels | null> {
     return null;
   }
 }
-
