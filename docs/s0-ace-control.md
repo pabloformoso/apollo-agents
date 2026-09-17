@@ -101,6 +101,11 @@ liberarlo primero. Tampoco impide que clientes externos vuelvan a cargarlo.
 Parar ACE deja los archivos en disco; para escuchar takes no publicados hace
 falta volver a arrancarlo, ya que su audio se sirve desde la API de ACE.
 
+Durante la preparación del despliegue se verificó otro contrato de ACE:
+un ID olvidado responde `{status: 0, result: "[]"}`. La acción Resume reconoce
+ese marcador como `stale`; la consulta ordinaria sigue dando margen a un
+trabajo recién enviado. Los registros y archivos no se eliminan.
+
 Rollback: quitar `ACESTEP_CONTROL_URL` y `ACESTEP_CONTROL_TOKEN` del backend,
 reiniciar Apollo en ventana sin directo y volver al manejo manual del servicio.
 No se migran ni eliminan archivos de audio o catálogo en S0.

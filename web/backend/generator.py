@@ -2384,7 +2384,12 @@ async def refresh_generation(
     if entry is None and len(results) == 1 and not results[0].task_id:
         entry = results[0]  # answered positionally, without echoing the id
 
-    if entry is None:
+    # Current ACE returns a placeholder instead of omitting a forgotten ID:
+    # {task_id, status: 0, result: "[]"}. A real queued/running record contains
+    # a progress entry (or legacy result=""). Keep the ordinary poll's grace
+    # semantics; only this explicit resume route marks the missing ID stale.
+    forgotten = entry is not None and entry.status == 0 and entry.raw.get("result") in ("[]", [])
+    if entry is None or forgotten:
         # The box answered and does not know this task. Unlike the poll
         # endpoint — where an id ACE has not registered YET must not tear
         # the wizard's card down — a refresh is asked about a generation
