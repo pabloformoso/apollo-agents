@@ -98,9 +98,9 @@ export default function DashboardPage() {
   }
 
   return (
-    <Shell fitViewport username={user?.username ?? null}>
-      {/* ────── Hero — the entire page presentation, viewport-sized ───── */}
-      <section className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-x-[60px] items-end px-[60px] pt-10 pb-10">
+    <Shell username={user?.username ?? null}>
+      {/* Fill the viewport when possible; allow scrolling on short screens. */}
+      <section className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-x-[60px] gap-y-10 items-end px-6 md:px-[60px] py-10">
         <div>
           <Crumb>tonight · curated for you</Crumb>
           <h1 className="font-display italic font-normal tracking-display-tight leading-[0.95] mt-4 mb-0 text-[clamp(56px,7vw,88px)]">
@@ -111,7 +111,7 @@ export default function DashboardPage() {
             Tell Apollo what you want to hear and it will assemble, critique,
             and either render it for you — or perform it live.
           </p>
-          <div className="flex gap-3 mt-8">
+          <div className="flex flex-wrap gap-3 mt-8">
             <Btn onClick={handleCreate}>
               Start a session <Arrow />
             </Btn>
@@ -150,8 +150,12 @@ export default function DashboardPage() {
         <div
           onClick={hero ? openHero : undefined}
           className={
-            "self-end w-full " + (hero ? "cursor-pointer group" : "")
+            "self-end justify-self-end w-full min-w-0 " + (hero ? "cursor-pointer group" : "")
           }
+          // Preserve 5:4 without letting an ultrawide column dictate height.
+          // Reserve space for the header, footer and section padding. On short
+          // screens the card keeps a useful size and the page can scroll.
+          style={{ maxWidth: "min(100%, max(400px, calc(125svh - 300px)))" }}
           role={hero ? "button" : undefined}
           tabIndex={hero ? 0 : undefined}
           onKeyDown={(e) => {
@@ -189,7 +193,7 @@ export default function DashboardPage() {
       </section>
 
       {/* Footer with sign out — minimal and tucked away */}
-      <footer className="px-[60px] py-4 border-t border-line flex justify-between items-center">
+      <footer className="px-6 md:px-[60px] py-4 border-t border-line flex justify-between items-center">
         <div className="flex items-center gap-3">
           <ApolloMark size={18} />
           <Crumb>v2.6.0 · cinematic</Crumb>
