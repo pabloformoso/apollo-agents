@@ -308,6 +308,27 @@ export const getGeneratorHealth = () =>
 export const getEngineStatus = () =>
   gfetch<EngineStatus>("/generator/engines");
 
+export type AceServiceState = {
+  state: "stopped" | "starting" | "running" | "stopping" | "failed" | "unresponsive" | "unknown";
+  ready: boolean;
+  loaded: boolean;
+  queued: number | null;
+  running: number | null;
+  reason: string | null;
+};
+
+export type AceServiceStatus = AceServiceState & {
+  configured: boolean;
+  reachable: boolean;
+  can_manage: boolean;
+  blocked_by_live: boolean;
+  pending_results: number;
+};
+
+export const getAceService = () => gfetch<AceServiceStatus>("/generator/service");
+export const controlAceService = (action: "start" | "stop") =>
+  gfetch<AceServiceState>(`/generator/service/${action}`, { method: "POST" });
+
 export const createGeneratorTask = (body: CreateTaskRequest) =>
   gfetch<CreateTaskResponse>("/generator/tasks", {
     method: "POST",
@@ -1863,7 +1884,7 @@ export type GeneratorHealthState =
   | { status: "ready"; health: GeneratorHealth };
 
 /**
- * Read the generator feature flag once on mount.
+ * Read the generator feature flag on mount and after service state changes.
  *
  * Deliberately not polled: `blocked_by_live` can flip while the screen is
  * open, and the authoritative guard for that is the 409 the POST returns —
@@ -1878,7 +1899,7 @@ export function useGeneratorHealth(): GeneratorHealthState {
 
   useEffect(() => {
     let cancelled = false;
-    getGeneratorHealth()
+    const refresh = () => getGeneratorHealth()
       .then((health) => {
         if (cancelled) return;
         setState(
@@ -1889,8 +1910,11 @@ export function useGeneratorHealth(): GeneratorHealthState {
         if (cancelled) return;
         setState({ status: "unavailable" });
       });
+    void refresh();
+    window.addEventListener("apollo-generator-status", refresh);
     return () => {
       cancelled = true;
+      window.removeEventListener("apollo-generator-status", refresh);
     };
   }, []);
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=ACE-Step music generation for Apollo
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/code/ACE-Step-1.5
+EnvironmentFile=%h/.config/apollo/acestep.env
+ExecStart=%h/code/ACE-Step-1.5/.venv/bin/acestep-api --host 0.0.0.0 --port 8001 --no-init
+Restart=no
+KillMode=control-group
+TimeoutStopSec=60
+
+# Deliberately no Install target: Apollo starts this service on demand.

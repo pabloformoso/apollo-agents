@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
-from . import covers, db, auth, keycloak, permissions, pipeline, youtube_auth
+from . import ace_control, covers, db, auth, keycloak, permissions, pipeline, youtube_auth
 from .generator import router as generator_router
 from .render import router as render_router
 from .models import (
@@ -116,6 +116,7 @@ app.include_router(render_router)
 
 # G0 — ACE-Step generator feature flag (+ the VRAM guard G1 enforces).
 app.include_router(generator_router)
+app.include_router(ace_control.router)
 
 
 # --- beatmatch feedback loop (W1) ------------------------------------------
@@ -1243,20 +1244,28 @@ async def live_session_ws(
     # handler keeps reading from the new socket, racing with the new
     # handler — the failure mode the viewer-WS split was meant to fix
     # for OBS-flagged URLs but which still affected plain /live.
-    displaced = await ws_manager.displace_existing(
-        session_id,
-        code=4001,
-        reason="replaced by new connection",
-        channel="live",
-    )
+    try:
+        async with ace_control.live_admission():
+            displaced = await ws_manager.displace_existing(
+                session_id,
+                code=4001,
+                reason="replaced by new connection",
+                channel="live",
+            )
+            await ws_manager.connect(session_id, websocket, channel="live")
+    except HTTPException as exc:
+        # Accept only to deliver an actionable refusal; do not register a live
+        # engine. A pre-upgrade close becomes opaque HTTP 403 in browsers.
+        await websocket.accept()
+        await websocket.send_json({"type": "error", "message": str(exc.detail)})
+        await websocket.close(code=4002, reason="ACE service must be stopped before going live.")
+        return
     if displaced:
         print(
             f"[live-ws {session_id}] displaced previous primary "
             f"(close code 4001)",
             flush=True,
         )
-
-    await ws_manager.connect(session_id, websocket, channel="live")
 
     # Inject session identity into context_variables so the live tools can
     # see the current user (mirrors the planning WS handler).

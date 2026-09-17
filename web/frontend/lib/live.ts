@@ -1783,6 +1783,14 @@ export function useLiveSession(
           onClosed();
           return;
         }
+        // GPU admission refusal. The server sent an explanatory error frame;
+        // retrying cannot free the GPU. Allow reconnectNow after user action.
+        if (event?.code === 4002) {
+          onClosed();
+          setWsRetryAttempt(0);
+          setWsExhausted(true);
+          return;
+        }
         // v2.7.2 — close code 4001 is the backend's "displaced by a
         // newer primary on the same session" signal (see
         // ``ws_manager.displace_existing``). v2.7.4 — instead of

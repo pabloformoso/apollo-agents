@@ -1,0 +1,15 @@
+[Unit]
+Description=Apollo ACE lifecycle controller
+After=network.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/code/apollo-agents
+EnvironmentFile=%h/.config/apollo/ace-control.env
+ExecStart=%h/code/apollo-agents/.venv/bin/uvicorn web.backend.ace_supervisor:app --host 127.0.0.1 --port 8010 --workers 1
+Restart=on-failure
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

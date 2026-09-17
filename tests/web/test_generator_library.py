@@ -859,6 +859,36 @@ def test_refresh_marks_stale_when_ace_answers_without_the_task(
     assert _feed(auth_client)[0]["status"] == "stale"
 
 
+@pytest.mark.parametrize("empty_result", ["[]", []])
+def test_refresh_marks_stale_for_real_ace_forgotten_task_placeholder(
+    auth_client, ace_on, monkeypatch, empty_result
+):
+    _release(auth_client, monkeypatch)
+    _install_ace(monkeypatch, _box(results=[{
+        "task_id": "task-1", "status": 0, "result": empty_result,
+    }]))
+    # A newly released task can still be registering: the normal poll keeps
+    # its existing grace behavior. The operator's explicit resume is terminal.
+    poll = auth_client.get("/api/generator/tasks/task-1").json()
+    assert poll["status"] == "pending"
+    response = auth_client.post("/api/generator/generations/task-1/refresh")
+    assert response.status_code == 200
+    assert response.json()["status"] == "stale"
+    assert response.json()["degraded"] is False
+    assert _feed(auth_client)[0]["status"] == "stale"
+
+
+def test_refresh_preserves_real_ace_running_progress_entry(
+    auth_client, ace_on, monkeypatch
+):
+    _release(auth_client, monkeypatch)
+    _install_ace(monkeypatch, _box(results=[{
+        "task_id": "task-1", "status": 0,
+        "result": json.dumps([{"status": 0, "file": "", "stage": "running", "progress": 0.5}]),
+    }]))
+    assert auth_client.post("/api/generator/generations/task-1/refresh").json()["status"] == "pending"
+
+
 def test_refresh_marks_stale_when_the_batch_holds_someone_elses_task(
     auth_client, ace_on, monkeypatch
 ):
