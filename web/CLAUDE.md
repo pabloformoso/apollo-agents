@@ -498,12 +498,13 @@ mechanism; read its comment before adding a second sentinel.
   process someone must remember to restart — §11.5 risk 2. No browser origin
   reaches the mind now, so there is nothing to keep in sync. **The plan's task
   to widen `--allow-origin` is obsolete, not skipped.**
-- **Seam 1 is checkable, so check it**: `grep -rn ':4032\|/api/algorave/mind'`
-  over the frontend must hit exactly two files — the route handler (which knows
-  the upstream address) and `lib/mind.ts` (which knows the browser endpoint).
-  The page names neither. `ALGORAVE_MIND_URL` overrides the upstream; the
-  default is the tailnet IP because the mind binds to that interface, not
-  loopback (#144's HOST bind).
+- **Managed Mind:** `lib/mind.ts` remains the browser inference seam. Its
+  same-origin route forwards the user's bearer token to `/api/mind/infer` on
+  Apollo's backend, which calls the authenticated host supervisor. The fixed
+  host service binds loopback:4032; `ALGORAVE_MIND_URL` is no longer used.
+  Settings and the inline Algorave Model management panel control service and
+  model residency separately. See `deploy/acestep/MIND.md` for installation,
+  reserved model alias, concurrency protections and shared-GPU opt-in.
 - **The mind's statuses mean different things and must not be flattened**: 400
   the page sent something malformed, 502 it could not produce valid Strudel
   (ask again), 503 the validator is not installed (`npm install`, not a retry),

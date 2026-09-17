@@ -118,6 +118,8 @@ app.include_router(render_router)
 # G0 — ACE-Step generator feature flag (+ the VRAM guard G1 enforces).
 app.include_router(generator_router)
 app.include_router(ace_control.router)
+from . import mind_control
+app.include_router(mind_control.router)
 app.include_router(track_processing.router)
 
 

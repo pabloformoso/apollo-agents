@@ -30,6 +30,7 @@ export const ROUTES = [
   { id: "editor", label: "Editor", href: "/editor" },
   { id: "render", label: "Render", href: "/render" },
   { id: "live", label: "Live", href: "/live" },
+  { id: "settings", label: "Settings", href: "/settings" },
 ] as const;
 
 type RouteId = (typeof ROUTES)[number]["id"];
@@ -43,6 +44,7 @@ function routeIdForPath(pathname: string | null): RouteId {
   if (pathname.startsWith("/editor")) return "editor";
   if (pathname.startsWith("/render")) return "render";
   if (pathname.startsWith("/live")) return "live";
+  if (pathname.startsWith("/settings")) return "settings";
   return "dashboard";
 }
 
@@ -92,7 +94,7 @@ export function Shell({
             )}
           </Link>
 
-          <nav className="flex gap-1 border border-line p-[3px]">
+          <nav className="flex min-w-0 overflow-x-auto gap-1 border border-line p-[3px]">
             {ROUTES.map((r) => {
               const active = r.id === route;
               return (
