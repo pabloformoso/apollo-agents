@@ -121,7 +121,7 @@ export default function DashboardPage() {
           <div className="max-w-2xl">
             <Crumb tone="ember">apollo · ai music entertainment system</Crumb>
             <h1 className="mt-4 font-display text-[clamp(50px,7vw,96px)] italic leading-[.9] tracking-display-tight">
-              Your music<br />system<span className="text-ember">.</span>
+              What will you<br />make tonight<span className="text-ember">?</span>
             </h1>
             <p className="mt-6 max-w-lg text-base leading-relaxed text-mute">
               A place to discover, generate and perform. Apollo keeps the tools together so you can get to the music faster.
@@ -223,7 +223,7 @@ export default function DashboardPage() {
           )}
         </section>
 
-        <footer className="mt-14 flex items-center justify-between border-t border-line py-5">
+        <footer className="mt-14 flex items-center justify-between border-t border-line bg-ink/95 py-5 backdrop-blur-md lg:fixed lg:inset-x-0 lg:bottom-[68px] lg:z-30 lg:px-12">
           <div className="flex items-center gap-3"><ApolloMark size={18} /><Crumb>music, with collaborators</Crumb></div>
           <button type="button" onClick={() => { clearAuth(); router.push("/login"); }} className="text-xs text-faint transition-colors hover:text-ember-text">Sign out</button>
         </footer>
