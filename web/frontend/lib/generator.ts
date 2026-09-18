@@ -106,6 +106,7 @@ export type CreateTaskRequest = {
   key_scale?: string;
   batch_size?: number;
   use_format?: boolean;
+  style_prompt?: string;
   experimental?: Record<string, unknown>;
 };
 

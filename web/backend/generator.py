@@ -133,7 +133,7 @@ CATALOG_AUDIO_FORMAT = "wav"
 SERVER_OWNED_FIELDS = frozenset({
     "audio_duration", "audio_format", "batch_size", "bpm", "caption",
     "duration", "key_scale", "lyrics", "prompt", "thinking",
-    "use_format", "vocal_language",
+    "use_format", "style_prompt", "vocal_language",
 })
 
 #: ``query_result`` status → the wizard's vocabulary (spec §4).
@@ -352,7 +352,9 @@ class GenerationRequest(BaseModel):
     #: ACE-Step's formatter turns the short caption + lyrics into the
     #: structured metadata the 1.5 LM expects. Keep it explicit so the UI
     #: can expose the choice without smuggling it through ``experimental``.
-    use_format: bool = True
+    use_format: bool = False
+    # None preserves the legacy preset; an explicit empty string disables it.
+    style_prompt: str | None = Field(None, max_length=512)
     experimental: dict[str, Any] | None = None
 
     @field_validator("prompt", "genre_folder")
@@ -361,6 +363,14 @@ class GenerationRequest(BaseModel):
         if not value.strip():
             raise ValueError("must not be blank")
         return value
+
+    @model_validator(mode="after")
+    def _custom_caption_fits(self) -> GenerationRequest:
+        if self.style_prompt is not None:
+            caption = ". ".join(part.strip() for part in (self.style_prompt, self.prompt) if part.strip())
+            if len(caption) > 512:
+                raise ValueError("Style and song description together must fit within 512 characters")
+        return self
 
     @model_validator(mode="after")
     def _experimental_stays_out_of_server_fields(self) -> GenerationRequest:
@@ -415,7 +425,11 @@ def _release_payload(
     genre with no window falls back to the LM instead of being refused.
     """
     payload: dict[str, Any] = {
-        "prompt": _compose_prompt(req.prompt, genre_key),
+        "prompt": (
+            _compose_prompt(req.prompt, genre_key)
+            if req.style_prompt is None
+            else ". ".join(part.strip() for part in (req.style_prompt, req.prompt) if part.strip())
+        ),
         "lyrics": req.lyrics,
         "audio_duration": req.audio_duration,
         "vocal_language": req.vocal_language.strip(),

@@ -383,6 +383,34 @@ def test_generator_genres_exposes_canonical_bpm_controls(auth_client):
     assert "rolling four-on-the-floor" in deep_house["style_prompt"]
 
 
+def test_release_uses_operator_style_prompt_without_genre_rewrite(
+    auth_client, ace_on, monkeypatch
+):
+    calls = _install_ace(monkeypatch, _box())
+
+    response = auth_client.post(
+        "/api/generator/tasks",
+        json={**_BODY, "prompt": "slow sunrise", "style_prompt": "minimal piano, warm room"},
+    )
+
+    assert response.status_code == 200
+    assert _released_payload(calls)["prompt"] == "minimal piano, warm room. slow sunrise"
+
+
+def test_release_rejects_style_and_prompt_over_ace_step_ceiling(
+    auth_client, ace_on, monkeypatch
+):
+    _install_ace(monkeypatch, _box())
+
+    response = auth_client.post(
+        "/api/generator/tasks",
+        json={**_BODY, "prompt": "x" * 300, "style_prompt": "y" * 300},
+    )
+
+    assert response.status_code == 422
+    assert "512" in response.text
+
+
 def test_release_trims_composed_caption_to_ace_step_ceiling(
     auth_client, ace_on, monkeypatch
 ):
@@ -396,7 +424,7 @@ def test_release_trims_composed_caption_to_ace_step_ceiling(
     assert response.status_code == 200
     payload = _released_payload(calls)
     assert len(payload["prompt"]) <= 512
-    assert payload["use_format"] is True
+    assert payload["use_format"] is False
 
 
 def test_release_fills_the_contract_defaults(auth_client, ace_on, monkeypatch):
