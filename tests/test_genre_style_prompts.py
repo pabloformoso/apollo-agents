@@ -148,6 +148,6 @@ def test_empty_user_prompt_still_carries_the_genre():
     assert _compose()("", "synthware") == GENRE_STYLE_PROMPTS["synthware"]
 
 
-def test_composed_prompt_is_trimmed_not_rejected():
-    """A long user prompt must never turn into a 422."""
-    assert len(_compose()("x" * 5000, "healing")) == 4000
+def test_composed_prompt_is_trimmed_to_ace_step_caption_limit():
+    """A long user prompt must fit ACE-Step 1.5's 512-character caption."""
+    assert len(_compose()("x" * 5000, "healing")) == 512
