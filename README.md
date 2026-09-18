@@ -1,667 +1,237 @@
-# ApolloAgents
+# Apollo
 
 [![CI](https://github.com/pabloformoso/apollo-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/pabloformoso/apollo-agents/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Roadmap](https://img.shields.io/badge/roadmap-public-blueviolet)](ROADMAP.md)
 
-![ApolloAgents — assemble. critique. perform.](apollo_banner.svg)
+![Apollo — assemble. critique. perform.](apollo_banner.svg)
 
-> An AI-powered DJ set builder AND a live-coding instrument — from a single-sentence brief to a rendered YouTube video, a real-time DJ set, or an algorave written live with an LLM at the other end of the pen.
+> **Apollo is an AI Music Entertainment System:** a place to imagine music, shape it with a team of specialist collaborators, and either publish the result or take it live.
 
-ApolloAgents uses a multi-agent pipeline to plan, critique, and build DJ mixes. You describe the vibe. The agents handle harmonic mixing, BPM matching, energy arc planning, and audio quality validation. You stay in control at every checkpoint — through a CLI, a conversational agent, or the **Ember web UI**.
+Apollo turns a sentence such as “a dark, patient techno set that peaks after midnight” into a set you can hear, edit, render, and perform. It can also sit beside you in a live-coding session, sharing a Strudel buffer and taking turns at the pen.
 
-Since v4.0 there is a second way to perform: **`/algorave`**, a live-coding surface where you and an LLM write [Strudel](https://strudel.cc) patterns into the same buffer, taking turns.
+The product is called **Apollo**. This repository is `apollo-agents`.
 
----
+## What Apollo does
 
-## ✨ Live Mode
+Apollo brings several music activities into one system:
 
-> Apollo DJs in real time — no pre-render, no waiting. Just music, events, and autonomous decisions.
+- **Create a set.** Describe a mood, genre, duration, venue, or energy arc. Apollo searches the catalog, orders tracks harmonically, checks the transitions, and gives you control before anything is built.
+- **Make it yours.** Move, swap, or insert tracks by hand, or ask the editor to repair a specific problem. The critic explains what changed and why.
+- **Generate new music.** When the optional ACE-Step service is available, generations become playable takes that can be scored, edited, and published into the catalog.
+- **Perform.** Render a finished mix and video, or go live. The live engine preloads the next track and lets Apollo make bounded transition decisions while you stay in the room.
+- **Play with the mind.** In `/algorave`, you and Apollo write Strudel patterns into the same buffer. The human keeps the final say, and the validator keeps both collaborators inside the musical rules.
 
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0d0d1a',
-  'primaryColor': '#1a1a2e',
-  'primaryTextColor': '#e0e0ff',
-  'primaryBorderColor': '#4a4a8a',
-  'lineColor': '#6060aa',
-  'secondaryColor': '#12122a',
-  'edgeLabelBackground': '#1a1a2e',
-  'clusterBkg': '#12122a',
-  'clusterBorder': '#3a3a6a',
-  'nodeTextColor': '#e0e0ff',
-  'fontFamily': 'monospace'
-}}}%%
+Apollo is designed for DJs, producers, live coders, and curious listeners who want an active musical partner rather than a black-box playlist generator.
 
-flowchart LR
-    TRACK["🎵 Track playing\nlive audio"]:::pipeline
+## The product surfaces
 
-    CF{"⏱ Approaching\ncrossfade?"}:::checkpoint
+| Surface | What happens there |
+| --- | --- |
+| **Library** | Your sessions, saved sets, and recent work. |
+| **Generations** | New takes from ACE-Step, with playback, scoring, editing, and publishing. |
+| **Catalog** | The tracks Apollo can audition, rate, and use in a set. |
+| **Create** | Brief → Curate → Editor → Render. One journey with several focused screens. |
+| **Perform** | Live playback, audience mode, DJ controls, and the OBS-friendly visual view. |
+| **Algorave** | Live coding with Strudel, Apollo's mind, a shared pen, and MIDI output. |
 
-    GOOD["✅ Let it ride"]:::agent
-    MED["⏸ extend_track(20)"]:::agent
-    BAD["⚡ crossfade_now()"]:::agent
+The web client uses the Ember visual language: dark surfaces, warm cream type, an ember accent, and a small set of shared components. The interface is one product even when the work moves between planning, generation, editing, and performance.
 
-    USER(["👤 next · stay\nmore energetic\nwind down"]):::user
+## A team with distinct jobs
 
-    NEXT["🎵 Next track\n(pre-stretched)"]:::pipeline
+Apollo is the conductor. Its collaborators have narrow responsibilities so that a useful opinion can be challenged before it becomes an irreversible action.
 
-    TRACK -->|"30s warning"| CF
-    CF -->|"≤1 Camelot step\n≤8 BPM diff"| GOOD
-    CF -->|"2 steps\nOR 8–20 BPM"| MED
-    CF -->|">2 steps\nOR >20 BPM"| BAD
-    GOOD --> NEXT
-    MED  --> NEXT
-    BAD  --> NEXT
-    USER -->|"mid-set command"| CF
+| Collaborator | Job |
+| --- | --- |
+| **Janus** | Checks the brief: genre, duration, mood, and available direction. |
+| **Hermes** | Keeps the catalog useful and resolves BPM, key, duration, and preparation state. |
+| **Muse** | Plans the playlist and its energy arc. |
+| **Momus** | Reviews the set independently and calls out clashes, weak pacing, and risky stretches. |
+| **Editor** | Applies bounded changes: move, swap, insert a bridge, or rebuild. |
+| **Themis** | Validates the rendered audio for clipping, silence, spectral problems, and level anomalies. |
+| **LiveDJ** | Watches the live engine and chooses whether to let a transition ride, buy time, or move early. |
 
-    classDef agent      fill:#1a1a3a,stroke:#5858b0,color:#c8c8ff
-    classDef pipeline   fill:#0a1f1a,stroke:#20a060,color:#60ffb0
-    classDef checkpoint fill:#2a1a0a,stroke:#c07820,color:#ffc060
-    classDef user       fill:#0a0a1a,stroke:#4040a0,color:#8080d0
+The collaborators can use Anthropic, Azure OpenAI, a LiteLLM proxy, Ollama, LM Studio, or another compatible provider. Apollo keeps the provider choice separate from the musical roles.
+
+## The main loop
+
+```text
+brief → curate → edit → perform
+  └──────────────→ render
 ```
+
+You can start from the web UI, the conversational agent, or the direct CLI. The important boundary is the same in each: Apollo can propose, but you decide what becomes a set and what goes on air.
+
+### Rendered sets
+
+A finished session can produce:
+
+- a lossless WAV mix;
+- a 1080p video with waveform, artwork, and titles;
+- a short vertical teaser;
+- transition metadata and a `youtube.md` release note;
+- a reproducible session description.
+
+### Live sets
+
+Live Mode does not wait for a full render. Apollo keeps the next track ready, listens for engine events, and reacts to commands such as:
+
+```text
+next
+stay 60
+more energetic
+wind down
+go live
+```
+
+It evaluates a transition using the musical context it has: Camelot distance, BPM difference, the current arc, and what is already queued. The live engine remains in charge of audio timing; the model is never allowed to block the audio callback.
+
+### Algorave
+
+The Algorave surface is a second way to perform, not a second application. You write patterns; Apollo can propose a change at a phrase boundary. If the buffer changes while it is thinking, your edit wins and its proposal becomes a reviewable diff. The sound palette and validator share one registry so the editor, the prompt, and playback agree about what is playable.
+
+A secure browser context is required for AudioWorklet and WebMIDI: use `localhost` or HTTPS.
+
+## Try the web app
+
+### Requirements
+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 22+
+- `ffmpeg`, the `rubberband` command-line tool, and PortAudio
+- an LLM provider configured in `.env` (Anthropic, Azure OpenAI, LiteLLM, Ollama, or another compatible endpoint)
+
+### Install
 
 ```bash
-uv run python agent/run.py
-# → go live
-```
-
-→ [Full Live Mode docs, thread architecture & cycle diagram](#live-mode-1)
-
----
-
-## 🎛 Algorave — live coding with a mind
-
-> The other way to perform. You write patterns; so does Apollo. One buffer, one pen, and a rule about who holds it.
-
-`/algorave` is a live-coding surface built on [Strudel](https://strudel.cc). It is not a second app — it lives inside the Ember UI, shares its design, and reuses the same three-mode stage (`Audience` / `Booth` / `Immersive`) and read-only OBS view that Live Mode uses.
-
-**The pen.** Only one of you writes at a time. Hand it to the mind and it mutates the pattern on musical phrase boundaries — never mid-phrase, and a boundary missed because a request was still in flight is *skipped, not queued*. Turn on **B2B** and the pen alternates every N bars, like two DJs trading.
-
-**On a tie, the human wins.** A proposal only applies itself when the buffer is byte-identical to what the mind was shown. Type while it is thinking and your edit stands; its answer drops to a manual diff. And your edits are never lost on the mind: each evaluate is diffed and told to it as `human: ±N lines`, so it can see you moved something.
-
-**The palette is data, not code.** 61 sampled instruments and 6 drum machines come from one registry (`scripts/algorave-spike/palette.json`) that the validator, the LLM's prompt and the UI all read. Add a sound there and it is browsable, completable and playable with no code change.
-
-**The editor knows the rules.** Autocomplete offers sounds from the live registry, and inside `.bank("` it offers only the banks that actually carry the sound you named — a wrong pair plays silence rather than failing, so it is simply not suggested. As you type, the buffer is checked by the *same validator the LLM is held to*: invalid in red, out-of-key in amber, because one will not play and the other will play and clash.
-
-**MIDI out.** `.midi("port")` on any layer sends it to your own synths instead of the speakers. WebMIDI runs in the browser, so the notes reach the machine with the tab open.
-
-```bash
-# The registry, the validator and the mind's prompt share one vocabulary:
-npx vitest run          # in scripts/algorave-spike — 129 tests over the pen and the palette
-```
-
-Open `/algorave` from the dashboard. **A secure context is required** (HTTPS, or `localhost`): browsers withhold `AudioWorklet` and WebMIDI on a plain-HTTP origin, so over a bare IP the samples play and the synths do not.
-
----
-
-## 🪶 Web UI — v2.6.0 *Ember*
-
-The Ember redesign is Apollo's cinematic, single-screen web client. It collapses the entire flow — brief → curate → editor → render or live — into five flat routes with a shared italic-serif vocabulary and an ember-red accent. No 9-phase ladder, no checkpoints to grind through: the agents drive themselves and you intervene where it matters.
-
-```
-/dashboard   → tonight's set + last-performed poster
-/brief       → one sentence in, a parsed brief out
-/curate      → arc, playlist, critic notes (apply / ignore inline)
-/editor      → drag-reorder, swap, insert bridge tracks
-/render      → backend ffmpeg → 1080p MP4 with progress SSE
-/live        → real-time playback, Audience / Booth / Immersive modes
-```
-
-**Highlights:**
-
-- **Brief flow** — Claude Haiku parses your sentence into `{genre, duration, mood, venue, energy, tempo}` in <300 ms. If anything is ambiguous, Apollo asks inline — same screen, no detour — and resumes planning the second you confirm.
-- **Curate** — server-mapped critic notes with deterministic IDs; `Apply` triggers a bounded editor turn, `Ignore` marks handled. Arc strip on top, set-health score, and three routes out (Live · Render · Edit by hand).
-- **Editor** — drag tracks horizontally with `@dnd-kit`, command line drives a bounded SSE editor turn, set-health bar reacts to every change.
-- **Render** — async backend job, SSE progress stream, token-gated download URLs for MP4 / WAV / transitions / `youtube.md`.
-- **Live** — three modes (poster for the audience, control panel for the DJ, fullscreen visualizer for OBS), animated waveform that ticks to the deck's `currentTime`, prominent **transition incoming** warning before each crossfade, and an inline mic / audience-request panel.
-- **OBS broadcast** — one click in the Live header copies a `/live` URL with a hand-off token; paste into an OBS Browser Source and the page signs itself in (the token is stripped from the URL the moment it lands in localStorage). System-audio capture handles the sound.
-- **Single-viewport splash** — Dashboard + Login fit a 1366×768 laptop screen with no scroll; tipografía with `clamp()` so the wordmark scales down cleanly on narrower windows.
-
-**Stack:** Next.js 16 (App Router · React 19) · FastAPI · WebSockets for planning · SSE for editor/render · token-gated static streams for live audio · Tailwind with the `ember.*` token palette.
-
-```bash
-# Start it locally (two terminals)
-uv run uvicorn backend.app:app --reload --port 4020 --app-dir web   # backend
-npm --prefix web/frontend run dev                                    # frontend on :4010
-```
-
-Open `http://localhost:4010` and sign in. The agents wire themselves up the first time you submit a brief.
-
----
-
-## Example Output
-
-Every session in [this YouTube channel](https://www.youtube.com/watch?v=PdTd54Vl8Go) was built with ApolloAgents — from the earliest proof-of-concept cuts in v0.0 to today's fully orchestrated pipeline in v1.0. Same tracks, same taste, progressively better mixing as the agents learned.
-
-<a href="https://www.youtube.com/watch?v=PdTd54Vl8Go">
-  <img src="https://img.youtube.com/vi/PdTd54Vl8Go/maxresdefault.jpg" width="480" alt="Watch on YouTube" />
-</a>
-
----
-
-## Architecture
-
-<img src="architecture_infographic.png" width="540" alt="ApolloAgents: The Multi-Agent DJ Architecture" />
-
-
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0d0d1a',
-  'primaryColor': '#1a1a2e',
-  'primaryTextColor': '#e0e0ff',
-  'primaryBorderColor': '#4a4a8a',
-  'lineColor': '#6060aa',
-  'secondaryColor': '#12122a',
-  'tertiaryColor': '#0d0d1a',
-  'edgeLabelBackground': '#1a1a2e',
-  'clusterBkg': '#12122a',
-  'clusterBorder': '#3a3a6a',
-  'titleColor': '#c0c0ff',
-  'nodeTextColor': '#e0e0ff',
-  'fontFamily': 'monospace'
-}}}%%
-
-flowchart TD
-    User(["👤 User\nprompt"]):::user
-
-    subgraph APOLLO["☀️  APOLLO — Orchestrator"]
-        direction TB
-
-        JANUS["🚪 JANUS\nGenre Guard\n─────────────\nvalidates genre · duration · mood"]:::agent
-        HERMES["⚡ HERMES\nCatalog Manager\n─────────────\nsyncs WAVs · detects BPM & key"]:::agent
-
-        MUSE["🎵 MUSE\nPlanner\n─────────────\nenergy arc · harmonic order\nreads memory → avoids weak tracks"]:::agent
-
-        CP1{{"🛑 Checkpoint 1\nreview playlist"}}:::checkpoint
-
-        MOMUS["🎭 MOMUS\nCritic\n─────────────\ncold review · PROBLEMS / VERDICT\nreads memory → flags patterns"]:::agent
-
-        CP2{{"🛑 Checkpoint 2\napply fixes"}}:::checkpoint
-
-        EDITOR["✏️ Editor REPL\nswap · move · refine"]:::agent
-
-        PIPELINE[["⚙️ Mix Pipeline\nBPM match → crossfade → WAV\n1080p video + YouTube Short"]]:::pipeline
-
-        THEMIS["⚖️ THEMIS\nValidator\n─────────────\nclipping · spectral flatness\nsilence gaps · RMS drops"]:::agent
-
-        MEMORY[("🧠 Memory\nrating + notes\n→ agents improve")]:::memory
-    end
-
-    User --> JANUS
-    User --> HERMES
-    JANUS -->|"confirmed genre"| MUSE
-    MUSE -->|"playlist"| CP1
-    CP1 -->|"proceed"| MOMUS
-    MOMUS -->|"verdict"| CP2
-    CP2 -->|"ok"| EDITOR
-    EDITOR -->|"build"| PIPELINE
-    PIPELINE --> THEMIS
-    THEMIS -->|"PASS"| MEMORY
-    MEMORY -.->|"past sessions"| MUSE
-    MEMORY -.->|"problem patterns"| MOMUS
-
-    classDef agent        fill:#1a1a3a,stroke:#5858b0,color:#c8c8ff,rx:6
-    classDef checkpoint   fill:#2a1a0a,stroke:#c07820,color:#ffc060,shape:diamond
-    classDef pipeline     fill:#0a1f1a,stroke:#20a060,color:#60ffb0
-    classDef memory       fill:#1a0a2a,stroke:#8040c0,color:#c080ff
-    classDef user         fill:#0a0a1a,stroke:#4040a0,color:#8080d0,shape:circle
-```
-
-| Agent | Mythological name | Role |
-|-------|------------------|------|
-| Genre Guard | **Janus** | Gatekeeper — validates genre, duration, mood before planning starts |
-| Catalog Manager | **Hermes** | Keeper of records — syncs WAV files to catalog, detects BPM & key |
-| Planner | **Muse** | Inspires the set — energy arc, harmonic ordering, track selection |
-| Critic | **Momus** | God of fault-finding — cold independent review, structured verdict |
-| Editor | *(REPL)* | Interactive editor — swap, move, insert bridge tracks, trigger build or go live |
-| LiveDJ | **Apollo LiveDJ** | Real-time DJ engine — autonomous crossfade decisions, reacts to engine events and listener commands |
-| Validator | **Themis** | Goddess of order — audio quality analysis after every build |
-| Orchestrator | **Apollo** | Conductor — sequences all agents, manages state, collects memory |
-
-### Pipeline phases
-
-```
-1. Janus (Genre Guard)   → confirms genre / duration / mood
-2. Muse  (Planner)       → proposes playlist + energy arc
-3. Checkpoint 1          → user reviews; manual adjustments allowed
-4. Momus (Critic)        → cold review: flags key clashes, BPM stretch, arc gaps
-5. Checkpoint 2          → user sees critique; decides what to apply
-6. Editor REPL           → swap · move · insert bridge tracks → build
-7. Themis (Validator)    → audio quality report after build
-```
-
-> Checkpoints are hard gates — agents never auto-apply fixes. You stay in control.
-
----
-
-## Features
-
-- **Conversational planning** — describe the vibe, iterate with the agents, build when ready
-- **Harmonic mixing** — Camelot wheel-based track ordering for smooth key transitions
-- **BPM matching** — gradual tempo ramps between tracks via pyrubberband
-- **BPM stretch safety** — transitions with pyrubberband ratio >1.5× are flagged; Critic mandates a bridge track fix
-- **Bridge track insertion** — `suggest_bridge_track` finds candidates between mismatched positions; `insert_bridge_track` splices one in
-- **EQ matching at crossfade** — shelving EQ applied to outgoing/incoming segments based on key distance, reducing frequency masking
-- **Energy arc planning** — Planner evaluates set shape (warmup → build → peak → wind-down) and iterates until no gaps or plateaus
-- **Audio validation** — peak clipping, spectral flatness (bleach detection), silence gap and RMS anomaly checks
-- **Per-transition ratings** — rate each session 1–5 after build; Critic memory flags recurring problem transitions
-- **Session memory** — agents learn from past sessions: which tracks get swapped, what energy arcs rate highly
-- **Catalog management** — scan new WAVs, detect missing BPM/key fields, keep tracks.json in sync
-- **Live Mode** — Apollo DJs in real time: autonomous crossfade decisions, responds to `next`, `stay`, `more energetic`, `wind down` mid-set
-- **Multi-provider** — Claude (Anthropic), GPT-4o (OpenAI), a LiteLLM proxy, or any local model via Ollama / LM Studio; auto-detected from `.env`
-- **1080p video output** — spectral waveform visualizer, beat-reactive particles, DALL-E 3 artwork, retro pixel titles
-- **YouTube Short** — auto-generated 20s teaser alongside the full mix
-- **Web UI (v2.6 *Ember*)** — flat-routed Next.js client: Brief → Curate → Editor → Render / Live. Single-viewport splash, animated waveform, transition-incoming countdown, OBS-friendly broadcast feed with one-click auth hand-off
-
----
-
-## Setup
-
-**Requirements:** Python 3.12+, `uv`, `ffmpeg`
-
-```bash
-git clone https://github.com/YOUR_USERNAME/apollo-agents.git
+git clone https://github.com/pabloformoso/apollo-agents.git
 cd apollo-agents
-
-# Install dependencies
 uv sync
-
-# Optional: precision beat-matching (v3.0+). Installs madmom for downbeat
-# detection at --build-catalog time. Skip if you're fine with v1 beatgrids;
-# the mixer auto-synthesises downbeats from BPM in that case.
-uv sync --extra beatgrid
-
-# Copy and fill in your API keys
+npm --prefix web/frontend ci
 cp .env.example .env
 ```
 
-After installing the `beatgrid` extra, regenerate your catalog beatgrids so
-the mixer phase-locks transitions on real downbeats:
+Set at least one provider in `.env`. For a local first run, Ollama is enough:
 
 ```bash
-python main.py --regenerate-beatgrid           # upgrade legacy v1 entries
-python main.py --regenerate-beatgrid --force   # re-analyse everything
+AGENT_PROVIDER=ollama
+AGENT_MODEL=gemma4:4b
+OLLAMA_BASE_URL=http://localhost:11434/v1
 ```
 
-**`.env` keys:**
+### Start the two services
 
-| Key | Required | Purpose |
-|-----|----------|---------|
-| `ANTHROPIC_API_KEY` | One of these | Claude (recommended, default: `claude-opus-4-6`) |
-| `AZURE_OPENAI_API_KEY` | One of these | Azure OpenAI — agent fallback and DALL-E 3 artwork |
-| `AZURE_OPENAI_ENDPOINT` | With Azure | e.g. `https://<resource>.openai.azure.com/` |
-| `AZURE_OPENAI_DEPLOYMENT` | With Azure | Deployment name of the chat model (GPT-4o etc.) |
-| `AZURE_OPENAI_IMAGE_DEPLOYMENT` | For artwork | Image deployment (dall-e-3, gpt-image-1/2). Optional — artwork is skipped if unset |
-| `AZURE_OPENAI_IMAGE_ENDPOINT` | Optional | Image resource endpoint if different from chat; falls back to `AZURE_OPENAI_ENDPOINT` |
-| `AZURE_OPENAI_IMAGE_API_KEY` | Optional | Image resource key if different from chat; falls back to `AZURE_OPENAI_API_KEY` |
-| `AZURE_OPENAI_API_VERSION` | Optional | Chat API version (default `2024-10-21`) |
-| `AZURE_OPENAI_IMAGE_API_VERSION` | Optional | Image API version (default `2024-02-01`) |
-| `AGENT_PROVIDER=litellm` | One of these | Use a LiteLLM proxy (default model: `qwen3.6-27b`) |
-| `LITELLM_BASE_URL` | With LiteLLM | OpenAI-compatible endpoint, e.g. `https://litellm.cloudpunk.org/v1` |
-| `LITELLM_API_KEY` | With LiteLLM | LiteLLM virtual/master key |
-| `AGENT_PROVIDER=ollama` | One of these | Use a local Ollama model (default: `gemma4:4b`) |
-| `OLLAMA_BASE_URL` | Optional | Override the local OpenAI-compatible endpoint (default: `http://localhost:11434/v1`). Also the knob for LM Studio — point it at the server's IP, not `localhost`, when the backend runs in Docker or the server sits on another host |
-| `AGENT_MODEL` | Optional | Override the model for any provider |
+In one terminal:
 
----
-
-## Adding Your Tracks
-
-Put WAV files into genre subfolders under `tracks/`:
-
+```bash
+uv run uvicorn backend.app:app --reload --port 4020 --app-dir web
 ```
+
+In another:
+
+```bash
+npm --prefix web/frontend run dev
+```
+
+Open [http://localhost:4010](http://localhost:4010), sign in, and start a session from **Create**. The backend API is on port `4020`; the frontend is on `4010`.
+
+For the Docker development stack, see [the deployment notes](CLAUDE.md) and `docker compose up --build`.
+
+## Use the conversational agent
+
+The terminal agent is useful when you want to work without the web client or inspect the underlying flow:
+
+```bash
+uv run python agent/run.py
+```
+
+Example brief:
+
+```text
+90 minutes of deep house, warm at the start, more melodic in the middle,
+then a clean late-night landing
+```
+
+Apollo will validate the request, plan a playlist from the catalog, ask for your review, run the critic, and wait for your decision before building.
+
+You can also use the direct pipeline for a deterministic run:
+
+```bash
+python main.py --name "midnight-techno" --genre "techno" --duration 60
+python main.py --name "midnight-techno" --genre "techno" --video-only
+```
+
+## Add music to the catalog
+
+Place audio files in a genre folder and let Apollo analyse them:
+
+```text
 tracks/
   techno/
     Acid Rain.wav
-    Zero Day.wav
   deep house/
     Solar Drift.wav
   lofi - ambient/
     Kernel Space.wav
-  cyberpunk/
-    Chrome Horizon.wav
 ```
-
-Then build the catalog (detects BPM + Camelot key for each file):
 
 ```bash
 python main.py --build-catalog
 ```
 
-Or let **Hermes** do it conversationally:
+Or start the conversational agent and say `I added new tracks`. Hermes will sync the catalog and report what still needs preparation.
+
+The catalog currently includes `techno`, `deep house`, `lofi - ambient`, `cyberpunk`, and other installed genres. New genre defaults live in [`agent/genres.py`](agent/genres.py); see [the roadmap](ROADMAP.md) before introducing a new surface.
+
+## Configuration at a glance
+
+Copy `.env.example` to `.env` and choose one model path:
+
+| Provider | Variables |
+| --- | --- |
+| Anthropic | `ANTHROPIC_API_KEY` |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` |
+| LiteLLM | `AGENT_PROVIDER=litellm`, `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `AGENT_MODEL` |
+| Ollama / LM Studio | `AGENT_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `AGENT_MODEL` |
+
+ACE-Step generation is optional. Set `ACESTEP_BASE_URL` to make the Generations surface available. Apollo will keep the surface visible and report that generation is unavailable when the service is off.
+
+For HTTPS, Keycloak, YouTube Live Chat, GPU admission, and the complete environment reference, use [`.env.example`](.env.example) and the focused documents in [`docs/`](docs/).
+
+## Contributing
+
+Apollo is a working product and an open-ended music experiment. Contributions are welcome when they make the experience clearer, more musical, more reliable, or easier to extend.
+
+Start with [CONTRIBUTING.md](CONTRIBUTING.md). It covers the local setup, the checks expected for Python and web changes, how to work on the Algorave lane, and what makes a useful pull request.
+
+The shortest useful loop is:
 
 ```bash
-uv run python agent/run.py
-# → "I added new tracks"
+uv run --group youtube pytest tests/
+npm --prefix web/frontend run test
+npm --prefix web/frontend run build
 ```
 
----
+If you change only one area, run that area's checks and explain what you ran in the pull request. UI changes should include a screenshot or a short description of the affected flow when it helps a reviewer.
 
-## Usage
+## Documentation map
 
-### Conversational agent (recommended)
+- [Contributing](CONTRIBUTING.md) — setup, checks, pull requests, and code boundaries.
+- [Roadmap](ROADMAP.md) — shipped work and the direction of the product.
+- [Environment reference](.env.example) — provider, deployment, identity, and live-service variables.
+- [ACE-Step generation plan](docs/acestep-wizard-plan.md) — generation flow and its service boundary.
+- [Algorave plan](docs/algorave-apollo-plan.md) — live-coding scope and decisions.
+- [Track preparation](docs/track-preparation.md) — catalog preparation lifecycle.
+- [Developer notes](CLAUDE.md) — repository conventions and operational constraints.
 
-```bash
-# Default (Claude / GPT-4o, whichever key is in .env)
-uv run python agent/run.py
+The detailed diagrams and design explorations live under [`docs/design/`](docs/design/). They support implementation; the README stays focused on what Apollo is and how to use it.
 
-# Local model via Ollama (no API key required)
-AGENT_PROVIDER=ollama uv run python agent/run.py
+## Project status
 
-# Shared LiteLLM proxy (model name as registered in the proxy)
-AGENT_PROVIDER=litellm AGENT_MODEL=qwen3.6-27b uv run python agent/run.py
-
-# Override model for any provider
-AGENT_MODEL=claude-haiku-4-5-20251001 uv run python agent/run.py
-```
-
-Example session:
-```
-What would you like to do?
-
-You: 60min techno set, dark industrial build to a hard peak
-
-── Janus (Genre Guard) ──
-[confirms genre: techno, 60min, mood: dark industrial build]
-
-── Muse (Planner) ──
-[surveys catalog, proposes 12-track playlist]
-[evaluates energy arc: plateau detected at pos 6-8, swaps pos 7 to fix]
-Energy arc: 3-track warmup → hard build → peak at pos 9 → wind-down
-
-── Checkpoint 1 ──
-You: move track 4 to position 7
-[shows updated playlist]
-You: proceed
-
-── Momus (Critic) ──
-PROBLEMS:
-- [pos 2→3] key clash 5A → 11A — fix: swap pos 3 for zero-day
-- [pos 8→9] ⚠ Stretch 1.8× — bridge track required
-VERDICT: NEEDS_FIXES
-
-── Checkpoint 2 ──
-You: swap pos 3 like the critic said
-You: ok
-
-── Editor ──
-You: fix the stretch at 8→9
-[suggest_bridge_track(8, 9) → 3 candidates at 142 BPM]
-[insert_bridge_track(after_position=8, track_id="techno--acid-rain")]
-You: build midnight-industrial
-
-── Themis (Validator) ──
-AUDIO QUALITY REPORT — midnight-industrial
-Status: PASS — no issues detected ✓
-
-Rate 1-5 (Enter to skip): 5
-Any notes?: peak section was perfect
-```
-
-### Direct CLI (no agent)
-
-```bash
-# Generate a session directly
-python main.py --name "midnight-techno" --genre "techno" --duration 60
-
-# Re-render video from existing mix audio
-python main.py --name "midnight-techno" --genre "techno" --video-only
-
-# Fix missing BPM/key fields in catalog
-python main.py --fix-incomplete
-```
-
----
-
-## Supported Genres
-
-| Folder name | Visual theme |
-|-------------|-------------|
-| `techno` | Dark red, industrial |
-| `deep house` | Neon violet, deep |
-| `lofi - ambient` | Warm cream, anime-style artwork |
-| `cyberpunk` | Neon green, dystopic |
-
-Add new genres by creating a subfolder under `tracks/` and running `--build-catalog`.
-
----
-
-## Output
-
-Every session writes to `output/<session-name>/`:
-
-```
-output/midnight-techno/
-  mix_output.wav      # lossless mix
-  mix_video.mp4       # 1920×1080, 24fps, spectral waveform
-  short.mp4           # 1080×1920, 20s YouTube Short
-  session.json        # playlist for reproducibility
-  transitions.json    # crossfade timestamps
-  youtube.md          # title, description, tracklist, tags
-```
-
----
-
-## Live Mode
-
-Live Mode skips the pre-rendered pipeline entirely. Apollo plays tracks in real time and makes autonomous crossfade decisions as the music unfolds.
-
-### How to start
-
-Say any of these at the Editor prompt (or as your opening request):
-
-```
-go live
-play live
-spin it live late-night-study
-```
-
-### What happens
-
-```
-── Apollo LiveDJ ──
-Commands: next | stay [N] | skip | quit | or anything natural language
-
-[LiveDJ] On deck. Let's go.
-
-  TRACK_STARTED: 'Quiet Notes bis' (76 BPM, 10B)
-  ...
-  APPROACHING_CF in 18s: 'Quiet Notes bis' → 'Soft Focus Loop' (76→76 BPM, 10B→11A)
-
-[LiveDJ] Clean 1-step key move, same BPM — letting it ride.
-
-  CROSSFADE_TRIGGERED: 'Quiet Notes bis' → 'Soft Focus Loop'
-
-You: more energetic
-[LiveDJ] Swapped track 4 → 'No more socials' (82 BPM, 11B).
-
-You: next
-[LiveDJ] Crossfading now.
-```
-
-### Apollo's decision rules
-
-| Transition quality | Action |
-|--------------------|--------|
-| Camelot ≤1 step, BPM diff ≤8 | Let it ride — no intervention |
-| Camelot 2 steps **or** BPM diff 8–20 | `extend_track(20)` — buys time |
-| Camelot >2 steps **or** BPM diff >20 | `crossfade_now()` or `queue_swap()` a better track |
-
-### Live commands
-
-| What you type | What Apollo does |
-|---------------|-----------------|
-| `next` / `skip` | Crossfades immediately |
-| `stay` / `longer` | Extends current track 30s |
-| `stay 60` | Extends by a specific number of seconds |
-| `more energetic` | Swaps next track for a higher-BPM option |
-| `wind down` / `chill` | Swaps next track for lower BPM / softer key |
-| `quit` / `q` | Ends the session |
-
-### Cycle diagram
-
-```mermaid
-sequenceDiagram
-    participant U  as 👤 User
-    participant DJ as Apollo LiveDJ<br/>(event loop · 100ms tick)
-    participant LM as LLM
-    participant EQ as Event Queue
-    participant EN as LiveEngine<br/>(sounddevice callback)
-    participant PS as Pre-stretch Thread<br/>(pyrubberband)
-
-    Note over EN: play() — loads track 1, starts OutputStream
-    EN->>EQ: TRACK_STARTED
-    EN->>PS: start_prestretch(track 1 → track 2)
-    PS-->>EN: _next_audio ready (BPM-stretched)
-
-    loop Every 100 ms
-        DJ->>EQ: drain events
-        DJ->>U: drain stdin (1 line max)
-    end
-
-    Note over EN,EQ: 30s before crossfade point…
-    EN->>EQ: APPROACHING_CF (track 1 → track 2, Δbpm, Δkey, secs)
-    DJ->>LM: batch turn (events + state)
-
-    alt Good transition (≤1 Camelot step, ≤8 BPM diff)
-        LM-->>DJ: (silent — no tool call)
-    else Mediocre (2 steps OR 8–20 BPM diff)
-        LM->>EN: extend_track(20)
-        EN-->>LM: "Crossfade delayed 20s."
-    else Bad (>2 steps OR >20 BPM diff)
-        LM->>EN: crossfade_now()
-        EN-->>LM: "Crossfade triggered."
-    end
-
-    U->>DJ: "more energetic"
-    DJ->>LM: batch turn (user input + state)
-    LM->>EN: queue_swap(position=3, track_id="…")
-    EN-->>LM: "Queued 'No more socials' at position 3."
-    LM-->>DJ: "Swapped track 3 → No more socials."
-    DJ->>U: [LiveDJ] Swapped track 3 → No more socials.
-
-    Note over EN: crossfade point reached — watchdog fires
-    EN->>EQ: CROSSFADE_TRIGGERED
-    Note over EN: 12s linear blend in audio callback
-    EN->>EQ: CROSSFADE_FINISHED
-    EN->>EQ: TRACK_ENDED (track 1)
-    EN->>EQ: TRACK_STARTED (track 2)
-    EN->>PS: start_prestretch(track 2 → track 3)
-```
-
-### How the threads fit together
-
-```mermaid
-%%{init: {'theme': 'base', 'themeVariables': {
-  'background': '#0d0d1a',
-  'primaryColor': '#1a1a2e',
-  'primaryTextColor': '#e0e0ff',
-  'primaryBorderColor': '#4a4a8a',
-  'lineColor': '#6060aa',
-  'secondaryColor': '#12122a',
-  'tertiaryColor': '#0d0d1a',
-  'edgeLabelBackground': '#1a1a2e',
-  'clusterBkg': '#12122a',
-  'clusterBorder': '#3a3a6a',
-  'titleColor': '#c0c0ff',
-  'nodeTextColor': '#e0e0ff',
-  'fontFamily': 'monospace'
-}}}%%
-
-flowchart TB
-    subgraph MAIN["🧵 Main thread — LiveDJ event loop (100ms tick)"]
-        direction LR
-        DRAIN["drain Event Queue\ndrain stdin (1 line)"]:::pipeline
-        FORMAT["format turn\ncall LLM ≤5 turns\nexec tool calls"]:::agent
-        DRAIN --> FORMAT
-    end
-
-    subgraph ENGINE["⚙️ LiveEngine"]
-        direction TB
-        WATCHDOG["🔍 Watchdog thread\n50ms tick\n─────────────────\nAPPROACHING_CF\nCROSSFADE_TRIGGERED\nCROSSFADE_FINISHED\nTRACK_ENDED · SESSION_ENDED"]:::agent
-        CALLBACK["🔊 sounddevice callback\nlow-latency audio thread\n2048-sample blocks\n─────────────────\nstate=playing → copy samples\nstate=crossfading →\n  out*(1−t) + in*t\nblend done → swap buffers"]:::pipeline
-        API["🔧 Public API\nthread-safe (_lock)\n─────────────────\ncrossfade_now()\nextend_track(N)\nskip_track()\nqueue_swap(pos, id)\nset_crossfade_point(sec)"]:::memory
-        WATCHDOG -->|"_cf_just_finished flag"| CALLBACK
-    end
-
-    PRESTRETCH["🎛️ Pre-stretch daemon\n─────────────────\nload next WAV\npyrubberband time-stretch\nto match current BPM\n_STRETCH_MAX 1.5×\nsignal _prestretch_ready"]:::memory
-
-    USER(["👤 User\nnext · stay · skip\nmore energetic\nwind down · quit"]):::user
-    EQ[("📨 Event Queue\nthreading.Queue")]:::memory
-
-    WATCHDOG -->|"emit events"| EQ
-    EQ -->|"drained each tick"| DRAIN
-    USER -->|"stdin"| DRAIN
-    FORMAT -->|"tool calls"| API
-    API -->|"state mutations"| CALLBACK
-    CALLBACK -->|"_next_audio\npre-stretched WAV"| WATCHDOG
-    ENGINE -->|"triggers prestretch\non each track start"| PRESTRETCH
-    PRESTRETCH -->|"_next_audio ready"| CALLBACK
-
-    classDef agent    fill:#1a1a3a,stroke:#5858b0,color:#c8c8ff
-    classDef pipeline fill:#0a1f1a,stroke:#20a060,color:#60ffb0
-    classDef memory   fill:#1a0a2a,stroke:#8040c0,color:#c080ff
-    classDef user     fill:#0a0a1a,stroke:#4040a0,color:#8080d0
-```
-
-**Key design decisions:**
-
-- **Pre-stretch runs ahead of time** — by the time the crossfade fires, the next track's audio is already in memory at the right BPM. Crossfades are instant with no stutter.
-- **Watchdog at 50ms, event loop at 100ms** — the engine detects state changes twice as fast as the LLM loop polls, so events are never missed.
-- **LLM budget capped at 5 turns per batch** — prevents the agent from spending unbounded tokens on a single event while music is playing.
-- **`_extend_samples` shifts the crossfade point** — `extend_track(N)` adds N×44100 samples to the threshold, cleanly delaying the auto-crossfade without touching the audio buffer.
-- **Hot cue `OUT` marks set the crossfade point** — if a track has an `out` hot cue, the engine crossfades from that exact position instead of `duration − 17s`.
-
----
-
-## Agent Memory
-
-After each build, rate your session 1-5. Ratings accumulate in `agent/memory.json`. On the next session of the same genre:
-
-- **Muse (Planner)** avoids tracks that have been swapped out 2+ times
-- **Momus (Critic)** flags transition patterns that have been problems before
-- High-rated mood/arc combinations are surfaced as references
-
----
-
-## Project Structure
-
-```
-main.py              # Core pipeline (~2600 lines): catalog, mixing, video
-agent/
-  run.py             # Apollo orchestrator + all agent loops
-  tools.py           # Tool functions for all agents
-  memory.json        # Persistent session history (auto-created)
-tracks/
-  tracks.json        # Unified catalog (auto-generated)
-  <genre>/           # WAV / MP3 files per genre
-output/              # Generated mixes and videos (gitignored)
-artwork/             # DALL-E 3 backgrounds (cached, gitignored)
-fonts/
-  PressStart2P-Regular.ttf
-
-# v2.6.0 Ember web UI
-web/
-  backend/           # FastAPI: brief_parser, notes, arc, render, session_store
-    app.py           # routes + WS dispatch
-    arc.py           # energy-arc derivation from playlist
-    brief_parser.py  # one-shot brief → ParsedBrief (configured provider)
-    notes.py         # critic problems → CriticNote[] with stable ids
-    render.py        # async MP4 build + SSE progress
-  frontend/
-    app/             # Next 16 App Router: brief, curate, editor, render, live
-    components/ember/  # Shell · primitives · TrackPicker · feedback · motion
-    lib/             # api, auth, ws, live engine, auto-session, auth-bootstrap
-    e2e/             # Playwright suite (36 specs, full flow coverage)
-tests/web/           # Backend integration tests (brief, notes, editor SSE)
-web/tests/           # Backend unit tests (arc, notes, session_store v260)
-```
-
----
+Apollo is actively evolving. The web product, live engine, Algorave surface, and generation lane are usable but still changing. Treat provider integrations and API shapes as moving parts, and open an issue before building a large integration around an undocumented endpoint.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+Apollo is released under the [MIT License](LICENSE).
