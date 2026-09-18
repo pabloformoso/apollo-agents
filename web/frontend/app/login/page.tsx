@@ -110,7 +110,7 @@ export default function LoginPage() {
           <div className="w-full max-w-[520px]">
             <Crumb tone="ember">enter apollo</Crumb>
             <h1 className="mt-5 max-w-[510px] font-display text-[clamp(58px,7vw,106px)] italic font-normal leading-[0.86] tracking-[-0.04em] text-cream">
-              Music has a<br />new system<span className="text-ember">.</span>
+              Sign in to the<br />music system<span className="text-ember">.</span>
             </h1>
             <p className="mt-7 max-w-[430px] text-[15px] leading-7 text-mute">
               Sign in to a place where AI collaborators assemble the music,
