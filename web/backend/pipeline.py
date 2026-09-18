@@ -14,6 +14,8 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from . import session_model
+
 # Make the project root importable
 _PROJECT_DIR = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(_PROJECT_DIR))
@@ -507,7 +509,7 @@ async def _run_anthropic_streaming(
         full_text = ""
 
         async with client.messages.stream(
-            model=_MODEL,
+            model=session_model.persisted_model() or _MODEL,
             system=system,
             tools=schemas or [],
             messages=messages,
@@ -605,7 +607,7 @@ async def _run_openai_streaming(
         tool_calls_acc: dict[int, dict] = {}
 
         stream = await client.chat.completions.create(
-            model=_MODEL,
+            model=session_model.persisted_model() or _MODEL,
             messages=sys_messages,
             tools=schemas or [],
             stream=True,

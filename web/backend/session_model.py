@@ -1,0 +1,238 @@
+"""Manage the LM Studio model used for brief parsing and session planning.
+
+The session model is served by the OpenAI-compatible endpoint configured in
+``OLLAMA_BASE_URL``.  LM Studio's native REST API is used for inventory and
+model residency so operators do not have to edit ``.env`` or restart Apollo
+just to switch the planner model.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
+
+from . import ace_control, auth, permissions
+
+log = logging.getLogger(__name__)
+router = APIRouter(prefix="/api/session-model")
+
+_DEFAULT_MODEL = "gemma4:4b"
+_DEFAULT_CONTEXT = 8192
+
+
+class Settings(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    model_key: str = Field(min_length=1, max_length=256)
+    context_length: int = Field(default=_DEFAULT_CONTEXT, ge=512, le=131072)
+    flash_attention: bool = True
+
+
+def settings_path() -> Path:
+    configured = os.getenv("APOLLO_SESSION_MODEL_SETTINGS_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return Path(__file__).resolve().parents[2] / ".tmp" / "session-model-settings.json"
+
+
+def default_model() -> str:
+    return os.getenv("SESSION_MODEL", "").strip() or os.getenv("BRIEF_MODEL", "").strip() or os.getenv("AGENT_MODEL", _DEFAULT_MODEL).strip()
+
+
+def read_settings() -> Settings:
+    path = settings_path()
+    if not path.exists():
+        return Settings(model_key=default_model())
+    try:
+        return Settings.model_validate(json.loads(path.read_text()))
+    except (OSError, ValueError, TypeError) as exc:
+        raise HTTPException(503, "Session model settings are unreadable; check the server configuration.") from exc
+
+
+def persisted_model() -> str | None:
+    """Return the operator-selected model, without breaking inference startup."""
+    try:
+        path = settings_path()
+        if not path.exists():
+            return None
+        return read_settings().model_key
+    except HTTPException:
+        log.warning("Session model settings could not be read", exc_info=True)
+        return None
+
+
+def save_settings(settings: Settings) -> None:
+    path = settings_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd, name = tempfile.mkstemp(dir=path.parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                stream.write(settings.model_dump_json(indent=2) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(name, 0o600)
+            os.replace(name, path)
+        finally:
+            if os.path.exists(name):
+                os.unlink(name)
+    except OSError as exc:
+        raise HTTPException(503, "Session model settings could not be saved.") from exc
+
+
+def provider() -> str:
+    return os.getenv("AGENT_PROVIDER", "").strip().lower() or ("ollama" if os.getenv("OLLAMA_BASE_URL") else "")
+
+
+def endpoint() -> str:
+    """Turn the OpenAI-compatible ``.../v1`` URL into LM Studio's API root."""
+    raw = os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/")
+    if not raw:
+        return ""
+    parts = urlsplit(raw)
+    path = parts.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+def _headers() -> dict[str, str]:
+    token = os.getenv("LM_STUDIO_API_TOKEN", "").strip() or os.getenv("OLLAMA_API_KEY", "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _model_record(raw: dict[str, Any]) -> dict[str, Any]:
+    loaded = raw.get("loaded_instances")
+    if not isinstance(loaded, list):
+        loaded = []
+    return {
+        "key": str(raw.get("key") or raw.get("id") or raw.get("model_key") or ""),
+        "name": str(raw.get("display_name") or raw.get("name") or raw.get("key") or raw.get("id") or ""),
+        "type": raw.get("type", "llm"),
+        "state": "loaded" if loaded else str(raw.get("state") or "not-loaded"),
+        "loaded_instances": loaded,
+        "max_context_length": raw.get("max_context_length"),
+        "architecture": raw.get("architecture") or raw.get("arch"),
+        "params_string": raw.get("params_string"),
+    }
+
+
+async def _request(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
+    base = endpoint()
+    if not base or provider() not in {"ollama", "lmstudio"}:
+        raise HTTPException(503, "Session model management requires an LM Studio OpenAI-compatible endpoint.")
+    try:
+        async with httpx.AsyncClient(timeout=35, trust_env=False) as client:
+            response = await client.request(method, base + path, json=payload, headers=_headers())
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "LM Studio is unavailable. Check the model server and refresh status.") from exc
+    try:
+        body = response.json()
+    except ValueError:
+        body = {"error": response.text[:500]}
+    if response.status_code >= 400:
+        detail = body.get("error") if isinstance(body, dict) else None
+        if isinstance(detail, dict):
+            detail = detail.get("message") or detail.get("type")
+        raise HTTPException(response.status_code, str(detail or "LM Studio rejected the request."))
+    return body
+
+
+async def list_models() -> list[dict[str, Any]]:
+    try:
+        body = await _request("/api/v1/models")
+        values = body.get("models", []) if isinstance(body, dict) else []
+    except HTTPException as exc:
+        if exc.status_code not in {404, 405}:
+            raise
+        body = await _request("/api/v0/models")
+        values = body.get("data", []) if isinstance(body, dict) else []
+    return [_model_record(item) for item in values if isinstance(item, dict) and _model_record(item)["key"]]
+
+
+async def status_snapshot(user: dict) -> dict[str, Any]:
+    configured = bool(endpoint()) and provider() in {"ollama", "lmstudio"}
+    settings = read_settings()
+    if not configured:
+        return {
+            "configured": False, "provider": provider() or "unknown", "endpoint": None,
+            "settings": settings.model_dump(), "models": [], "loaded_model": None, "selected_loaded": False,
+            "can_manage": permissions.has_capability(user, permissions.MANAGE_GENERATOR),
+            "error": "Set AGENT_PROVIDER=ollama and OLLAMA_BASE_URL to manage an LM Studio model.",
+        }
+    try:
+        models = await list_models()
+        selected = next((m for m in models if m["key"] == settings.model_key), None)
+        loaded = [m for m in models if m["loaded_instances"]]
+        return {
+            "configured": True, "provider": provider(), "endpoint": endpoint(),
+            "settings": settings.model_dump(), "models": models,
+            "selected": selected, "loaded_model": loaded[0]["key"] if loaded else None,
+            "selected_loaded": bool(selected and selected["loaded_instances"]),
+            "can_manage": permissions.has_capability(user, permissions.MANAGE_GENERATOR), "error": None,
+        }
+    except HTTPException as exc:
+        return {
+            "configured": True, "provider": provider(), "endpoint": endpoint(),
+            "settings": settings.model_dump(), "models": [], "loaded_model": None, "selected_loaded": False,
+            "can_manage": permissions.has_capability(user, permissions.MANAGE_GENERATOR),
+            "error": str(exc.detail),
+        }
+
+
+def admin(user: dict) -> None:
+    if not permissions.has_capability(user, permissions.MANAGE_GENERATOR):
+        raise HTTPException(403, "Only an Apollo administrator can manage session models.")
+
+
+@router.get("")
+async def status(user: dict = Depends(auth.get_current_user)):
+    return await status_snapshot(user)
+
+
+@router.put("/settings")
+async def configure(settings: Settings, user: dict = Depends(auth.get_current_user)):
+    admin(user)
+    models = await list_models()
+    allowed = {m["key"] for m in models if m.get("type") in {"llm", "vlm"}}
+    if settings.model_key not in allowed:
+        raise HTTPException(422, "That model is not available on the configured LM Studio server.")
+    save_settings(settings)
+    return settings.model_dump()
+
+
+@router.post("/actions/{action}")
+async def action(action: str, user: dict = Depends(auth.get_current_user)):
+    admin(user)
+    if action not in {"load", "unload"}:
+        raise HTTPException(404, "Unknown session model action.")
+    async with ace_control.gate():
+        ace_control.reject_live()
+        settings = read_settings()
+        if action == "load":
+            models = await list_models()
+            selected = next((m for m in models if m["key"] == settings.model_key), None)
+            if selected is None:
+                raise HTTPException(422, "That model is not available on the configured LM Studio server.")
+            max_context = selected.get("max_context_length")
+            if isinstance(max_context, int):
+                settings.context_length = min(settings.context_length, max_context)
+            return await _request("/api/v1/models/load", "POST", {
+                "model": settings.model_key,
+                "context_length": settings.context_length,
+                "flash_attention": settings.flash_attention,
+                "echo_load_config": True,
+            })
+        models = await list_models()
+        instances = [i for m in models for i in m["loaded_instances"] if isinstance(i, dict)]
+        if not instances:
+            return {"status": "unloaded", "instance_id": None}
+        instance_id = instances[0].get("instance_id") or instances[0].get("id") or instances[0].get("key")
+        return await _request("/api/v1/models/unload", "POST", {"instance_id": instance_id})
