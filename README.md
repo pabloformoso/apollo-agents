@@ -196,6 +196,8 @@ Copy `.env.example` to `.env` and choose one model path:
 | LiteLLM | `AGENT_PROVIDER=litellm`, `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `AGENT_MODEL` |
 | Ollama / LM Studio | `AGENT_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `AGENT_MODEL` |
 
+For LM Studio, administrators can choose and load the session model from **Settings → Session intelligence**. It controls brief extraction and session planning independently from Mind and ACE. `SESSION_MODEL` sets the initial selection; a saved choice is persisted in `.tmp/session-model-settings.json` (override with `APOLLO_SESSION_MODEL_SETTINGS_PATH`).
+
 ACE-Step generation is optional. Set `ACESTEP_BASE_URL` to make the Generations surface available. Apollo will keep the surface visible and report that generation is unavailable when the service is off.
 
 For HTTPS, Keycloak, YouTube Live Chat, GPU admission, and the complete environment reference, use [`.env.example`](.env.example) and the focused documents in [`docs/`](docs/).

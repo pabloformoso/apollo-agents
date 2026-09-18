@@ -35,6 +35,7 @@ import logging
 import os
 from typing import TypedDict
 
+from . import session_model
 
 log = logging.getLogger(__name__)
 
@@ -305,7 +306,7 @@ def _build_openai_client(provider: str):
     # ``bench_extend_set`` vs bonsai-27b's 90 %), which is exactly why
     # this is an override and not a change of ``AGENT_MODEL``.
     return client, (
-        os.getenv("BRIEF_MODEL") or os.getenv("AGENT_MODEL", default_model)
+        os.getenv("BRIEF_MODEL") or session_model.persisted_model() or os.getenv("AGENT_MODEL", default_model)
     )
 
 
