@@ -32,8 +32,8 @@ const jetbrainsMono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Apollo",
-  description: "AI DJ — assemble, critique, perform.",
+  title: "Apollo · AI Music Entertainment System",
+  description: "A music entertainment system powered by AI — assemble, critique, perform.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

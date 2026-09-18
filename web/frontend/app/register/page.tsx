@@ -99,7 +99,7 @@ export default function RegisterPage() {
       </section>
 
       <Stripe alpha={0.18} className="hidden md:flex border-l border-line p-10 flex-col justify-between overflow-hidden">
-        <Crumb tone="ember">apollo · ai dj</Crumb>
+        <Crumb tone="ember">apollo · ai music entertainment system</Crumb>
         <div>
           <div className="font-display italic text-[clamp(40px,5vw,64px)] leading-[0.92] text-cream tracking-[-0.035em]">
             tonight,<br />

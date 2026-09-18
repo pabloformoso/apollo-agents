@@ -20,32 +20,28 @@ import { usePathname } from "next/navigation";
 import { ApolloMark, Crumb } from "./primitives";
 
 export const ROUTES = [
-  { id: "dashboard", label: "Library", href: "/" },
-  // The generations feed sits beside the Library because that is what it
-  // is: the second shelf, holding what Apollo wrote rather than what it
-  // was given (G6).
+  { id: "library", label: "Library", href: "/dashboard" },
   { id: "generations", label: "Generations", href: "/generations" },
-  { id: "brief", label: "Brief", href: "/brief" },
-  { id: "curate", label: "Curate", href: "/curate" },
-  { id: "editor", label: "Editor", href: "/editor" },
-  { id: "render", label: "Render", href: "/render" },
-  { id: "live", label: "Live", href: "/live" },
+  { id: "catalog", label: "Catalog", href: "/catalog" },
+  { id: "create", label: "Create", href: "/brief" },
+  { id: "perform", label: "Perform", href: "/live" },
+  { id: "algorave", label: "Algorave", href: "/algorave" },
   { id: "settings", label: "Settings", href: "/settings" },
 ] as const;
 
 type RouteId = (typeof ROUTES)[number]["id"];
 
-/** Map a Next pathname to one of the canonical route ids. */
+/** Map a Next pathname to a product surface, not an implementation step. */
 function routeIdForPath(pathname: string | null): RouteId {
-  if (!pathname || pathname === "/") return "dashboard";
+  if (!pathname || pathname === "/" || pathname.startsWith("/dashboard")) return "library";
   if (pathname.startsWith("/generations")) return "generations";
-  if (pathname.startsWith("/brief")) return "brief";
-  if (pathname.startsWith("/curate")) return "curate";
-  if (pathname.startsWith("/editor")) return "editor";
-  if (pathname.startsWith("/render")) return "render";
-  if (pathname.startsWith("/live")) return "live";
+  if (pathname.startsWith("/catalog")) return "catalog";
+  // Brief, curate, editor and render are stages of one Create journey.
+  if (["/brief", "/curate", "/editor", "/render"].some((path) => pathname.startsWith(path))) return "create";
+  if (pathname.startsWith("/algorave")) return "algorave";
+  if (pathname.startsWith("/live")) return "perform";
   if (pathname.startsWith("/settings")) return "settings";
-  return "dashboard";
+  return "library";
 }
 
 export type ShellProps = {
@@ -73,7 +69,7 @@ export function Shell({
 }: ShellProps) {
   const pathname = usePathname();
   const route = routeIdForPath(pathname);
-  const hideNav = hideNavProp ?? route === "live";
+  const hideNav = hideNavProp ?? route === "perform";
 
   return (
     <div
@@ -85,16 +81,20 @@ export function Shell({
       {!hideNav && (
         <header className="sticky top-0 z-10 flex items-center justify-between border-b border-line bg-ink px-9 py-[18px]">
           <Link
-            href="/"
-            className="flex items-baseline gap-[18px] bg-transparent border-0 p-0 cursor-pointer"
+            href="/dashboard"
+            aria-label="Apollo home"
+            className="flex min-w-0 items-center gap-3 bg-transparent border-0 p-0 cursor-pointer"
           >
             <ApolloMark size={28} />
-            {route !== "dashboard" && sessionLabel && (
+            <span className="hidden whitespace-nowrap font-mono text-[9px] uppercase tracking-[0.16em] text-faint xl:inline">
+              AI music entertainment system
+            </span>
+            {route !== "library" && sessionLabel && (
               <Crumb>{sessionLabel}</Crumb>
             )}
           </Link>
 
-          <nav className="flex min-w-0 overflow-x-auto gap-1 border border-line p-[3px]">
+          <nav aria-label="Apollo product" className="flex min-w-0 overflow-x-auto gap-1 border border-line p-[3px]">
             {ROUTES.map((r) => {
               const active = r.id === route;
               return (

@@ -102,14 +102,14 @@ export default function DashboardPage() {
       {/* Fill the viewport when possible; allow scrolling on short screens. */}
       <section className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-x-[60px] gap-y-10 items-end px-6 md:px-[60px] py-10">
         <div>
-          <Crumb>tonight · curated for you</Crumb>
+          <Crumb>apollo · ai music entertainment system</Crumb>
           <h1 className="font-display italic font-normal tracking-display-tight leading-[0.95] mt-4 mb-0 text-[clamp(56px,7vw,88px)]">
             What will you<br />make tonight
             <span className="text-ember">?</span>
           </h1>
           <p className="text-base text-mute mt-6 max-w-[380px] leading-[1.55]">
-            Tell Apollo what you want to hear and it will assemble, critique,
-            and either render it for you — or perform it live.
+            Tell Apollo what you want to hear. Its collaborators assemble, critique,
+            and either render the set for you — or perform it live.
           </p>
           <div className="flex flex-wrap gap-3 mt-8">
             <Btn onClick={handleCreate}>
