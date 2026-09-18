@@ -133,7 +133,7 @@ CATALOG_AUDIO_FORMAT = "wav"
 SERVER_OWNED_FIELDS = frozenset({
     "audio_duration", "audio_format", "batch_size", "bpm", "caption",
     "duration", "key_scale", "lyrics", "prompt", "thinking",
-    "vocal_language",
+    "use_format", "vocal_language",
 })
 
 #: ``query_result`` status → the wizard's vocabulary (spec §4).
@@ -349,6 +349,10 @@ class GenerationRequest(BaseModel):
     bpm: int | None = Field(None, ge=MIN_BPM, le=MAX_BPM)
     key_scale: str | None = Field(None, max_length=64)
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, le=MAX_BATCH_SIZE)
+    #: ACE-Step's formatter turns the short caption + lyrics into the
+    #: structured metadata the 1.5 LM expects. Keep it explicit so the UI
+    #: can expose the choice without smuggling it through ``experimental``.
+    use_format: bool = True
     experimental: dict[str, Any] | None = None
 
     @field_validator("prompt", "genre_folder")
@@ -373,9 +377,9 @@ class GenerationRequest(BaseModel):
         return self
 
 
-#: ACE's prompt ceiling. The composed prompt is trimmed to it rather
-#: than rejected: a long user prompt must never turn into a 422.
-_ACE_PROMPT_MAX = 4000
+#: ACE-Step 1.5's caption ceiling. The composed prompt is trimmed to it
+#: rather than rejected: a long user prompt must never turn into a 422.
+_ACE_PROMPT_MAX = 512
 
 
 def _compose_prompt(user_prompt: str, genre_key: str) -> str:
@@ -395,9 +399,9 @@ def _compose_prompt(user_prompt: str, genre_key: str) -> str:
     user = (user_prompt or "").strip()
     style = genre_style_prompt(genre_key)
     if not style:
-        return user
+        return user[:_ACE_PROMPT_MAX]
     if not user:
-        return style
+        return style[:_ACE_PROMPT_MAX]
     return f"{style}. {user}"[:_ACE_PROMPT_MAX]
 
 
@@ -418,6 +422,7 @@ def _release_payload(
         "batch_size": req.batch_size,
         "audio_format": CATALOG_AUDIO_FORMAT,
         "thinking": True,
+        "use_format": req.use_format,
     }
     if bpm is not None:
         payload["bpm"] = bpm
@@ -1133,6 +1138,39 @@ async def generator_engines(
         "llm": await _llm_engine_state(),
         "blocked_by_live": live_session_active(),
     }
+
+
+@router.get("/api/generator/genres")
+async def generator_genres(
+    current_user: dict = Depends(auth.get_current_user),
+):
+    """Return the same genre controls the release endpoint uses.
+
+    The folder remains the catalog destination, while this small contract
+    gives the Suno-style form the conditioning data that belongs beside it:
+    a BPM window, its safe default, and Apollo's style framing prompt. It is
+    derived from ``agent.genres`` so the UI cannot drift from release-time
+    validation when an installation adds or changes a genre.
+    """
+    from agent.genres import all_genres  # noqa: PLC0415
+
+    entries: list[dict[str, Any]] = []
+    for name, definition in sorted(all_genres().items()):
+        window = definition.get("bpm")
+        if isinstance(window, (tuple, list)) and len(window) == 2:
+            lo, hi = int(window[0]), int(window[1])
+            bpm_default = round((lo + hi) / 2)
+        else:
+            lo = hi = bpm_default = None
+        entries.append({
+            "id": name,
+            "label": name,
+            "bpm_min": lo,
+            "bpm_max": hi,
+            "bpm_default": bpm_default,
+            "style_prompt": str(definition.get("style_prompt") or ""),
+        })
+    return {"genres": entries}
 
 
 @router.get("/api/generator/health")

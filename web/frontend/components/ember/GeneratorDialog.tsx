@@ -45,8 +45,8 @@
  */
 import * as React from "react";
 import Link from "next/link";
-import { getCatalog } from "@/lib/api";
-import { useGeneratorTask } from "@/lib/generator";
+import { getCatalog, getGeneratorGenres } from "@/lib/api";
+import { useGeneratorTask, type GeneratorGenre } from "@/lib/generator";
 import { Btn, Crumb } from "./primitives";
 import { Dialog } from "./Dialog";
 import { Banner, Spinner } from "./feedback";
@@ -57,7 +57,11 @@ import { Field, FIELD_CLS, TakeRow, playableFor } from "./GeneratorTakes";
 import { EngineStatusPanel } from "./EngineStatus";
 
 const DURATION_MIN = 120;
-const DURATION_MAX = 300;
+const DURATION_MAX = 600;
+const BPM_MIN = 30;
+const BPM_MAX = 300;
+const BPM_DEFAULT = 120;
+const PROMPT_MAX = 512;
 const DURATION_DEFAULT = 180;
 const BATCH_MIN = 1;
 const BATCH_MAX = 8;
@@ -102,9 +106,11 @@ export function GeneratorDialog({
   const { state, etaCountdown, submit, reset } = useGeneratorTask();
 
   const [genres, setGenres] = React.useState<string[] | null>(null);
+  const [genreMeta, setGenreMeta] = React.useState<Record<string, GeneratorGenre>>({});
   const [prompt, setPrompt] = React.useState("");
   const [lyrics, setLyrics] = React.useState("");
   const [duration, setDuration] = React.useState(String(DURATION_DEFAULT));
+  const [bpm, setBpm] = React.useState(String(BPM_DEFAULT));
   const [language, setLanguage] = React.useState("en");
   const [genre, setGenre] = React.useState("");
   const [batch, setBatch] = React.useState(String(BATCH_DEFAULT));
@@ -113,6 +119,7 @@ export function GeneratorDialog({
   const [seed, setSeed] = React.useState("");
   const [keyScale, setKeyScale] = React.useState("");
   const [timeSig, setTimeSig] = React.useState("");
+  const [useFormat, setUseFormat] = React.useState(true);
   // Names published from THIS batch, in publish order — the first one is
   // what a second take is offered as a variant OF.
   const [publishedNames, setPublishedNames] = React.useState<string[]>([]);
@@ -122,26 +129,40 @@ export function GeneratorDialog({
   React.useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    getCatalog()
-      .then((cat) => {
+    Promise.allSettled([getCatalog(), getGeneratorGenres()]).then(
+      ([catalogResult, metadataResult]) => {
         if (cancelled) return;
-        const list = cat.genres ?? [];
+        const catalogGenres =
+          catalogResult.status === "fulfilled" ? catalogResult.value.genres ?? [] : [];
+        const metadata =
+          metadataResult.status === "fulfilled" ? metadataResult.value.genres ?? [] : [];
+        const byId = Object.fromEntries(
+          metadata.map((entry) => [entry.id.toLowerCase(), entry]),
+        );
+        setGenreMeta(byId);
+        const list = catalogGenres.length
+          ? catalogGenres
+          : metadata.map((entry) => entry.label);
         setGenres(list);
         const match = defaultGenre
           ? list.find(
               (g) => g.toLowerCase() === defaultGenre.trim().toLowerCase(),
             )
           : undefined;
-        setGenre((prev) => prev || match || list[0] || "");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setGenres([]);
-      });
+        const initialGenre = match || list[0] || "";
+        setGenre((prev) => prev || initialGenre);
+        setBpm(String(byId[initialGenre.toLowerCase()]?.bpm_default ?? BPM_DEFAULT));
+      },
+    );
     return () => {
       cancelled = true;
     };
   }, [open, defaultGenre]);
+
+  const selectedGenre = genreMeta[genre.trim().toLowerCase()] ?? null;
+  const selectedBpmMin = selectedGenre?.bpm_min ?? BPM_MIN;
+  const selectedBpmMax = selectedGenre?.bpm_max ?? BPM_MAX;
+  const selectedBpmDefault = selectedGenre?.bpm_default ?? BPM_DEFAULT;
 
   const busy = state.phase === "submitting";
   const showForm = state.phase === "idle" || busy;
@@ -163,10 +184,12 @@ export function GeneratorDialog({
         DURATION_MAX,
         DURATION_DEFAULT,
       ),
+      bpm: clampInt(bpm, selectedBpmMin, selectedBpmMax, selectedBpmDefault),
       vocal_language: language,
       genre_folder: genre,
       ...(keyScale.trim() ? { key_scale: keyScale.trim() } : {}),
       batch_size: clampInt(batch, BATCH_MIN, BATCH_MAX, BATCH_DEFAULT),
+      use_format: useFormat,
       ...(Object.keys(experimental).length ? { experimental } : {}),
     });
   };
@@ -253,6 +276,7 @@ export function GeneratorDialog({
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              maxLength={PROMPT_MAX}
               rows={3}
               autoFocus
               data-testid="generator-prompt"
@@ -260,6 +284,9 @@ export function GeneratorDialog({
               className={FIELD_CLS + " resize-y"}
               disabled={busy}
             />
+            <span className="text-[11px] text-mute leading-[1.45]">
+              Describe genre, mood, instruments and movement. ACE-Step captions are limited to {PROMPT_MAX} characters · {prompt.length}/{PROMPT_MAX}.
+            </span>
           </Field>
 
           <Field
@@ -292,6 +319,34 @@ export function GeneratorDialog({
               />
             </Field>
 
+            <Field
+              label={`target BPM · ${selectedBpmMin}–${selectedBpmMax}`}
+              hint={selectedGenre?.style_prompt || "ACE-Step will use this as a tempo target."}
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={selectedBpmMin}
+                  max={selectedBpmMax}
+                  value={clampInt(bpm, selectedBpmMin, selectedBpmMax, selectedBpmDefault)}
+                  onChange={(e) => setBpm(e.target.value)}
+                  data-testid="generator-bpm-slider"
+                  className="accent-[var(--ember)] flex-1"
+                  disabled={busy}
+                />
+                <input
+                  type="number"
+                  min={selectedBpmMin}
+                  max={selectedBpmMax}
+                  value={bpm}
+                  onChange={(e) => setBpm(e.target.value)}
+                  data-testid="generator-bpm"
+                  className={FIELD_CLS + " w-20"}
+                  disabled={busy}
+                />
+              </div>
+            </Field>
+
             <Field label="vocal language">
               <select
                 value={language}
@@ -314,13 +369,19 @@ export function GeneratorDialog({
                 genres !== null && genres.length === 0
                   ? "No genre folders resolved from the catalog — generation needs one to land in."
                   : genre
-                    ? `BPM is left to Apollo — the server fills the centre of ${genre}'s BPM window so the take lands in range.`
-                    : "The genre folder drives the BPM default the server fills in."
+                    ? selectedGenre?.bpm_min != null && selectedGenre?.bpm_max != null
+                      ? `Target ${bpm} BPM · safe range ${selectedGenre.bpm_min}–${selectedGenre.bpm_max}. The folder also frames the ACE prompt.`
+                      : `Target ${bpm} BPM · the folder frames the ACE prompt.`
+                    : "Choose a genre to load its BPM range and style framing."
               }
             >
               <select
                 value={genre}
-                onChange={(e) => setGenre(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setGenre(next);
+                  setBpm(String(genreMeta[next.toLowerCase()]?.bpm_default ?? BPM_DEFAULT));
+                }}
                 data-testid="generator-genre"
                 className={FIELD_CLS}
                 disabled={busy || genres === null || genres.length === 0}
@@ -370,6 +431,16 @@ export function GeneratorDialog({
             </button>
             {expOpen && (
               <div className="grid grid-cols-2 gap-4 px-3.5 pb-3.5">
+                <label className="col-span-2 flex items-center gap-2 text-[11px] text-mute">
+                  <input
+                    type="checkbox"
+                    checked={useFormat}
+                    onChange={(e) => setUseFormat(e.target.checked)}
+                    data-testid="generator-use-format"
+                    disabled={busy}
+                  />
+                  Let ACE-Step polish the caption and lyrics before generation
+                </label>
                 <Field label="inference steps">
                   <input
                     type="number"

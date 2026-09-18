@@ -351,7 +351,7 @@ def test_release_422_on_an_unknown_top_level_field(auth_client, ace_on, monkeypa
 
 
 @pytest.mark.parametrize(
-    "key", ["audio_format", "thinking", "bpm", "duration", "prompt", "caption"]
+    "key", ["audio_format", "thinking", "bpm", "duration", "prompt", "caption", "use_format"]
 )
 def test_release_422_when_experimental_shadows_a_server_field(
     auth_client, ace_on, monkeypatch, key
@@ -368,6 +368,35 @@ def test_release_422_when_experimental_shadows_a_server_field(
 
 
 # ── Defaults the server fills ────────────────────────────────────────
+
+
+def test_generator_genres_exposes_canonical_bpm_controls(auth_client):
+    response = auth_client.get("/api/generator/genres")
+
+    assert response.status_code == 200
+    deep_house = next(
+        entry for entry in response.json()["genres"] if entry["id"] == "deep house"
+    )
+    assert deep_house["bpm_min"] == 115
+    assert deep_house["bpm_max"] == 135
+    assert deep_house["bpm_default"] == 125
+    assert "rolling four-on-the-floor" in deep_house["style_prompt"]
+
+
+def test_release_trims_composed_caption_to_ace_step_ceiling(
+    auth_client, ace_on, monkeypatch
+):
+    calls = _install_ace(monkeypatch, _box())
+
+    response = auth_client.post(
+        "/api/generator/tasks",
+        json={**_BODY, "prompt": "x" * 4000},
+    )
+
+    assert response.status_code == 200
+    payload = _released_payload(calls)
+    assert len(payload["prompt"]) <= 512
+    assert payload["use_format"] is True
 
 
 def test_release_fills_the_contract_defaults(auth_client, ace_on, monkeypatch):

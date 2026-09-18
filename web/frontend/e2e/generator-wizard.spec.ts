@@ -155,6 +155,7 @@ test.describe("G1 — generate a track with ACE from the editor", () => {
     await page.getByTestId("generator-duration").fill("240");
     await page.getByTestId("generator-language").selectOption("en");
     await page.getByTestId("generator-genre").selectOption("deep house");
+    await page.getByTestId("generator-bpm").fill("130");
     await page.getByTestId("generator-batch").fill("2");
 
     // Experimental starts collapsed; open it and pin the seed.
@@ -191,6 +192,7 @@ test.describe("G1 — generate a track with ACE from the editor", () => {
     const body = JSON.parse(posted as string);
     expect(body.genre_folder).toBe("deep house");
     expect(body.audio_duration).toBe(240);
+    expect(body.bpm).toBe(130);
     expect(body.batch_size).toBe(2);
     expect(body.vocal_language).toBe("en");
     expect(body.lyrics).toContain("[Verse]");

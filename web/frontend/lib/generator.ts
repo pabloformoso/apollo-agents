@@ -49,6 +49,15 @@ export const POLL_INTERVAL_MS = 3000;
 
 // ── Wire types ────────────────────────────────────────────────────────────
 
+export type GeneratorGenre = {
+  id: string;
+  label: string;
+  bpm_min: number | null;
+  bpm_max: number | null;
+  bpm_default: number | null;
+  style_prompt: string;
+};
+
 export type GeneratorHealth = {
   available: boolean;
   blocked_by_live: boolean;
@@ -96,6 +105,7 @@ export type CreateTaskRequest = {
   bpm?: number;
   key_scale?: string;
   batch_size?: number;
+  use_format?: boolean;
   experimental?: Record<string, unknown>;
 };
 
