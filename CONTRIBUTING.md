@@ -29,13 +29,13 @@ The web app needs two processes during development:
 
 ```bash
 # terminal 1
-uv run uvicorn backend.app:app --reload --port 4020 --app-dir web
+uv run uvicorn backend.app:app --reload --port 4021 --app-dir web
 
 # terminal 2
-npm --prefix web/frontend run dev
+APOLLO_API_URL=http://localhost:4021 NEXT_PUBLIC_WS_BASE=ws://localhost:4021 npm --prefix web/frontend run dev -- --port 4011
 ```
 
-Use ports `4010` and `4020` for the normal local stack. Keep production work and live broadcasts out of a feature worktree.
+Development uses ports `4011` and `4021`; `4010` and `4020` are reserved for the running stack. Keep development data separate from production, and never update the production checkout or restart its services during a live broadcast.
 
 ## Where to work
 
@@ -55,8 +55,8 @@ Keep product behavior in the surface that owns it. For example, a change to the 
 Run the checks that cover the files you changed:
 
 ```bash
-# Python
-uv run pytest
+# Python (include the optional YouTube dependencies for the full suite)
+uv run --group youtube pytest tests/
 
 # Frontend unit tests and production build
 npm --prefix web/frontend run test

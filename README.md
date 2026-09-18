@@ -100,7 +100,7 @@ A secure browser context is required for AudioWorklet and WebMIDI: use `localhos
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/)
 - Node.js 22+
-- `ffmpeg`
+- `ffmpeg`, the `rubberband` command-line tool, and PortAudio
 - an LLM provider configured in `.env` (Anthropic, Azure OpenAI, LiteLLM, Ollama, or another compatible endpoint)
 
 ### Install
@@ -209,7 +209,7 @@ Start with [CONTRIBUTING.md](CONTRIBUTING.md). It covers the local setup, the ch
 The shortest useful loop is:
 
 ```bash
-uv run pytest
+uv run --group youtube pytest tests/
 npm --prefix web/frontend run test
 npm --prefix web/frontend run build
 ```
