@@ -45,8 +45,8 @@
  */
 import * as React from "react";
 import Link from "next/link";
-import { getCatalog } from "@/lib/api";
-import { useGeneratorTask } from "@/lib/generator";
+import { getCatalog, getGeneratorGenres } from "@/lib/api";
+import { useGeneratorTask, type GeneratorGenre } from "@/lib/generator";
 import { Btn, Crumb } from "./primitives";
 import { Dialog } from "./Dialog";
 import { Banner, Spinner } from "./feedback";
@@ -57,7 +57,11 @@ import { Field, FIELD_CLS, TakeRow, playableFor } from "./GeneratorTakes";
 import { EngineStatusPanel } from "./EngineStatus";
 
 const DURATION_MIN = 120;
-const DURATION_MAX = 300;
+const DURATION_MAX = 600;
+const BPM_MIN = 30;
+const BPM_MAX = 300;
+const BPM_DEFAULT = 120;
+const PROMPT_MAX = 512;
 const DURATION_DEFAULT = 180;
 const BATCH_MIN = 1;
 const BATCH_MAX = 8;
@@ -74,7 +78,7 @@ const LANGUAGES: ReadonlyArray<[string, string]> = [
   ["ja", "Japanese"],
 ];
 
-const TIME_SIGNATURES = ["4/4", "3/4", "6/8", "5/4"] as const;
+const TIME_SIGNATURES = [["4", "4/4"], ["3", "3/4"], ["2", "2/4"], ["6", "6/8"]] as const;
 
 const LYRICS_PLACEHOLDER =
   "[Verse]\nrain on the window, tape hiss underneath\n\n[Chorus]\nstay a while longer";
@@ -102,9 +106,12 @@ export function GeneratorDialog({
   const { state, etaCountdown, submit, reset } = useGeneratorTask();
 
   const [genres, setGenres] = React.useState<string[] | null>(null);
+  const [genreMeta, setGenreMeta] = React.useState<Record<string, GeneratorGenre>>({});
   const [prompt, setPrompt] = React.useState("");
   const [lyrics, setLyrics] = React.useState("");
   const [duration, setDuration] = React.useState(String(DURATION_DEFAULT));
+  const [bpm, setBpm] = React.useState("");
+  const [style, setStyle] = React.useState<string | null>(null);
   const [language, setLanguage] = React.useState("en");
   const [genre, setGenre] = React.useState("");
   const [batch, setBatch] = React.useState(String(BATCH_DEFAULT));
@@ -113,49 +120,69 @@ export function GeneratorDialog({
   const [seed, setSeed] = React.useState("");
   const [keyScale, setKeyScale] = React.useState("");
   const [timeSig, setTimeSig] = React.useState("");
+  const [useFormat, setUseFormat] = React.useState(false);
   // Names published from THIS batch, in publish order — the first one is
   // what a second take is offered as a variant OF.
   const [publishedNames, setPublishedNames] = React.useState<string[]>([]);
 
-  // Genres are the catalog's — ACE writes into a real genre folder, so the
-  // list must be the folders that exist (same fetch TrackPicker makes).
+  // Include configured genres even before they have their first catalog track.
   React.useEffect(() => {
     if (!open) return;
     let cancelled = false;
-    getCatalog()
-      .then((cat) => {
+    Promise.allSettled([getCatalog(), getGeneratorGenres()]).then(
+      ([catalogResult, metadataResult]) => {
         if (cancelled) return;
-        const list = cat.genres ?? [];
+        const catalogGenres =
+          catalogResult.status === "fulfilled" ? catalogResult.value.genres ?? [] : [];
+        const metadata =
+          metadataResult.status === "fulfilled" ? metadataResult.value.genres ?? [] : [];
+        const byId = Object.fromEntries(
+          metadata.map((entry) => [entry.id.toLowerCase(), entry]),
+        );
+        setGenreMeta(byId);
+        const list = [...new Map(
+          [...catalogGenres, ...metadata.map((entry) => entry.id)]
+            .map((name) => [name.toLowerCase(), name]),
+        ).values()].sort();
         setGenres(list);
         const match = defaultGenre
           ? list.find(
               (g) => g.toLowerCase() === defaultGenre.trim().toLowerCase(),
             )
           : undefined;
-        setGenre((prev) => prev || match || list[0] || "");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setGenres([]);
-      });
+        const initialGenre = match || list[0] || "";
+        setGenre((prev) => prev || initialGenre);
+      },
+    );
     return () => {
       cancelled = true;
     };
   }, [open, defaultGenre]);
 
+  const selectedGenre = genreMeta[genre.trim().toLowerCase()] ?? null;
+  const selectedBpmDefault = selectedGenre?.bpm_default ?? BPM_DEFAULT;
+  const bpmValue = bpm || String(selectedBpmDefault);
+  const styleValue = style ?? selectedGenre?.style_prompt ?? "";
+  const caption = [styleValue.trim(), prompt.trim()].filter(Boolean).join(". ");
+  const captionLength = Array.from(caption).length;
+
   const busy = state.phase === "submitting";
   const showForm = state.phase === "idle" || busy;
-  const canSubmit = Boolean(prompt.trim()) && Boolean(genre) && !busy;
+  const canSubmit = Boolean(prompt.trim()) && Boolean(genre) && captionLength <= PROMPT_MAX && !busy;
 
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
     const experimental: Record<string, unknown> = {};
     if (steps.trim()) experimental.inference_steps = Number(steps);
-    if (seed.trim()) experimental.seed = Number(seed);
+    if (seed.trim()) {
+      experimental.seed = Number(seed);
+      experimental.use_random_seed = false;
+    }
     if (timeSig) experimental.time_signature = timeSig;
     void submit({
       prompt: prompt.trim(),
+      style_prompt: styleValue.trim(),
       ...(lyrics.trim() ? { lyrics } : {}),
       audio_duration: clampInt(
         duration,
@@ -163,10 +190,12 @@ export function GeneratorDialog({
         DURATION_MAX,
         DURATION_DEFAULT,
       ),
+      bpm: clampInt(bpmValue, BPM_MIN, BPM_MAX, selectedBpmDefault),
       vocal_language: language,
       genre_folder: genre,
       ...(keyScale.trim() ? { key_scale: keyScale.trim() } : {}),
       batch_size: clampInt(batch, BATCH_MIN, BATCH_MAX, BATCH_DEFAULT),
+      use_format: useFormat,
       ...(Object.keys(experimental).length ? { experimental } : {}),
     });
   };
@@ -211,7 +240,7 @@ export function GeneratorDialog({
       surfaceClassName="flex flex-col gap-4 p-5"
     >
       <div
-        className="flex items-baseline justify-between"
+        className="flex flex-wrap items-baseline justify-between gap-2"
         data-testid="generator-dialog"
       >
         <Crumb tone="ember">generate · ace-step</Crumb>
@@ -232,9 +261,10 @@ export function GeneratorDialog({
         </span>
       </div>
 
-      {/* What the shared 16 GB is holding, on the panel where you would act
-          on it. Renders nothing when it cannot be read — never a blocker. */}
-      <EngineStatusPanel />
+      <details className="text-xs text-mute">
+        <summary className="cursor-pointer">Engine status</summary>
+        <div className="mt-2"><EngineStatusPanel /></div>
+      </details>
 
       {showForm ? (
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
@@ -249,21 +279,46 @@ export function GeneratorDialog({
             </Banner>
           )}
 
-          <Field label="prompt">
+          <div>
+            <h3 className="font-display text-3xl italic">Create a song<span className="text-ember">.</span></h3>
+            <p className="mt-1 text-sm text-mute">Shape the sound, set the tempo and make it yours.</p>
+          </div>
+
+          <Field label="song description">
             <textarea
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              maxLength={PROMPT_MAX}
               rows={3}
               autoFocus
               data-testid="generator-prompt"
-              placeholder="warm lofi keys, dusty tape hiss, rain on a window, slow swing"
+              placeholder="Describe the mood, instruments and how the song evolves…"
               className={FIELD_CLS + " resize-y"}
               disabled={busy}
             />
           </Field>
 
+          <Field label="musical style" hint="Starts from the genre preset below. Edit or clear it to choose your own sound.">
+            <textarea
+              value={styleValue}
+              onChange={(e) => setStyle(e.target.value)}
+              rows={2}
+              maxLength={PROMPT_MAX}
+              data-testid="generator-style"
+              className={FIELD_CLS + " resize-y"}
+              disabled={busy}
+            />
+          </Field>
+          <details className="text-xs text-mute">
+            <summary className="cursor-pointer">Combined description · {captionLength}/{PROMPT_MAX}</summary>
+            <p className="mt-2 whitespace-pre-wrap" data-testid="generator-caption-preview">{caption || "Your style and song description will appear here."}</p>
+          </details>
+          {captionLength > PROMPT_MAX && (
+            <p role="alert" className="text-sm text-ember">Shorten the style or description by {captionLength - PROMPT_MAX} characters. Your words will not be cut off.</p>
+          )}
+
           <Field
-            label="lyrics"
+            label="lyrics · optional"
             hint="Structure tags like [Verse] and [Chorus] guide the arrangement. Leave empty for an instrumental."
           >
             <textarea
@@ -277,7 +332,7 @@ export function GeneratorDialog({
             />
           </Field>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <Field label={`duration · ${DURATION_MIN}–${DURATION_MAX}s`}>
               <input
                 type="number"
@@ -290,6 +345,38 @@ export function GeneratorDialog({
                 className={FIELD_CLS}
                 disabled={busy}
               />
+            </Field>
+
+            <Field
+              label="tempo · BPM"
+              hint={selectedGenre?.bpm_min != null && selectedGenre?.bpm_max != null
+                ? `Catalog range: ${selectedGenre.bpm_min}–${selectedGenre.bpm_max} BPM. Targets outside it may need another genre when publishing.`
+                : "Set a target between 30 and 300 BPM. The generated tempo may vary."}
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={BPM_MIN}
+                  max={BPM_MAX}
+                  value={clampInt(bpmValue, BPM_MIN, BPM_MAX, selectedBpmDefault)}
+                  onChange={(e) => setBpm(e.target.value)}
+                  data-testid="generator-bpm-slider"
+                  aria-label="Tempo slider"
+                  className="accent-ember min-w-0 flex-1"
+                  disabled={busy}
+                />
+                <input
+                  type="number"
+                  min={BPM_MIN}
+                  max={BPM_MAX}
+                  value={bpmValue}
+                  onChange={(e) => setBpm(e.target.value)}
+                  data-testid="generator-bpm"
+                  aria-label="Tempo in BPM"
+                  className={FIELD_CLS + " w-20"}
+                  disabled={busy}
+                />
+              </div>
             </Field>
 
             <Field label="vocal language">
@@ -309,18 +396,17 @@ export function GeneratorDialog({
             </Field>
 
             <Field
-              label="genre folder"
-              hint={
-                genres !== null && genres.length === 0
-                  ? "No genre folders resolved from the catalog — generation needs one to land in."
-                  : genre
-                    ? `BPM is left to Apollo — the server fills the centre of ${genre}'s BPM window so the take lands in range.`
-                    : "The genre folder drives the BPM default the server fills in."
-              }
+              label="genre preset"
+              hint="Choosing a preset loads its style and suggested tempo. You can edit both."
             >
               <select
                 value={genre}
-                onChange={(e) => setGenre(e.target.value)}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setGenre(next);
+                  setBpm("");
+                  setStyle(null);
+                }}
                 data-testid="generator-genre"
                 className={FIELD_CLS}
                 disabled={busy || genres === null || genres.length === 0}
@@ -350,6 +436,34 @@ export function GeneratorDialog({
                 disabled={busy}
               />
             </Field>
+
+            <Field label="key / scale">
+              <input
+              value={keyScale}
+              onChange={(e) => setKeyScale(e.target.value)}
+              data-testid="generator-key-scale"
+              placeholder="e.g. A minor"
+              className={FIELD_CLS}
+              disabled={busy}
+            />
+          </Field>
+
+          <Field label="time signature">
+            <select
+              value={timeSig}
+              onChange={(e) => setTimeSig(e.target.value)}
+              data-testid="generator-time-signature"
+              className={FIELD_CLS}
+              disabled={busy}
+            >
+              <option value="">Auto</option>
+              {TIME_SIGNATURES.map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </Field>
           </div>
 
           {/* Experimental — collapsed by default. Nothing here is needed for
@@ -363,19 +477,30 @@ export function GeneratorDialog({
               data-testid="generator-experimental-toggle"
               className="w-full flex items-center justify-between px-3.5 py-2.5 bg-transparent border-0 cursor-pointer text-left"
             >
-              <Crumb>experimental</Crumb>
+              <Crumb>advanced options</Crumb>
               <span className="font-mono text-[11px] text-faint">
                 {expOpen ? "−" : "+"}
               </span>
             </button>
             {expOpen && (
-              <div className="grid grid-cols-2 gap-4 px-3.5 pb-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 px-3.5 pb-3.5">
+                <label className="sm:col-span-2 flex items-center gap-2 text-[11px] text-mute">
+                  <input
+                    type="checkbox"
+                    checked={useFormat}
+                    onChange={(e) => setUseFormat(e.target.checked)}
+                    data-testid="generator-use-format"
+                    disabled={busy}
+                  />
+                  Let AI rewrite the description and lyrics (may also change musical settings)
+                </label>
                 <Field label="inference steps">
                   <input
                     type="number"
                     min={1}
                     value={steps}
                     onChange={(e) => setSteps(e.target.value)}
+                    max={200}
                     data-testid="generator-inference-steps"
                     placeholder="server default"
                     className={FIELD_CLS}
@@ -387,38 +512,15 @@ export function GeneratorDialog({
                     type="number"
                     value={seed}
                     onChange={(e) => setSeed(e.target.value)}
+                    min={0}
+                    step={1}
                     data-testid="generator-seed"
                     placeholder="random"
                     className={FIELD_CLS}
                     disabled={busy}
                   />
                 </Field>
-                <Field label="key / scale">
-                  <input
-                    value={keyScale}
-                    onChange={(e) => setKeyScale(e.target.value)}
-                    data-testid="generator-key-scale"
-                    placeholder="e.g. A minor"
-                    className={FIELD_CLS}
-                    disabled={busy}
-                  />
-                </Field>
-                <Field label="time signature">
-                  <select
-                    value={timeSig}
-                    onChange={(e) => setTimeSig(e.target.value)}
-                    data-testid="generator-time-signature"
-                    className={FIELD_CLS}
-                    disabled={busy}
-                  >
-                    <option value="">server default</option>
-                    {TIME_SIGNATURES.map((ts) => (
-                      <option key={ts} value={ts}>
-                        {ts}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+
               </div>
             )}
           </div>

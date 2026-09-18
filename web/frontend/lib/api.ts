@@ -1,5 +1,6 @@
 import { getToken } from "./auth";
 import type { Catalog, Playlist, PlaylistDetail, SessionState } from "./types";
+import type { GeneratorGenre } from "./generator";
 
 const BASE = `${process.env.NEXT_PUBLIC_API_BASE ?? ""}/api`;
 
@@ -241,6 +242,9 @@ export const getCatalog = (genre?: string) => {
   const qs = genre ? `?genre=${encodeURIComponent(genre)}` : "";
   return req<Catalog>(`/catalog${qs}`);
 };
+
+export const getGeneratorGenres = () =>
+  req<{ genres: GeneratorGenre[] }>("/generator/genres");
 
 // Audio streaming — `<audio>` can't set Authorization headers, so the JWT
 // goes in the query string (same trick as the WebSocket auth).
