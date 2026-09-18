@@ -2,7 +2,7 @@
 
 This is the living roadmap for ApolloAgents — from quick polish to long-term vision. Items are grouped by milestone, not by date. v1.0 shipped April 2026; v1.1, v1.1.1, and v1.1.2 shipped April 2026. Everything below is what comes next.
 
-Contributions welcome — new tools follow the `fn(params, context_variables: dict) -> str` convention and new agents follow the bounded-role pattern (system prompt + curated tool list + structured output). See [CLAUDE.md](CLAUDE.md) for developer setup.
+Contributions welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for setup, checks, and pull requests. New tools follow the `fn(params, context_variables: dict) -> str` convention and new agents follow the bounded-role pattern (system prompt + curated tool list + structured output).
 
 ---
 
