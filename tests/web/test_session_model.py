@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-
-import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -72,3 +69,57 @@ def test_list_models_falls_back_to_v0(monkeypatch):
     models = asyncio.run(session_model.list_models())
     assert calls == ["/api/v1/models", "/api/v0/models"]
     assert models[0]["key"] == "model-b"
+
+
+def test_load_uses_unsaved_selector_settings(monkeypatch, tmp_path):
+    calls: list[tuple[str, str, dict | None]] = []
+    saved: list[session_model.Settings] = []
+
+    async def fake_models():
+        return [{
+            "key": "model-b", "name": "Model B", "type": "llm",
+            "loaded_instances": [], "max_context_length": 8192,
+        }]
+
+    async def fake_request(path, method="GET", payload=None):
+        calls.append((path, method, payload))
+        return {"status": "loaded"}
+
+    async def no_capacity_check():
+        return None
+
+    monkeypatch.setenv("APOLLO_SESSION_MODEL_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setattr(session_model, "list_models", fake_models)
+    monkeypatch.setattr(session_model, "_request", fake_request)
+    monkeypatch.setattr(session_model, "_ensure_session_model_capacity", no_capacity_check)
+    monkeypatch.setattr(session_model, "save_settings", saved.append)
+    user = {"capabilities": frozenset({"manage_generator"})}
+    settings = session_model.Settings(model_key="model-b", context_length=4096)
+
+    result = asyncio.run(session_model.action("load", settings, user))
+
+    assert result == {"status": "loaded"}
+    assert saved == [settings]
+    assert calls == [(
+        "/api/v1/models/load", "POST", {
+            "model": "model-b", "context_length": 4096,
+            "flash_attention": True, "echo_load_config": True,
+        },
+    )]
+
+
+def test_shared_gpu_capacity_reports_ace_conflict(monkeypatch):
+    class State:
+        loaded = True
+        state = "running"
+
+    async def fake_controller():
+        return State()
+
+    monkeypatch.setattr(session_model, "_shares_host_with_ace", lambda: True)
+    monkeypatch.setattr(session_model.ace_control, "configured", lambda: True)
+    monkeypatch.setattr(session_model.ace_control, "controller", fake_controller)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(session_model._ensure_session_model_capacity())
+    assert error.value.status_code == 409
+    assert "Stop ACE" in str(error.value.detail)

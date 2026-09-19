@@ -93,15 +93,17 @@ La gestión funciona con el proveedor compatible con LM Studio configurado media
 
 ## Diagnóstico actual de Gemma
 
-El servidor LM Studio remoto anuncia `google/gemma-4-e4b`, pero en la última comprobación todos los modelos aparecían como `not-loaded`. Una llamada directa de inferencia y una carga explícita de `google/gemma-4-e4b` devolvieron:
+El servidor LM Studio remoto anuncia `google/gemma-4-e4b`, pero el primer intento se hizo mientras ACE tenía el modelo de audio residente en la misma GPU. En ese estado, una llamada directa y la carga desde Session Intelligence devolvían:
 
 ```text
 Failed to load model "google/gemma-4-e4b".
 ```
 
-El nombre está instalado y es visible en el catálogo; el fallo está en la carga del runtime del host, probablemente relacionado con memoria, configuración del loader, contexto o la instancia de LM Studio. Apollo ya no oculta este problema detrás de un 400 genérico.
+La prueba aislada confirmó la causa: al detener ACE, Gemma E4B cargó en 2,5 s con contexto 4096 y respondió `OK`; después se descargó Gemma y se restauró ACE. El problema era la residencia compartida de GPU, no el identificador del modelo.
 
-No se cambió automáticamente el modelo de producción. El siguiente paso operativo es probar desde Settings un modelo alternativo y, en el host LM Studio, comprobar VRAM/RAM, cuantización, contexto y número de slots. Si se fija `parallel=1` o un contexto menor, debe volver a medirse el rendimiento antes de adoptar esa configuración como default.
+También se corrigió un fallo de contrato en el selector: antes el desplegable sólo cambiaba el estado React y **Load selected model** leía de nuevo `AGENT_MODEL`, por lo que siempre intentaba Gemma. Ahora Load envía y persiste el borrador elegido de forma atómica. Si ACE mantiene la GPU ocupada, Apollo responde 409 con instrucciones para detenerlo, en lugar de propagar un 500 opaco de LM Studio.
+
+La operación recomendada es detener ACE, cargar el modelo de sesiones con el contexto adecuado, validar brief + planificación y volver a iniciar ACE cuando se vaya a generar audio.
 
 ## Decisiones de arquitectura que deben mantenerse
 
@@ -117,10 +119,9 @@ No se cambió automáticamente el modelo de producción. El siguiente paso opera
 
 ### P0 · Resolver la carga del modelo de sesiones
 
-- Revisar el host LM Studio donde falla `google/gemma-4-e4b`.
-- Comprobar VRAM/RAM, cuantización, loader, contexto y slots paralelos.
-- Probar un modelo alternativo desde Settings y validar una sesión completa: brief, planificación, critic y editor.
-- Decidir qué modelo es el default operativo después de medir latencia, tool calling y calidad musical.
+- Validar en producción el flujo coordinado: detener ACE, cargar Session Intelligence, ejecutar una sesión completa y volver a iniciar ACE.
+- Probar un modelo alternativo desde Settings y comparar latencia, tool calling y calidad musical frente a Gemma E4B.
+- Decidir si el contexto 4096 y la residencia exclusiva deben quedar documentados como default operativo.
 
 ### P1 · Validar el generador con música real
 
@@ -149,11 +150,12 @@ También existen worktrees antiguos de agentes para ramas ya mergeadas (`feat/db
 
 ## Verificación realizada en este ciclo
 
-- `tests/web/test_session_model.py`: 6 pasadas.
+- `tests/web/test_session_model.py`: 8 pasadas.
 - `tests/web/test_brief_parser.py`: 62 pasadas.
 - `tests/web/test_pipeline_v260.py`: 7 pasadas.
 - `tests/web/test_mind_control.py`: 14 pasadas.
 - ESLint específico de los archivos frontend nuevos: correcto.
+- Prueba React del selector: 1 pasada; verifica que Load envía el modelo seleccionado.
 - `npm run build`: correcto.
 - CI de PR #207: backend Python 3.12/3.13, frontend, E2E y Algorave: todo verde.
 

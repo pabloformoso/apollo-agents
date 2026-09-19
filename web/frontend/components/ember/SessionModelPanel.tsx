@@ -42,6 +42,7 @@ export function SessionModelPanel() {
     setBusy(true); setError(null);
     try {
       if (action === "save" && draft) await request("/settings", "PUT", draft);
+      else if (action === "load" && draft) await request("/actions/load", "POST", draft);
       else await request(`/actions/${action}`, "POST");
       setRevision(n => n + 1);
     } catch (e) { setError(e instanceof Error ? e.message : "Operation failed"); }
@@ -61,7 +62,7 @@ export function SessionModelPanel() {
       <label className="block">Installed model<select className={inputClass} value={draft.model_key} onChange={e => setDraft({ ...draft, model_key: e.target.value })}>{!status.models.some(m => m.key === draft.model_key) && <option value={draft.model_key}>{draft.model_key} (not available)</option>}{status.models.filter(m => m.type === "llm" || m.type === "vlm").map(m => <option key={m.key} value={m.key}>{m.name}</option>)}</select></label>
       <label className="block">Context tokens<input className={inputClass} type="number" min={512} max={131072} step={512} value={draft.context_length} onChange={e => setDraft({ ...draft, context_length: Number(e.target.value) })} /></label>
       <label className="flex items-start gap-2"><input type="checkbox" checked={draft.flash_attention} onChange={e => setDraft({ ...draft, flash_attention: e.target.checked })} />Flash attention</label>
-      <p className="text-mute">This model powers brief extraction and session planning. It is separate from Mind and ACE. Save settings, then load the model to apply them.</p>
+      <p className="text-mute">This model powers brief extraction and session planning. It is separate from Mind and ACE. Save settings to keep the choice as the default, or load directly to apply the current selection.</p>
       <button type="button" onClick={() => void act("save")} className="rounded border border-line px-3 py-2">Save settings</button>
     </fieldset>}
     {status && !status.can_manage && <p>Only administrators can manage session models.</p>}

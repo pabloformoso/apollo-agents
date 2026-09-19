@@ -187,6 +187,41 @@ async def status_snapshot(user: dict) -> dict[str, Any]:
         }
 
 
+def _shares_host_with_ace() -> bool:
+    """Return whether LM Studio and ACE point at the same machine."""
+    lm_host = urlsplit(os.getenv("OLLAMA_BASE_URL", "")).hostname
+    ace_host = urlsplit(os.getenv("ACESTEP_CONTROL_URL", "")).hostname
+    return bool(lm_host and ace_host and lm_host == ace_host)
+
+
+async def _ensure_session_model_capacity() -> None:
+    """Avoid an opaque LM Studio load error when ACE owns the shared GPU."""
+    if not _shares_host_with_ace() or not ace_control.configured():
+        return
+    try:
+        state = await ace_control.controller()
+    except HTTPException:
+        # ACE's controller may be unavailable while the LM Studio host is
+        # still usable. Let LM Studio make the final decision in that case.
+        return
+    if state.loaded or state.state in {"starting", "stopping"}:
+        raise HTTPException(
+            409,
+            "Stop ACE before loading a session model. ACE is holding the shared GPU.",
+        )
+
+
+def _selected_settings(settings: Settings | None) -> Settings:
+    return settings if settings is not None else read_settings()
+
+
+def _find_model(models: list[dict[str, Any]], key: str) -> dict[str, Any]:
+    selected = next((model for model in models if model["key"] == key), None)
+    if selected is None or selected.get("type") not in {"llm", "vlm"}:
+        raise HTTPException(422, "That model is not available on the configured LM Studio server.")
+    return selected
+
+
 def admin(user: dict) -> None:
     if not permissions.has_capability(user, permissions.MANAGE_GENERATOR):
         raise HTTPException(403, "Only an Apollo administrator can manage session models.")
@@ -201,33 +236,40 @@ async def status(user: dict = Depends(auth.get_current_user)):
 async def configure(settings: Settings, user: dict = Depends(auth.get_current_user)):
     admin(user)
     models = await list_models()
-    allowed = {m["key"] for m in models if m.get("type") in {"llm", "vlm"}}
-    if settings.model_key not in allowed:
-        raise HTTPException(422, "That model is not available on the configured LM Studio server.")
+    _find_model(models, settings.model_key)
     save_settings(settings)
     return settings.model_dump()
 
 
 @router.post("/actions/{action}")
-async def action(action: str, user: dict = Depends(auth.get_current_user)):
+async def action(
+    action: str,
+    settings: Settings | None = None,
+    user: dict = Depends(auth.get_current_user),
+):
     admin(user)
     if action not in {"load", "unload"}:
         raise HTTPException(404, "Unknown session model action.")
     async with ace_control.gate():
         ace_control.reject_live()
-        settings = read_settings()
         if action == "load":
+            await _ensure_session_model_capacity()
+            selected_settings = _selected_settings(settings)
             models = await list_models()
-            selected = next((m for m in models if m["key"] == settings.model_key), None)
-            if selected is None:
-                raise HTTPException(422, "That model is not available on the configured LM Studio server.")
+            selected = _find_model(models, selected_settings.model_key)
+            if settings is not None:
+                # Loading from the selector is an atomic selection + apply
+                # operation. The old flow loaded the environment default when
+                # the user had changed the dropdown but not clicked Save.
+                save_settings(selected_settings)
+            context_length = selected_settings.context_length
             max_context = selected.get("max_context_length")
             if isinstance(max_context, int):
-                settings.context_length = min(settings.context_length, max_context)
+                context_length = min(context_length, max_context)
             return await _request("/api/v1/models/load", "POST", {
-                "model": settings.model_key,
-                "context_length": settings.context_length,
-                "flash_attention": settings.flash_attention,
+                "model": selected_settings.model_key,
+                "context_length": context_length,
+                "flash_attention": selected_settings.flash_attention,
                 "echo_load_config": True,
             })
         models = await list_models()
