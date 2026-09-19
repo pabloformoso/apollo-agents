@@ -114,6 +114,7 @@ def parse_request(
     default_genre: str = DEFAULT_GENRE,
     default_key: str = DEFAULT_KEY,
     allowed_models: tuple[str, ...] = (),
+    any_model: bool = False,
 ) -> dict:
     """Normalise a /mind body, or raise `BadRequest` naming the offending field.
 
@@ -121,6 +122,11 @@ def parse_request(
     set" case the mind already handles. `intent` may not: without it there is no
     decision to make, and defaulting it would silently turn a page bug into a
     random mutation.
+
+    `any_model` is the managed deployment (`--any-model`): the caller in front
+    of this server — Apollo's host supervisor — chose the model and verified
+    it is resident, so the request's `model` is trusted instead of allow-listed
+    and, because there is no declared default to fall back on, required.
     """
     if len(body) > MAX_BODY_BYTES:
         raise BadRequest(f"body is larger than {MAX_BODY_BYTES} bytes")
@@ -182,9 +188,14 @@ def parse_request(
     if model is not None:
         if not isinstance(model, str):
             raise BadRequest(f"'model' must be a string, got {type(model).__name__}")
-        if model not in allowed_models:
+        if any_model:
+            if not model:
+                raise BadRequest("'model' must not be empty")
+        elif model not in allowed_models:
             available = ", ".join(allowed_models) or "none — this server was started with one model"
             raise BadRequest(f"unknown model {model!r}; this server serves: {available}")
+    elif any_model and not allowed_models:
+        raise BadRequest("'model' is required: this server serves the model its supervisor names")
 
     return {
         "code": code,
@@ -356,6 +367,7 @@ def llm_mind_factory(
     api_key: str,
     max_tokens: int,
     timeout: float,
+    any_model: bool = False,
 ):
     """`request -> StrudelMind` on an EXPLICIT client (never env detection).
 
@@ -368,12 +380,13 @@ def llm_mind_factory(
     `model` may be a single name (every earlier caller) or a list, in which case
     the FIRST is the default and the rest are what a request may ask for. The
     server publishes exactly this list on `GET /models`; `parse_request` refuses
-    anything outside it.
+    anything outside it — unless `any_model`, the managed mode, where the list
+    may be empty and every request names the model it wants.
     """
     from openai import OpenAI  # noqa: PLC0415 — keeps import cost off --help
 
     models = [model] if isinstance(model, str) else list(model)
-    if not models:
+    if not models and not any_model:
         raise ValueError("llm_mind_factory needs at least one model")
 
     client = OpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
@@ -382,7 +395,9 @@ def llm_mind_factory(
     def factory(request: dict) -> StrudelMind:
         # Already allow-listed by parse_request; the `or` is for the callers
         # that build a request dict by hand (the bench, the tests).
-        chosen = request.get("model") or models[0]
+        chosen = request.get("model") or (models[0] if models else None)
+        if not chosen:
+            raise ValueError("no model: the request named none and none was declared")
         return StrudelMind(
             llm=make_llm(client, chosen, max_tokens),
             genre=request["genre"],
@@ -390,6 +405,7 @@ def llm_mind_factory(
         )
 
     factory.models = tuple(models)  # type: ignore[attr-defined]
+    factory.any_model = any_model  # type: ignore[attr-defined]
     factory.client = client  # type: ignore[attr-defined]
     return factory
 
@@ -434,13 +450,16 @@ def build_mind_factory(args) -> object:
     if args.mock:
         return mock_mind_factory()
     if not args.model:
-        args.model = [DEFAULT_MODEL]
+        # Managed mode declares nothing: the supervisor names the model per
+        # request. Everything else keeps the live-DJ default.
+        args.model = [] if args.any_model else [DEFAULT_MODEL]
     return llm_mind_factory(
         base_url=args.base_url,
         model=args.model,  # a list once --model is repeatable; first is default
         api_key=args.api_key,
         max_tokens=args.max_tokens,
         timeout=args.timeout,
+        any_model=args.any_model,
     )
 
 
@@ -456,6 +475,7 @@ def make_handler(
     allowed_origins=SPIKE_ORIGINS,
     quiet: bool = False,
     models: tuple[str, ...] | None = None,
+    any_model: bool | None = None,
 ):
     """A handler class bound to one mind factory (the tests inject their own).
 
@@ -464,9 +484,14 @@ def make_handler(
     way needs no second source of truth; a test injecting a bare callable gets
     an empty list, which reads as "this server serves one model" and refuses any
     `model` field rather than pretending to honour it.
+
+    `any_model` likewise follows the factory: a managed server (`--any-model`)
+    trusts the model each request names instead of that list.
     """
     if models is None:
         models = getattr(mind_factory, "models", ())
+    if any_model is None:
+        any_model = bool(getattr(mind_factory, "any_model", False))
 
     class PlaygroundHandler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -545,6 +570,7 @@ def make_handler(
                     default_genre=default_genre,
                     default_key=default_key,
                     allowed_models=tuple(models),
+                    any_model=any_model,
                 )
             except BadRequest as exc:
                 self._send_json(400, {"error": "malformed request", "detail": str(exc)})
@@ -637,6 +663,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip the startup check that every --model is one the endpoint "
              "actually lists. Only for an endpoint whose /v1/models is wrong.",
     )
+    parser.add_argument(
+        "--any-model", action="store_true",
+        help="Serve whichever model each request names instead of only those "
+             "declared with --model. For the managed deployment, where Apollo's "
+             "host supervisor sits in front of this server, chooses the main LLM "
+             "in Settings and refuses to forward a request for a model that is "
+             "not loaded. A request naming no model is then a 400.",
+    )
     parser.add_argument("--max-tokens", type=int,
                         default=int(os.getenv("GENERATIVE_MAX_TOKENS", "4096")),
                         help="Completion budget — reasoners think before they code.")
@@ -690,9 +724,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     host, port = server.server_address[0], server.server_address[1]
 
+    if args.mock:
+        mode = "MOCK — canned mutation, no LLM client built"
+    elif args.any_model:
+        mode = "MANAGED — the model each request names" + (
+            f" (declared: {', '.join(args.model)})" if args.model else ""
+        )
+    else:
+        mode = ", ".join(args.model)
     banner = [
         f"playground: http://{host}:{port}/mind  (POST)",
-        f"mode      : {'MOCK — canned mutation, no LLM client built' if args.mock else ', '.join(args.model)}",
+        f"mode      : {mode}",
     ]
     extra_origins = [o for o in allowed_origins if o not in SPIKE_ORIGINS]
     if extra_origins:

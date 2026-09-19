@@ -37,7 +37,7 @@ import {
 import { useViewerFlag, viewerUrlFor } from "@/lib/viewer";
 import { MindError, askMind, autoApplyDecision, diffLines, fetchMindModels, pushReason, summarizeHumanEdit } from "@/lib/mind";
 import type { MindModels } from "@/lib/mind";
-import { MindServicePanel } from "@/components/ember/MindServicePanel";
+import { MainLlmPanel } from "@/components/ember/MainLlmPanel";
 import {
   b2bDecide,
   barsElapsed,
@@ -688,8 +688,8 @@ export function AlgoraveClient() {
         </label>
       </div>
 
-      <button type="button" aria-expanded={manageMind} onClick={() => setManageMind(!manageMind)} className="border border-line rounded px-3 py-2 text-xs">Model management</button>
-      {manageMind && <MindServicePanel />}
+      <button type="button" aria-expanded={manageMind} onClick={() => setManageMind(!manageMind)} className="border border-line rounded px-3 py-2 text-xs">Main LLM</button>
+      {manageMind && <MainLlmPanel />}
 
       {/* Only when the mind said what it serves. No list, no selector — the
           page then plays on the mind's own default exactly as before. */}

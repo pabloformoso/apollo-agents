@@ -750,13 +750,20 @@ def test_clean_paragraph_caps_a_runaway_reply():
 
 
 def test_resolve_critique_model_precedence(monkeypatch):
-    """GENERATIVE_MODEL > AGENT_MODEL > the provider default (#123)."""
+    """GENERATIVE_MODEL > the main LLM saved in Settings > AGENT_MODEL > default."""
+    from web.backend import main_llm
+
     monkeypatch.delenv("GENERATIVE_MODEL", raising=False)
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     assert generator._resolve_critique_model("ollama") == "gemma4:4b"
 
     monkeypatch.setenv("AGENT_MODEL", "the-dj-model")
     assert generator._resolve_critique_model("ollama") == "the-dj-model"
+
+    # The model resident in LM Studio wins over the env name: naming another
+    # one would JIT-load a second copy on the shared GPU.
+    main_llm.save_settings(main_llm.Settings(model_key="the-loaded-model"))
+    assert generator._resolve_critique_model("ollama") == "the-loaded-model"
 
     monkeypatch.setenv("GENERATIVE_MODEL", "the-critic-model")
     assert generator._resolve_critique_model("ollama") == "the-critic-model"

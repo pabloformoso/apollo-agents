@@ -2046,12 +2046,20 @@ def _critique_brief(req: CritiqueRequest, report: dict, bands: dict | None) -> s
 
 
 def _resolve_critique_model(provider: str) -> str:
-    """``GENERATIVE_MODEL`` > ``AGENT_MODEL`` > the provider's default."""
+    """``GENERATIVE_MODEL`` > the main LLM chosen in Settings > ``AGENT_MODEL`` > default.
+
+    The Settings choice sits between the two env names on purpose: naming
+    a model OTHER than the one resident in LM Studio makes it JIT-load a
+    second copy on the shared GPU, which is the failure the main LLM
+    exists to prevent. ``GENERATIVE_MODEL`` stays above it as the explicit
+    operator override the #123 precedent promised the generative lane.
+    """
+    from . import main_llm  # noqa: PLC0415 — keeps the import cost off the poll path
     fallback = (
         os.getenv("AZURE_OPENAI_DEPLOYMENT", "") if provider == "azure"
         else CRITIQUE_DEFAULT_MODELS.get(provider, "")
     )
-    return os.getenv("GENERATIVE_MODEL") or os.getenv("AGENT_MODEL") or fallback
+    return os.getenv("GENERATIVE_MODEL") or main_llm.persisted_model() or os.getenv("AGENT_MODEL") or fallback
 
 
 def _llm_paragraph(system: str, user: str, provider: str) -> str:

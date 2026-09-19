@@ -78,16 +78,11 @@ async def llm_idle() -> None:
             raise ValueError("Unknown model state")
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         raise HTTPException(409, "Cannot verify that the DJ / LLM has released the GPU.") from exc
-    from . import mind_supervisor
-    if mind_supervisor._uncertain or (mind_supervisor.busy() and mind_supervisor._operation in {"load", "unload"}):
-        raise HTTPException(409, "A Mind model residency operation is running. Wait for it to finish.")
+    # The GPU protocol is symmetric and has no opt-out: while ACE runs, LM
+    # Studio holds no model. The main LLM (DJ, planner and Algorave Mind
+    # alike) is unloaded from Apollo's Settings before ACE is started.
     if any(m["state"] == "loaded" for m in models):
-        shared = mind_supervisor.read_settings().allow_shared_gpu
-        if shared:
-            _, loaded = await mind_supervisor.inventory()
-            shared = bool(loaded) and all(m["identifier"] == mind_supervisor.MODEL_ID for m in loaded)
-        if not shared:
-            raise HTTPException(409, "The DJ / LLM still holds the GPU. Unload its models before using ACE.")
+        raise HTTPException(409, "The main LLM still holds the GPU. Unload it from Settings before using ACE.")
 
 
 async def observe() -> ServiceState:

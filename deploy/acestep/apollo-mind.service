@@ -1,15 +1,17 @@
 [Unit]
-Description=Apollo Algorave Mind (model loaded separately)
+Description=Apollo Algorave Mind (thinks with the main LLM chosen in Apollo Settings)
 After=network.target
 
 [Service]
 Type=exec
 WorkingDirectory=%h/code/apollo-agents
 Environment=PATH=%h/.nvm/versions/node/v22.23.2/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=%h/code/apollo-agents/.venv/bin/python scripts/algorave_playground.py --host 127.0.0.1 --port 4032 --base-url http://127.0.0.1:1234/v1 --model apollo-mind --no-model-check
+ExecStart=%h/code/apollo-agents/.venv/bin/python scripts/algorave_playground.py --host 127.0.0.1 --port 4032 --base-url http://127.0.0.1:1234/v1 --any-model
 Restart=on-failure
 NoNewPrivileges=true
 KillMode=control-group
 TimeoutStopSec=10
 
-# Deliberately starts only on request; loading a model is a separate action.
+# Deliberately starts only on request. It loads no model of its own: Apollo
+# loads the main LLM into LM Studio and names it on every request, and the
+# host supervisor refuses to forward a request for a model that is not resident.

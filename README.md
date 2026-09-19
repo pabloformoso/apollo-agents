@@ -196,7 +196,7 @@ Copy `.env.example` to `.env` and choose one model path:
 | LiteLLM | `AGENT_PROVIDER=litellm`, `LITELLM_BASE_URL`, `LITELLM_API_KEY`, `AGENT_MODEL` |
 | Ollama / LM Studio | `AGENT_PROVIDER=ollama`, `OLLAMA_BASE_URL`, `AGENT_MODEL` |
 
-For LM Studio, administrators can choose and load the session model from **Settings → Session intelligence**. It controls brief extraction and session planning independently from Mind and ACE. `SESSION_MODEL` sets the initial selection; a saved choice is persisted in `.tmp/session-model-settings.json` (override with `APOLLO_SESSION_MODEL_SETTINGS_PATH`).
+For LM Studio, administrators choose and load the **main LLM** from **Settings → Main LLM**: the one model behind brief extraction, session planning, the live DJ and the Algorave Mind. `AGENT_MODEL` is the initial selection; a saved choice is persisted in `.tmp/main-llm-settings.json` (override with `APOLLO_MAIN_LLM_SETTINGS_PATH`). ACE, the song generator, is the other panel on that screen and stays its own service.
 
 ACE-Step generation is optional. Set `ACESTEP_BASE_URL` to make the Generations surface available. Apollo will keep the surface visible and report that generation is unavailable when the service is off.
 

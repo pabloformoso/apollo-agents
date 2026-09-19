@@ -502,9 +502,25 @@ mechanism; read its comment before adding a second sentinel.
   same-origin route forwards the user's bearer token to `/api/mind/infer` on
   Apollo's backend, which calls the authenticated host supervisor. The fixed
   host service binds loopback:4032; `ALGORAVE_MIND_URL` is no longer used.
-  Settings and the inline Algorave Model management panel control service and
-  model residency separately. See `deploy/acestep/MIND.md` for installation,
-  reserved model alias, concurrency protections and shared-GPU opt-in.
+  See `deploy/acestep/MIND.md` for installation and concurrency protections.
+- **The Mind thinks with the MAIN LLM; it owns no model (2026-09-19).**
+  `main_llm.py` (`/api/main-llm`, `MainLlmPanel.tsx`) is the ONE place the
+  LM Studio model is chosen, loaded and unloaded, and `persisted_model()` /
+  `current_model()` is how every caller names it: `brief_parser`,
+  `pipeline`, the critic in `generator.py` and `mind_control.infer`, which
+  pins `payload["model"]` to it. The host `mind_supervisor` keeps only
+  service start/stop and inference, and forwards a request only when
+  `lms ps` shows that model resident; the playground runs `--any-model`.
+  It was two panels — "Session intelligence" over LM Studio's REST API and
+  "Mind" loading its own copy under the alias `apollo-mind` via `lms` — for
+  one physical model, i.e. two settings files, two Load buttons and, when
+  both were pressed, two copies in VRAM on the GPU ACE shares. Do not
+  reintroduce a per-consumer model selector: a second name is a second
+  JIT load. `GENERATIVE_MODEL` and `BRIEF_MODEL` stay as explicit env
+  overrides ABOVE the Settings choice; `SESSION_MODEL` is gone. The
+  `.tmp/session-model-settings.json` of #207 is still read until the
+  first save writes `.tmp/main-llm-settings.json`. ACE is the other GPU
+  resident and keeps its own panel: it is not an LLM.
 - **The mind's statuses mean different things and must not be flattened**: 400
   the page sent something malformed, 502 it could not produce valid Strudel
   (ask again), 503 the validator is not installed (`npm install`, not a retry),
