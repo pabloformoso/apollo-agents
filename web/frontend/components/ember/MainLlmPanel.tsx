@@ -17,7 +17,8 @@ import { getToken } from "@/lib/auth";
 type Model = { key: string; name: string; type: string; state: string; loaded_instances: { instance_id?: string }[]; max_context_length?: number | null; params_string?: string | null };
 type Settings = { model_key: string; context_length: number; flash_attention: boolean };
 type Status = { configured: boolean; provider: string; endpoint: string | null; settings: Settings; models: Model[]; selected?: Model | null; loaded_model: string | null; selected_loaded: boolean; can_manage: boolean; error: string | null };
-type MindStatus = { service: string; reachable: boolean; loaded_models: string[]; busy: boolean; operation: string | null; error: string | null; uncertain: boolean; can_manage: boolean; main_llm: string };
+/** `configured: false` is a normal shape — an install without the GPU host controller — with no service fields. */
+type MindStatus = { configured: boolean; service?: string; reachable?: boolean; loaded_models?: string[]; busy?: boolean; operation?: string | null; error?: string | null; uncertain?: boolean; can_manage: boolean; main_llm: string };
 
 async function request(base: string, path = "", method = "GET", body?: Settings) {
   const response = await fetch(`${process.env.NEXT_PUBLIC_API_BASE ?? ""}${base}${path}`, {
@@ -53,8 +54,8 @@ export function MainLlmPanel() {
         const next: MindStatus = await mind();
         if (!cancelled) { setMindStatus(next); setMindError(null); }
       } catch (e) {
-        // The Mind's host controller is optional: an install without it still
-        // manages the model. Say so quietly instead of alarming the operator.
+        // A configured host that cannot be read. (An install WITHOUT the host
+        // controller answers 200 with `configured: false` and never lands here.)
         if (!cancelled) { setMindStatus(null); setMindError(e instanceof Error ? e.message : "Mind status unavailable"); }
       }
       if (!cancelled) timer = setTimeout(poll, 5000);
@@ -87,11 +88,16 @@ export function MainLlmPanel() {
   const selectedLoaded = Boolean(status?.selected_loaded);
   // Stop stays available while a request is unresolved: stopping the service
   // is what resolves it (the host clears the flag once the unit is down).
-  const mindDisabled = busy || !mindStatus?.can_manage || mindStatus.busy;
+  const mindHosted = Boolean(mindStatus?.configured);
+  const mindDisabled = busy || !mindStatus?.can_manage || Boolean(mindStatus.busy);
   const mindStartDisabled = mindDisabled || Boolean(mindStatus?.uncertain);
-  const mindServiceLabel = mindStatus
-    ? `Service: ${mindStatus.service}${mindStatus.busy ? ` · ${mindStatus.operation}…` : ""}`
-    : "Host controller not configured";
+  // Three different sentences for three different situations: no host
+  // controller in this install, a host that did not answer, a host answering.
+  const mindServiceLabel = !mindStatus
+    ? (mindError ? "Mind status unavailable" : "Checking…")
+    : !mindHosted
+      ? "Host controller not configured"
+      : `Service: ${mindStatus.service}${mindStatus.busy ? ` · ${mindStatus.operation}…` : ""}`;
   return <section aria-label="Main LLM management" className="min-w-0 space-y-4 rounded border border-line p-4 text-sm">
     <div className="flex items-center justify-between gap-4"><h2 className="text-lg">Main LLM · brief, sessions, live DJ and Algorave Mind</h2><button type="button" className="text-xs text-mute hover:text-ember-text" onClick={() => setRevision(n => n + 1)}>Refresh</button></div>
     <p role="status">{status?.configured ? `LM Studio · ${loaded ? `loaded: ${status.loaded_model}` : "model not loaded"}` : (status ? "LM Studio management is not configured" : "Checking…")}</p>
@@ -110,12 +116,12 @@ export function MainLlmPanel() {
     <div aria-label="Algorave Mind service" className="space-y-2 border-t border-line pt-3">
       <h3 className="text-base">Algorave Mind service</h3>
       <p role="status">{mindServiceLabel}</p>
-      {mindStatus?.can_manage && <div className="flex flex-wrap gap-2">
+      {mindHosted && mindStatus?.can_manage && <div className="flex flex-wrap gap-2">
         <button type="button" disabled={mindStartDisabled || mindStatus.service === "active"} onClick={() => void actMind("start")} className="rounded border border-line px-3 py-2 disabled:opacity-40">Start Mind</button>
         <button type="button" disabled={mindDisabled || mindStatus.service !== "active"} onClick={() => void actMind("stop")} className="rounded border border-line px-3 py-2 disabled:opacity-40">Stop Mind</button>
       </div>}
       <p className="text-mute">The Mind turns an intent into Strudel on the GPU host and answers with the main LLM above. Starting it loads nothing; stopping it unloads nothing.</p>
-      {mindStatus && !mindStatus.can_manage && <p>Only administrators can start or stop the Mind.</p>}
+      {mindHosted && !mindStatus?.can_manage && <p>Only administrators can start or stop the Mind.</p>}
       {(mindError || mindStatus?.error || mindStatus?.uncertain) && <p role="alert" className="text-warn">{mindError || mindStatus?.error || "A Mind request is unresolved. Verify it finished on the host, then Stop Mind to clear this before unloading the model."}</p>}
     </div>
   </section>;

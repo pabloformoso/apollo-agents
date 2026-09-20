@@ -18,7 +18,7 @@ const llmStatus = {
   error: null,
 };
 
-const mindStatus = { service: "inactive", reachable: false, loaded_models: [], busy: false, operation: null, error: null, uncertain: false, can_manage: true, main_llm: "model-a" };
+const mindStatus = { configured: true, service: "inactive", reachable: false, loaded_models: [], busy: false, operation: null, error: null, uncertain: false, can_manage: true, main_llm: "model-a" };
 
 /** One fetch for both routes: the panel is the one place both are read. */
 function stubFetch(mind: unknown = mindStatus, mindOk = true) {
@@ -70,13 +70,25 @@ describe("Main LLM management", () => {
   });
 
   it("keeps managing the model when the Mind host controller is not configured", async () => {
-    stubFetch({ detail: "Mind host controller is not configured." }, false);
+    stubFetch({ configured: false, can_manage: true, main_llm: "model-a" });
     render(<MainLlmPanel />);
 
     await screen.findByLabelText("Installed model");
-    expect(screen.getByText("Host controller not configured")).toBeTruthy();
+    expect(await screen.findByText("Host controller not configured")).toBeTruthy();
     expect(screen.queryByText("Start Mind")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
     expect((screen.getByText("Load selected model") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("says a configured host is unavailable, not unconfigured, when it cannot be read", async () => {
+    stubFetch({ detail: "Cannot verify LM Studio model state." }, false);
+    render(<MainLlmPanel />);
+
+    await screen.findByLabelText("Installed model");
+    expect(await screen.findByText("Mind status unavailable")).toBeTruthy();
+    expect(screen.queryByText("Host controller not configured")).toBeNull();
+    expect(screen.getByRole("alert").textContent).toContain("Cannot verify LM Studio model state.");
+    expect(screen.queryByText("Stop Mind")).toBeNull();
   });
 
   it("disables both Mind actions while an answer is in flight", async () => {

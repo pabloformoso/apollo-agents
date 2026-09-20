@@ -25,12 +25,29 @@ def test_settings_roundtrip_uses_restricted_file(monkeypatch, tmp_path):
 
 
 def test_persisted_model_overrides_environment(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
     monkeypatch.setenv("AGENT_MODEL", "env-model")
     assert main_llm.persisted_model() is None
     assert main_llm.current_model() == "env-model"
     main_llm.save_settings(main_llm.Settings(model_key="selected-model"))
     assert main_llm.persisted_model() == "selected-model"
     assert main_llm.current_model() == "selected-model"
+
+
+def test_persisted_model_is_ignored_when_the_main_llm_is_not_managed(monkeypatch):
+    """The saved key names an LM Studio model; it means nothing to Anthropic or Azure."""
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
+    monkeypatch.setenv("AGENT_MODEL", "claude-sonnet-5")
+    main_llm.save_settings(main_llm.Settings(model_key="google/gemma-4-e4b"))
+    monkeypatch.setenv("AGENT_PROVIDER", "anthropic")
+    assert not main_llm.managed()
+    assert main_llm.persisted_model() is None
+    assert main_llm.current_model() == "claude-sonnet-5"
+    assert main_llm.read_settings().model_key == "google/gemma-4-e4b", "the file itself is untouched"
+
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    assert main_llm.managed()
+    assert main_llm.persisted_model() == "google/gemma-4-e4b"
 
 
 def test_default_model_is_the_agent_model_not_a_second_env_name(monkeypatch):
@@ -45,6 +62,7 @@ def test_default_model_is_the_agent_model_not_a_second_env_name(monkeypatch):
 
 def test_legacy_session_model_file_is_read_until_the_first_save(monkeypatch, tmp_path):
     """A choice saved under the old name still applies after the rename."""
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
     legacy = tmp_path / "session-model-settings.json"
     legacy.write_text(json.dumps({"model_key": "chosen-yesterday", "context_length": 4096, "flash_attention": True}))
     assert main_llm.persisted_model() == "chosen-yesterday"
@@ -57,6 +75,7 @@ def test_legacy_session_model_file_is_read_until_the_first_save(monkeypatch, tmp
 
 
 def test_unreadable_settings_fail_closed_but_never_break_inference(monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
     main_llm.settings_path().parent.mkdir(parents=True, exist_ok=True)
     main_llm.settings_path().write_text("not json")
     with pytest.raises(HTTPException) as exc:

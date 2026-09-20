@@ -531,6 +531,25 @@ mechanism; read its comment before adding a second sentinel.
   refused for being uncertain — only for `busy` — or an unresolved
   transport would wedge the main LLM's unload, and with it ACE, until a
   controller restart on the GPU host.
+  **`persisted_model()` answers only while `main_llm.managed()`** (an LM
+  Studio endpoint under `AGENT_PROVIDER=ollama|lmstudio`): the saved key
+  names an LM Studio model and the file outlives a provider switch, so
+  without that gate the planner, the brief parser and the critic would
+  send `google/gemma-4-e4b` to Anthropic. `managed()` is also what the
+  Mind's `infer` checks (503 naming the fix) — a Claude name can never be
+  resident on the GPU host, and 409 "load it from Settings" forever is
+  the wrong sentence. **The unload guard is exact, not a race**:
+  `mind_control.infer` registers `_inflight` UNDER `ace_control.gate()`
+  and answers outside it (holding the lock for a 20 s answer would hold
+  up live-set registration and ACE), while the unload holds the gate for
+  its whole run — so an ask cannot slip in between the check and the LM
+  Studio call. The host's `busy` stays as the second half, for answers
+  this process did not dispatch. `GET /api/mind` answers 200 with
+  `configured: false` when there is no host controller — a normal
+  install, not a failure — so the panel can tell that apart from a
+  configured host that did not answer (a 503, "Mind status unavailable").
+  "Configured" is `ace_control.configured()` (the URL), one rule for both
+  controllers; a URL with a short token is a loud 503, never "unmanaged".
 - **The mind's statuses mean different things and must not be flattened**: 400
   the page sent something malformed, 502 it could not produce valid Strudel
   (ask again), 503 the validator is not installed (`npm install`, not a retry),

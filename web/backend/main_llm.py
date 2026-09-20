@@ -94,7 +94,16 @@ def read_settings() -> Settings:
 
 
 def persisted_model() -> str | None:
-    """Return the operator-selected model, without breaking inference startup."""
+    """Return the operator-selected model, without breaking inference startup.
+
+    The saved key names a model in LM STUDIO, so it is only an answer while
+    Apollo is wired to one (``managed()``). The file outlives a provider
+    switch — an operator who saved a choice on LM Studio and later pointed
+    ``AGENT_PROVIDER`` at Anthropic would otherwise have the planner, the
+    brief parser and the critic send ``google/gemma-4-e4b`` to Anthropic.
+    """
+    if not managed():
+        return None
     try:
         if _stored_path() is None:
             return None
@@ -142,6 +151,17 @@ def endpoint() -> str:
     if path.endswith("/v1"):
         path = path[:-3]
     return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+def managed() -> bool:
+    """Whether Apollo's LLM is an LM Studio instance this module can manage.
+
+    One definition: the Settings panel, ``persisted_model()`` and the
+    Algorave Mind (which can only ever think with an LM Studio model on
+    the GPU host) all read it, so they cannot disagree about what
+    "configured" means.
+    """
+    return bool(endpoint()) and provider() in {"ollama", "lmstudio"}
 
 
 def _headers() -> dict[str, str]:
@@ -199,7 +219,7 @@ async def list_models() -> list[dict[str, Any]]:
 
 
 async def status_snapshot(user: dict) -> dict[str, Any]:
-    configured = bool(endpoint()) and provider() in {"ollama", "lmstudio"}
+    configured = managed()
     settings = read_settings()
     if not configured:
         return {

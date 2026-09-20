@@ -21,6 +21,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(mind, "_uncertain", False)
     monkeypatch.setattr(mind, "_operation", None)
     monkeypatch.setattr(mind, "_error", None)
+    monkeypatch.setattr(control, "_inflight", 0)
     monkeypatch.setattr(ace, "_lock", asyncio.Lock())
 
 
@@ -56,6 +57,7 @@ def test_the_gateway_has_no_model_actions_or_settings(client, auth_client, monke
 
 
 def test_status_names_the_main_llm(client, auth_client, monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
     monkeypatch.setattr(control, "host", AsyncMock(return_value={"service": "active", "busy": False}))
     main_llm.save_settings(main_llm.Settings(model_key="chosen-model"))
     client.headers["Authorization"] = "Bearer " + _admin_token()
@@ -65,6 +67,7 @@ def test_status_names_the_main_llm(client, auth_client, monkeypatch):
 
 
 def test_infer_publishes_and_forwards_the_main_llm(client, auth_client, monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
     upstream = AsyncMock(return_value={"code": "stack()"})
     monkeypatch.setattr(control, "host", upstream)
     main_llm.save_settings(main_llm.Settings(model_key="chosen-model"))
@@ -79,6 +82,77 @@ def test_infer_publishes_and_forwards_the_main_llm(client, auth_client, monkeypa
     assert client.post("/api/mind/infer", json={"intent": "d", "model": "chosen-model"}).status_code == 200
     assert client.post("/api/mind/infer", json={"intent": "d", "model": "some-other"}).status_code == 422
     assert upstream.await_count == 2
+
+
+def test_status_reports_an_unconfigured_controller_without_asking_it(client, auth_client, monkeypatch):
+    """No host controller is a normal install, answered 200 — never a 503 the panel has to guess at."""
+    monkeypatch.delenv("ACESTEP_CONTROL_URL", raising=False)
+    upstream = AsyncMock(return_value={})
+    monkeypatch.setattr(control, "host", upstream)
+    client.headers["Authorization"] = "Bearer " + _admin_token()
+    body = client.get("/api/mind").json()
+    assert body["configured"] is False and body["can_manage"] is True and body["main_llm"]
+    upstream.assert_not_awaited()
+
+    monkeypatch.setenv("ACESTEP_CONTROL_URL", "http://gpu:8010")
+    monkeypatch.setattr(control, "host", AsyncMock(return_value={"service": "active", "busy": False}))
+    assert client.get("/api/mind").json()["configured"] is True
+
+
+def test_a_url_without_a_token_is_loud_not_unmanaged(monkeypatch):
+    """The same rule as ACE: partial configuration must not read as 'no controller'."""
+    monkeypatch.setenv("ACESTEP_CONTROL_URL", "http://gpu:8010")
+    monkeypatch.setenv("ACESTEP_CONTROL_TOKEN", "short")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(control.host())
+    assert exc.value.status_code == 503 and "token" in exc.value.detail
+    # ...but the unload guard still degrades to False rather than wedging the model.
+    assert asyncio.run(control.inference_pending()) is False
+
+
+def test_infer_refuses_without_an_lm_studio_main_llm(client, auth_client, monkeypatch):
+    """A Claude or Azure name can never be resident on the GPU host: say so, do not 409 forever."""
+    upstream = AsyncMock(return_value={})
+    monkeypatch.setattr(control, "host", upstream)
+    monkeypatch.setenv("AGENT_PROVIDER", "anthropic")
+    monkeypatch.setenv("AGENT_MODEL", "claude-sonnet-5")
+    client.headers["Authorization"] = "Bearer " + _admin_token()
+    response = client.post("/api/mind/infer", json={"intent": "darker"})
+    assert response.status_code == 503 and "LM Studio" in response.json()["detail"]
+    upstream.assert_not_awaited()
+
+
+def test_infer_registers_in_flight_under_the_gate_so_unload_cannot_slip_in(monkeypatch):
+    """The unload guard runs under ``ace_control.gate()``; an answer registers under it too."""
+    async def scenario():
+        monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+        monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
+        monkeypatch.setenv("ACESTEP_CONTROL_URL", "http://gpu:8010")
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def answering(path, method="GET", payload=None):
+            entered.set()
+            await release.wait()
+            return {"code": "stack()"}
+
+        monkeypatch.setattr(control, "host", answering)
+        user = {"caps": sorted(permissions.capabilities_for({permissions.ADMIN_ROLE}))}
+        asking = asyncio.create_task(control.infer({"intent": "darker"}, user))
+        await entered.wait()
+        assert control._inflight == 1
+        assert await control.inference_pending() is True, "in flight from THIS process, no host round-trip needed"
+        release.set()
+        await asking
+        assert control._inflight == 0
+
+        # Registration waits for the gate: while an unload holds it, an ask cannot start.
+        async with control.ace_control.gate():
+            blocked = asyncio.create_task(control.infer({"intent": "darker"}, user))
+            await asyncio.sleep(0)
+            assert control._inflight == 0
+        release.set()
+        await blocked
+    asyncio.run(scenario())
 
 
 def test_inference_pending_reads_the_host_and_degrades_to_false(monkeypatch):

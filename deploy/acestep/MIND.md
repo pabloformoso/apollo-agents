@@ -61,6 +61,13 @@ answer finished on the host first): stopping the unit kills the process that
 could still have been working, so it is the one action that can know. Start and
 inference stay refused until then.
 
+The Mind needs the main LLM to be an LM Studio model: with `AGENT_PROVIDER`
+pointing at Anthropic or Azure, asking it answers 503 naming that, and the
+Settings choice is ignored by every caller until the box is wired back to LM
+Studio. An install without the host controller (`ACESTEP_CONTROL_URL` unset) is
+a normal shape — the panel says "Host controller not configured" and manages
+the model as usual.
+
 There is no shared-GPU opt-in any more. The protocol in the root CLAUDE.md is
 symmetric: unload the main LLM before starting ACE, stop ACE before loading it.
 The ACE supervisor refuses to start while any model is resident in LM Studio.
