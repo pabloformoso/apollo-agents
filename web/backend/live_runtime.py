@@ -87,6 +87,18 @@ class _Bus:
     #: Most recent ``engine_command`` with ``command in {"load","crossfade"}``
     #: so a late viewer can pick up the active deck.
     last_load_command: dict | None = None
+    #: The tail of the reasoning stream — the DJ's final messages, the tools
+    #: it called, the engine's own decisions and warnings — so an OBS
+    #: Browser Source that reconnects mid-set does not come back to a blank
+    #: "why" panel. ``text_delta`` is deliberately NOT cached: the final
+    #: ``live_message`` carries the whole thought, and the frontend fold
+    #: treats a message with no preceding stream as the thought itself.
+    recent_reasoning: list[dict] = field(default_factory=list)
+
+
+#: Which event types the reasoning replay keeps, and how many.
+REASONING_REPLAY_TYPES = frozenset({"live_message", "tool_call", "decision", "critic_warning"})
+REASONING_REPLAY_MAX = 12
 
 
 @dataclass
@@ -150,6 +162,9 @@ class _Registry:
             "crossfade",
         ):
             bus.last_load_command = dict(event)
+        if event_type in REASONING_REPLAY_TYPES:
+            bus.recent_reasoning.append(dict(event))
+            del bus.recent_reasoning[:-REASONING_REPLAY_MAX]
 
     async def subscribe_viewer(
         self, user_id: int, session_id: str, on_event: OnEvent
@@ -178,6 +193,10 @@ class _Registry:
                 )
                 if ev is not None
             ]
+            # The reasoning tail comes last, in the order it was said, so
+            # the panel a reconnecting OBS tab rebuilds reads like the one
+            # the operator has been watching.
+            replay.extend(bus.recent_reasoning)
         for ev in replay:
             try:
                 await on_event(ev)

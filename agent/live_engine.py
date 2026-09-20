@@ -139,6 +139,13 @@ ENDLESS_WARNING      = "endless_warning"
 # regenerate beatgrids for the affected tracks. Carries the two track
 # ids + a ``reason`` enum so the frontend can give actionable guidance.
 CRITIC_WARNING       = "critic_warning"
+# A deterministic pick the ENGINE made — the endless safety net queuing a
+# continuation because the DJ did not answer ``playlist_running_low`` in
+# time. Until this event the audience could not tell a track the model
+# chose from one the fallback chose: both just appeared. The tier
+# (``in_genre`` / ``widened`` / ``recycled``) is what ``_endless_pick``
+# already returns and only ever reached the backend log.
+DECISION             = "decision"
 
 # Human-readable explanations for each ``critic_warning`` reason. The
 # UI can either show these verbatim or map the reason enum to its own
@@ -2049,7 +2056,21 @@ class LiveEngineBrowser:
             )
             self._emit(SESSION_ENDED)
             return True
+        self._emit_decision(pick, tier)
         return False
+
+    def _emit_decision(self, pick: dict, tier: str) -> None:
+        """Say on the wire that the safety net, not the DJ, queued ``pick``."""
+        self._emit(
+            DECISION,
+            kind="endless_pick",
+            tier=tier,
+            picked_by="engine",
+            track={
+                "id": pick.get("id"),
+                "display_name": pick.get("display_name") or pick.get("id"),
+            },
+        )
 
     def _try_endless_extend_inflight(self, current_track: dict | None) -> bool:
         """Run the deterministic fallback BEFORE the deck dies (v3.6).
@@ -2123,6 +2144,7 @@ class LiveEngineBrowser:
                 flush=True,
             )
             return False
+        self._emit_decision(pick, tier)
         return True
 
     def check_stall(self) -> str | None:

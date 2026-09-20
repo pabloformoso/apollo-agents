@@ -45,6 +45,7 @@ import {
   motion,
 } from "@/components/ember/motion";
 import { Banner, toast } from "@/components/ember/feedback";
+import { ReasoningFeed } from "@/components/ember/ReasoningFeed";
 import { useViewerFlag } from "@/lib/viewer";
 import { ModeSwitcher, useStageMode } from "@/components/ember/ModeSwitcher";
 
@@ -484,6 +485,21 @@ function LivePageInner() {
         </aside>
       )}
 
+      {/* Why Apollo does what it does — the DJ's streamed thoughts, the
+          tools it calls, the transition the engine planned. Bottom-right in
+          Audience + Immersive so the OBS Browser Source (and therefore the
+          YouTube stream) carries the reasoning next to the music; the booth
+          has its own panel in the left column. Same events, both surfaces:
+          the viewer WS fans out every reasoning event the primary gets. */}
+      {mode !== "cabin" && (
+        <ReasoningFeed
+          variant="overlay"
+          entries={live.reasoning}
+          thinking={live.thinking}
+          className="fixed bottom-9 right-9 z-20"
+        />
+      )}
+
       <AnimatePresence mode="wait">
         {mode === "audience" && (
           <motion.div
@@ -674,6 +690,12 @@ function LivePageInner() {
                   </div>
                 </div>
               )}
+
+              <ReasoningFeed
+                variant="panel"
+                entries={live.reasoning}
+                thinking={live.thinking}
+              />
 
               <div className="mt-auto">
                 {/* "talk to apollo" header + input form are operator-only —
