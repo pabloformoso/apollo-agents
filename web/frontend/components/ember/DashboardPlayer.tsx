@@ -1,8 +1,7 @@
 "use client";
 
-import { coverUrl } from "@/lib/api";
 import { useIsLiveActive } from "@/lib/live";
-import { usePlayer } from "@/lib/player";
+import { artworkFor, usePlayer } from "@/lib/player";
 import { Crumb, Stripe } from "./primitives";
 
 function clock(seconds: number) {
@@ -11,17 +10,16 @@ function clock(seconds: number) {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, "0")}`;
 }
 
-/** The persistent listening dock for the product home. It stays present even
- * before a track is selected, so the dashboard always has a clear lower edge
- * and the player never feels like a page-specific afterthought. */
+/** The persistent listening dock for the product home — and for Generations,
+ * where a take plays through the same bar a catalog track does. It stays
+ * present even before a track is selected, so the page always has a clear
+ * lower edge and the player never feels like a page-specific afterthought. */
 export function DashboardPlayer() {
   const player = usePlayer();
   const liveActive = useIsLiveActive();
   const track = player.currentTrack;
   const max = player.durationSec > 0 ? player.durationSec : 1;
-  const localCover = track?.cover_url ? coverUrl(track.id) : null;
-  const remoteCover = track?.suno?.cover_url ?? null;
-  const cover = localCover ?? remoteCover;
+  const cover = artworkFor(track);
   const hasQueue = player.queue.length > 1;
 
   return (

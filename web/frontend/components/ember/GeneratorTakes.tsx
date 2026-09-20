@@ -117,11 +117,13 @@ export function playableFor(
   taskId: string,
   genre: string,
   label: string,
+  artworkUrl: string | null = null,
 ): Playable {
   const metas = take.metas ?? {};
   return {
     id: `ace:${taskId}:${take.index}`,
     display_name: label,
+    ...(artworkUrl ? { artwork_url: artworkUrl } : {}),
     bpm: typeof metas.bpm === "number" ? metas.bpm : null,
     // ACE reports keyscale ("C major"); the Camelot conversion is G2's job.
     camelot_key: null,

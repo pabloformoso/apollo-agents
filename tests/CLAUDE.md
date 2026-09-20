@@ -31,3 +31,15 @@ Run: `uv run pytest tests/ -q` (frontend tests live in
 - `LiveEngineBrowser` is the integration surface for engine tests (no
   audio device); drive it with `report_playback_pos` /
   `report_track_ended` pokes.
+
+- **A worktree inherits the main checkout's `.env` at import time.**
+  `web/backend/pipeline.py` imports `agent.run`, which calls
+  `load_dotenv()` at module scope, and `find_dotenv` walks UP from the
+  source file — from `.claude/worktrees/<x>/agent/run.py` it reaches
+  `/home/pablo/code/apollo-agents/.env`. With `ACESTEP_CONTROL_URL` set,
+  every generation release called a controller that was not there (503)
+  and `/api/generator/service` reported itself configured: 163 failures
+  across `test_generator_*` and `test_ace_control` that CI, with no
+  `.env`, never saw (2026-09-20). `tests/web/conftest.py` now deletes the
+  two `ACESTEP_CONTROL_*` variables and the two Azure image variables for
+  every test; a test that wants them sets them itself.

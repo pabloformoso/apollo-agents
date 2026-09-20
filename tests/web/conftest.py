@@ -31,6 +31,35 @@ def isolated_main_llm_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("APOLLO_SESSION_MODEL_SETTINGS_PATH", str(tmp_path / "session-model-settings.json"))
 
 
+@pytest.fixture(autouse=True)
+def no_host_controller(monkeypatch):
+    """Tests run as CI does: no ACE host controller configured.
+
+    The backend loads ``.env`` at import, and ``find_dotenv`` walks UP from
+    the source file — so a worktree under ``.claude/worktrees/`` inherits
+    the main checkout's ``.env``, ``ACESTEP_CONTROL_URL`` included. With it
+    set, every generation release calls a controller that is not there
+    (503) and ``/api/generator/service`` reports itself configured: 163
+    failures that CI never sees (2026-09-20). A test that wants the
+    controller sets the variable itself, after this runs.
+    """
+    monkeypatch.delenv("ACESTEP_CONTROL_URL", raising=False)
+    monkeypatch.delenv("ACESTEP_CONTROL_TOKEN", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_image_api(monkeypatch):
+    """No test may buy a DALL·E image.
+
+    Publishing a take and releasing a generation both schedule a cover in
+    the background, and ``main._generate_artwork`` is gated on these two
+    variables. A developer box that exports them would otherwise have the
+    publish and library suites issuing real Azure image calls.
+    """
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", raising=False)
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     """Point the user DB at an isolated temp file and initialise schema."""

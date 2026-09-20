@@ -82,7 +82,7 @@ from typing import Any, Literal
 from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import ace_control, acestep_client, auth, covers, db, permissions
@@ -965,7 +965,11 @@ def _decoded_take_path(file: str | None) -> str | None:
 
 
 async def _record_release(
-    user_id: int, task_id: str, payload: dict[str, Any], genre_folder: str | None
+    user_id: int,
+    task_id: str,
+    payload: dict[str, Any],
+    genre_folder: str | None,
+    user_prompt: str | None = None,
 ) -> None:
     """Release hook: one ``pending`` generation, keyed by ACE's task id.
 
@@ -975,13 +979,21 @@ async def _record_release(
     ``src_audio_path``, so lineage is queryable without a second shape,
     and it stays the JSON payload even when the request degraded to a
     multipart upload: what was ASKED for is the interesting record.
+
+    ``user_prompt`` is the second field ACE never sees: the user's OWN
+    words, before the genre's style descriptor was prepended. The feed
+    titles the card from it — from the composed caption every techno
+    song would be called "Driving Techno".
     """
+    extra: dict[str, Any] = {"genre_folder": genre_folder}
+    if user_prompt is not None:
+        extra["user_prompt"] = user_prompt
     await _store(
         f"record generation {task_id}",
         db.record_generation,
         task_id,
         user_id,
-        {**payload, "genre_folder": genre_folder},
+        {**payload, **extra},
     )
 
 
@@ -1226,6 +1238,7 @@ async def generator_health(
 @router.post("/api/generator/tasks", dependencies=[Depends(ace_control.generation_access)])
 async def create_generation_task(
     req: GenerationRequest,
+    background: BackgroundTasks,
     current_user: dict = Depends(auth.get_current_user),
 ):
     """Release one generation to ACE-Step. **The only GPU-touching call.**
@@ -1280,7 +1293,21 @@ async def create_generation_task(
     # G6: the library's first row. After this point the record outlives
     # the page — the poll hook fills in the takes.
     await _record_release(
-        current_user["id"], released.task_id, payload, req.genre_folder
+        current_user["id"], released.task_id, payload, req.genre_folder,
+        user_prompt=req.prompt,
+    )
+    # The song's cover, drawn from the user's words in the genre's visual
+    # language, in the BACKGROUND: the image call takes ~20 s and ACE takes
+    # longer, so it is usually on disk before the takes are. Drawn at
+    # release rather than at the done-poll because the poll has no
+    # BackgroundTasks and re-runs every 3 s; a failed task costs one image,
+    # which is the price of a card that never shows a blank. Failures are
+    # logged inside covers and never surface — the publish cover's rule.
+    background.add_task(
+        covers.generate_generation_cover,
+        released.task_id,
+        req.prompt,
+        req.genre_folder,
     )
 
     stats = await _stats_or_none(client)
@@ -2343,10 +2370,42 @@ async def list_generations(
 
     ``limit`` is 1–100 (default 20) and ``offset`` ≥ 0; both are enforced
     by FastAPI, so a 200-item page is a 422 rather than a slow query.
+
+    Each generation also carries ``cover_url`` — the relative URL of its
+    cover once the background render has landed, else ``None`` — the
+    same way ``/api/catalog`` hydrates a track's ``cover_url``.
     """
-    return await asyncio.to_thread(
+    rows = await asyncio.to_thread(
         db.list_generations_by_user, current_user["id"], limit=limit, offset=offset
     )
+    return [_with_cover(row) for row in rows]
+
+
+def _with_cover(generation: dict) -> dict:
+    """Hydrate ``cover_url`` — a fact about the disk, not a column."""
+    return {**generation, "cover_url": covers.generation_cover_url_for(str(generation.get("id") or ""))}
+
+
+@router.get("/api/generator/generations/{generation_id}/cover")
+async def generation_cover(
+    generation_id: str,
+    request: Request,
+    token: str | None = Query(None),
+):
+    """The generation's cover, as a PNG.
+
+    Auth is a bearer header OR ``?token=`` (``_authorize_audio``): an
+    ``<img>`` cannot set a header, the same reason ``/api/tracks/{id}/cover``
+    takes one. Unknown, someone else's and not-yet-drawn all answer 404 —
+    the ``_own_generation`` rule, and "no cover yet" is a normal state the
+    card renders as its stripe.
+    """
+    user = _authorize_audio(request, token)
+    await _own_generation(generation_id, user)
+    path = covers.generation_cover_path(generation_id)
+    if path is None or not path.is_file():
+        raise HTTPException(status_code=404, detail="No cover for this generation")
+    return FileResponse(str(path), media_type="image/png")
 
 
 @router.patch("/api/generator/generations/{generation_id}/takes/{idx}")
@@ -2430,7 +2489,7 @@ async def refresh_generation(
         raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
     except _POLL_DEGRADE_ERRORS as exc:
         print(f"[generator] refresh of {generation_id} degraded: {exc}", flush=True)
-        return {**generation, "degraded": True}
+        return {**_with_cover(generation), "degraded": True}
     except acestep_client.AceStepError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -2474,4 +2533,4 @@ async def refresh_generation(
             await _record_status(current_user["id"], generation_id, "failed")
 
     refreshed = await asyncio.to_thread(db.get_generation, generation_id)
-    return {**(refreshed or generation), "degraded": False}
+    return {**_with_cover(refreshed or generation), "degraded": False}

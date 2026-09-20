@@ -9,7 +9,7 @@ import {
   useState,
 } from "react";
 import type { Track } from "./types";
-import { streamUrl } from "./api";
+import { coverUrl, streamUrl } from "./api";
 
 /**
  * PlayerContext owns a single hidden <audio> element and exposes a tiny API
@@ -24,7 +24,23 @@ import { streamUrl } from "./api";
  * `stream_url` instead. `Track` is assignable to `Playable`, so every
  * existing call site is unchanged.
  */
-export type Playable = Track & { stream_url?: string };
+export type Playable = Track & {
+  stream_url?: string;
+  /** Artwork for something that is not a catalog track — a generation's cover. */
+  artwork_url?: string | null;
+};
+
+/**
+ * The ONE answer to "what picture goes with this": its own artwork, else the
+ * local cover Apollo drew for a published track, else the remote Suno
+ * cover the import kept. Every player dock reads this, so they agree.
+ */
+export function artworkFor(track: Playable | null | undefined): string | null {
+  if (!track) return null;
+  if (track.artwork_url) return track.artwork_url;
+  if (track.cover_url) return coverUrl(track.id);
+  return track.suno?.cover_url ?? null;
+}
 
 /** Where the audio for this item lives. */
 function srcFor(track: Playable): string {

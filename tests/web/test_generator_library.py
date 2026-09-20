@@ -35,7 +35,10 @@ import pytest
 from agent.tools import GENRE_STYLE_PROMPTS
 
 from web.backend import acestep_client as ac
+from fastapi.testclient import TestClient
+
 from web.backend import db, generator
+from web.backend.app import app
 from web.backend.ws_manager import ws_manager
 
 
@@ -311,8 +314,11 @@ def test_the_recorded_request_is_the_actual_outgoing_payload(
     assert request["bpm"] == 140                  # the window centre, pinned
     assert request["batch_size"] == 3
     assert request["inference_steps"] == 8        # the experimental passthrough
-    # The one field ACE never sees, carried so the feed can label the card.
+    # The two fields ACE never sees: the folder so the feed can label the
+    # card, and the user's OWN words so it can title it — the composed
+    # caption opens with the style descriptor.
     assert request["genre_folder"] == "techno"
+    assert request["user_prompt"] == "dark melodic techno, hypnotic"
 
 
 def test_a_done_poll_fills_in_the_takes(auth_client, ace_on, monkeypatch):
@@ -344,7 +350,7 @@ def test_a_stored_take_is_poll_shaped_plus_the_library_fields(
 
     gen = _feed(auth_client)[0]
 
-    assert set(gen) == {"id", "user_id", "created_at", "status", "request", "takes"}
+    assert set(gen) == {"id", "user_id", "created_at", "status", "request", "takes", "cover_url"}
     assert set(gen["takes"][0]) == {
         "index", "file", "prompt", "lyrics", "metas", "seed_value",
         "decoded_path", "state", "published_track_id",
@@ -1034,3 +1040,60 @@ def test_a_corrupt_json_column_degrades_to_an_empty_object(tmp_db):
 
     assert gen["request"] == {}
     assert gen["takes"][0]["metas"] == {}
+
+
+# ══ The cover: one per generation, drawn at release ═══════════════════
+
+
+def test_a_release_schedules_the_generation_cover_from_the_users_words(
+    auth_client, ace_on, monkeypatch
+):
+    """TestClient runs BackgroundTasks after the response, so the call is
+    observable here; the image itself is never bought in tests."""
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        generator.covers, "generate_generation_cover",
+        lambda task_id, prompt, genre: seen.append((task_id, prompt, genre)),
+    )
+    task_id = _release(auth_client, monkeypatch)
+    assert seen == [(task_id, "dark melodic techno, hypnotic", "techno")]
+
+
+def test_the_feed_carries_cover_url_once_the_cover_is_on_disk(
+    auth_client, ace_on, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(generator.covers, "generation_cover_dir", lambda: tmp_path)
+    monkeypatch.setattr(generator.covers, "generate_generation_cover", lambda *a: None)
+    task_id = _release(auth_client, monkeypatch)
+    assert _feed(auth_client)[0]["cover_url"] is None
+
+    (tmp_path / f"{task_id}.png").write_bytes(b"\x89PNG")
+    assert _feed(auth_client)[0]["cover_url"] == f"/api/generator/generations/{task_id}/cover"
+
+
+def test_the_cover_route_serves_this_users_png_and_nothing_else(
+    auth_client, other_client, ace_on, monkeypatch, tmp_path
+):
+    monkeypatch.setattr(generator.covers, "generation_cover_dir", lambda: tmp_path)
+    monkeypatch.setattr(generator.covers, "generate_generation_cover", lambda *a: None)
+    task_id = _release(auth_client, monkeypatch)
+    url = f"/api/generator/generations/{task_id}/cover"
+
+    # No cover yet is a normal 404 — the card shows its stripe.
+    assert auth_client.get(url).status_code == 404
+    (tmp_path / f"{task_id}.png").write_bytes(b"\x89PNG-bytes")
+
+    r = auth_client.get(url)
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/png"
+    assert r.content == b"\x89PNG-bytes"
+
+    # The <img> path: the token in the query string, no header.
+    token = auth_client.headers["Authorization"].split(" ", 1)[1]
+    bare = TestClient(app)
+    assert bare.get(url).status_code == 401
+    assert bare.get(url, params={"token": token}).status_code == 200
+
+    # Someone else's generation: 404, never 403 (the _own_generation rule).
+    assert other_client.get(url).status_code == 404
+    assert auth_client.get("/api/generator/generations/nope/cover").status_code == 404
