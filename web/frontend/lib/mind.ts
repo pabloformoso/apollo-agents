@@ -86,6 +86,30 @@ export const MIND_ENDPOINT = "/api/algorave/mind";
 
 export { autoApplyDecision, diffLines, pushReason, summarizeHumanEdit } from "@algorave/pen";
 
+/**
+ * The scheduler's WHY enums (`WHY` / `B2B_WHY` in the pen module), as
+ * sentences. The enums stay machine strings on purpose — the log and the
+ * tests compare them — but on the strip and on stream "request-in-flight"
+ * is a code word, and "a call is still in flight" is an explanation.
+ */
+const WHY_TEXT: Record<string, string> = {
+  "phrase-boundary": "phrase boundary — the mind's turn",
+  "between-boundaries": "between boundaries",
+  "boundary-already-handled": "this boundary is done",
+  "not-playing": "transport stopped",
+  "human-holds-the-pen": "you hold the pen",
+  "request-in-flight": "a call is still in flight",
+  "b2b-boundary": "b2b — the pen changes hands",
+  "between-flips": "between flips",
+  "flip-already-handled": "this flip is done",
+  "free-mode": "free mode",
+};
+
+export function humanizeWhy(why: string | null | undefined): string | null {
+  if (!why) return null;
+  return WHY_TEXT[why] ?? why.replace(/-/g, " ");
+}
+
 export async function askMind(req: MindRequest): Promise<MindProposal> {
   // The wire shape is the pen module's job: it pins the field names the mind
   // validates by name, caps `recent_reasons`, and emits `b2b` only when true —

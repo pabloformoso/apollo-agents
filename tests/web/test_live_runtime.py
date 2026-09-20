@@ -172,3 +172,39 @@ async def test_subscriber_exception_does_not_break_fan_out(fresh_registry):
     await fresh_registry.publish(1, "s1", {"type": "after_crash"})
 
     assert received == [{"type": "after_crash"}]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_replays_the_reasoning_tail(fresh_registry):
+    """An OBS tab that reconnects mid-set must not come back to a blank
+    "why" panel: the DJ's final messages, tool calls, the engine's decisions
+    and warnings are replayed after the state snapshot, in the order they
+    were said. ``text_delta`` is not kept — the final message is the thought."""
+    from web.backend.live_runtime import REASONING_REPLAY_MAX
+
+    await fresh_registry.publish(1, "s1", {"type": "track_started", "track": {"id": "t1"}})
+    await fresh_registry.publish(1, "s1", {"type": "text_delta", "content": "Hm"})
+    await fresh_registry.publish(1, "s1", {"type": "tool_call", "name": "skip_track", "input": {}})
+    await fresh_registry.publish(1, "s1", {"type": "live_message", "role": "assistant", "content": "Skipping."})
+    await fresh_registry.publish(1, "s1", {"type": "decision", "kind": "endless_pick", "tier": "in_genre"})
+    await fresh_registry.publish(1, "s1", {"type": "critic_warning", "reason": "no_beatgrid_incoming"})
+    await fresh_registry.publish(1, "s1", {"type": "playback_pos"})
+
+    received: list[dict] = []
+
+    async def on_event(ev: dict) -> None:
+        received.append(ev)
+
+    await fresh_registry.subscribe_viewer(1, "s1", on_event)
+    assert [e["type"] for e in received] == [
+        "track_started", "tool_call", "live_message", "decision", "critic_warning",
+    ]
+
+    # Bounded: a night-long set keeps only the tail.
+    for i in range(REASONING_REPLAY_MAX + 5):
+        await fresh_registry.publish(1, "s1", {"type": "tool_call", "name": f"t{i}", "input": {}})
+    received.clear()
+    await fresh_registry.subscribe_viewer(1, "s1", on_event)
+    tail = [e for e in received if e["type"] == "tool_call"]
+    assert len(tail) == REASONING_REPLAY_MAX
+    assert tail[-1]["name"] == f"t{REASONING_REPLAY_MAX + 4}"

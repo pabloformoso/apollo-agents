@@ -61,6 +61,12 @@ import {
   applyPitchNudge,
 } from "./crossfade_timing";
 import type { Greeting } from "./greetings";
+import {
+  EMPTY_REASONING,
+  reduceReasoning,
+  type ReasoningEntry,
+  type ReasoningState,
+} from "./reasoning";
 
 /**
  * v3.4 — synthetic "audio element" shim VisualLayer reads to drive its
@@ -198,6 +204,15 @@ export interface UseLiveSessionApi {
    * doesn't accumulate dozens of stale warnings.
    */
   criticWarnings: CriticWarning[];
+  /**
+   * Why Apollo does what it does — the model's streamed thoughts, the tools
+   * it calls, the transitions the engine plans, the safety-net picks. See
+   * ``lib/reasoning.ts``. Rendered by ``ReasoningFeed`` on /live for the
+   * operator AND the OBS viewer, since both receive the same events.
+   */
+  reasoning: ReasoningEntry[];
+  /** True while a DJ turn is streaming — between its first token and its final message. */
+  thinking: boolean;
   /**
    * Drop a single warning from ``criticWarnings`` (typically wired to
    * the X button on the banner). Safe to call with an id that no
@@ -511,6 +526,41 @@ interface ServerCriticWarning {
   message?: string;
 }
 
+// The reasoning stream. ``run_agent_streaming`` publishes these through the
+// live emitter on every DJ turn (web/backend/pipeline.py); they reach the
+// operator and every OBS viewer alike. ``decision`` is the engine's own
+// verdict when its safety net — not the model — queued the continuation
+// (agent/live_engine.py). All four fold into ``reasoning`` and nothing else.
+interface ServerTextDelta {
+  type: "text_delta";
+  content: string;
+}
+
+interface ServerToolCall {
+  type: "tool_call";
+  name: string;
+  input: Record<string, unknown>;
+}
+
+interface ServerToolResult {
+  type: "tool_result";
+  name: string;
+  result: string;
+}
+
+interface ServerToolProgress {
+  type: "tool_progress";
+  name: string;
+}
+
+interface ServerDecision {
+  type: "decision";
+  kind: "endless_pick";
+  tier?: string;
+  track?: { id?: string; display_name?: string } | null;
+  picked_by?: string;
+}
+
 type ServerEvent =
   | ServerLiveStateMessage
   | ServerEngineEvent
@@ -521,6 +571,11 @@ type ServerEvent =
   | ServerEndlessModeMessage
   | ServerYouTubeStatusMessage
   | ServerCriticWarning
+  | ServerTextDelta
+  | ServerToolCall
+  | ServerToolResult
+  | ServerToolProgress
+  | ServerDecision
   | ServerError;
 
 const COMMAND_TEXT: Record<LiveCommand["type"], string> = {
@@ -631,6 +686,9 @@ export function useLiveSession(
   // v3.0.1 — see ``CriticWarning`` type. Cap at 10 (CRITIC_WARNINGS_MAX
   // below). The dismissCriticWarning callback drops by id.
   const [criticWarnings, setCriticWarnings] = useState<CriticWarning[]>([]);
+  // The reasoning feed — a pure fold over the wire events (lib/reasoning.ts),
+  // capped there at REASONING_MAX so a night-long broadcast cannot grow it.
+  const [reasoning, setReasoning] = useState<ReasoningState>(EMPTY_REASONING);
   const [error, setError] = useState<string | null>(null);
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [currentTrackTime, setCurrentTrackTime] = useState(0);
@@ -1524,6 +1582,10 @@ export function useLiveSession(
         break;
       }
       case "approaching_crossfade": {
+        // The planned transition — style, phrase lock, when the bass drops —
+        // rides in ``phase_lock``. The scheduler consumes it below; the feed
+        // SAYS it (once per next-track, deduped in the reducer).
+        setReasoning((prev) => reduceReasoning(prev, evt));
         if (evt.next_track) {
           setExplicitNextTrack(evt.next_track);
           // v3.4 — kick off decode of the incoming track now (~30 s
@@ -1646,6 +1708,20 @@ export function useLiveSession(
         break;
       case "live_message":
         appendLog({ role: evt.role, text: evt.content, ts: Date.now() });
+        // Closes the thought that ``text_delta`` streamed (or IS the thought,
+        // when a late viewer gets it from the replay cache with no stream).
+        setReasoning((prev) => reduceReasoning(prev, evt));
+        break;
+      case "text_delta":
+      case "tool_call":
+      case "tool_result":
+      case "decision":
+        setReasoning((prev) => reduceReasoning(prev, evt));
+        break;
+      case "tool_progress":
+        // Progress ticks of a long tool: nothing to say yet, but the turn is
+        // still alive, so keep the thinking indicator honest.
+        setReasoning((prev) => (prev.thinking ? prev : { ...prev, thinking: true }));
         break;
       case "dj_chat":
         // Cap the feed at the most recent 200 entries so a long
@@ -1687,10 +1763,14 @@ export function useLiveSession(
             ? next.slice(-CRITIC_WARNINGS_MAX)
             : next;
         });
+        // ...and it is a reason too: "this fade is linear because Track X
+        // has no beatgrid" belongs on the same feed as the DJ's choices.
+        setReasoning((prev) => reduceReasoning(prev, evt));
         break;
       }
       case "error":
         setError(evt.message || "Live session error");
+        setReasoning((prev) => reduceReasoning(prev, evt));
         break;
       default:
         break;
@@ -2269,6 +2349,8 @@ export function useLiveSession(
       djChat,
       criticWarnings,
       dismissCriticWarning,
+      reasoning: reasoning.entries,
+      thinking: reasoning.thinking,
       error,
       autoplayBlocked,
       audioRef,
@@ -2303,6 +2385,7 @@ export function useLiveSession(
       djChat,
       criticWarnings,
       dismissCriticWarning,
+      reasoning,
       error,
       autoplayBlocked,
       sendCommand,

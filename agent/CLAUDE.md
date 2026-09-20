@@ -82,6 +82,18 @@
 - **Tool error strings coach the model**: on a bad id / ineligible
   track, tell the LLM exactly which tool to re-run (`pick_next_track`)
   — never a bare "not found".
+- **The engine says when ITS safety net picked (`decision` event,
+  2026-09-20)**: both endless fallbacks (`_try_endless_extend_inflight`
+  and the end-of-track `_maybe_end_or_extend`) emit
+  `{"type":"decision","kind":"endless_pick","tier":…,"track":…,
+  "picked_by":"engine"}` after a successful append, with the tier
+  `_endless_pick` already returned. Until then a track the model chose and
+  one the fallback chose looked identical from the browser — both just
+  appeared — and the tier only reached the backend log. A rejected pick
+  emits nothing: nothing was queued, so nothing is claimed. The frontend
+  folds it into the reasoning feed (`web/frontend/lib/reasoning.ts`) next
+  to the model's own `tool_call`s; the two are different sentences on
+  purpose.
 
 ## Known issues / gotchas
 

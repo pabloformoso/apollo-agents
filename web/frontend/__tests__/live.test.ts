@@ -2858,3 +2858,74 @@ describe("playback_pos deck terms", () => {
     }
   });
 });
+
+// ── the reasoning feed ──────────────────────────────────────────────────
+// The four events below were already on the wire (run_agent_streaming
+// publishes them through the live emitter) and used to fall through
+// ``default: break``. Now they fold into ``reasoning`` — the operator's
+// booth panel and the OBS overlay read the same list.
+describe("reasoning — the DJ's thinking reaches the hook", () => {
+  it("folds text_delta / tool_call / tool_result / live_message into entries", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-reasoning"));
+    await flushOpen();
+    act(() => {
+      const ws = FakeWebSocket.lastInstance!;
+      ws.pushServerEvent({ type: "text_delta", content: "Darker was asked for. " });
+      ws.pushServerEvent({ type: "tool_call", name: "pick_next_track", input: { bpm_min: 74, bpm_max: 82, key: "9A" } });
+      ws.pushServerEvent({ type: "tool_result", name: "pick_next_track", result: "| id |\n|---|\n| a |\n| b |" });
+      ws.pushServerEvent({ type: "tool_call", name: "extend_set", input: { track_id: "a" } });
+      ws.pushServerEvent({ type: "tool_result", name: "extend_set", result: "Queued 'A' at position 2." });
+      // The second turn streams its text, then the runner's final message
+      // repeats that same text: one thought, not two.
+      ws.pushServerEvent({ type: "text_delta", content: "Going darker." });
+      ws.pushServerEvent({ type: "live_message", role: "assistant", content: "Going darker." });
+    });
+    expect(result.current.reasoning.map((e) => e.kind)).toEqual([
+      "thought", "action", "outcome", "action", "outcome", "thought",
+    ]);
+    expect(result.current.reasoning[5].text).toBe("Going darker.");
+    expect(result.current.reasoning[1].detail).toBe("74–82 BPM · key 9A");
+    expect(result.current.thinking).toBe(false);
+    // The command log is unchanged by any of it except the final message.
+    expect(result.current.log).toHaveLength(1);
+  });
+
+  it("is thinking while a turn streams and stops on the final message", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-thinking"));
+    await flushOpen();
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({ type: "text_delta", content: "Hm" });
+    });
+    expect(result.current.thinking).toBe(true);
+    act(() => {
+      FakeWebSocket.lastInstance!.pushServerEvent({ type: "live_message", role: "assistant", content: "Hm." });
+    });
+    expect(result.current.thinking).toBe(false);
+  });
+
+  it("says the planned transition and the engine's own decisions", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-transition"));
+    await flushOpen();
+    act(() => {
+      const ws = FakeWebSocket.lastInstance!;
+      ws.pushServerEvent({
+        type: "approaching_crossfade",
+        next_track: { id: "t2", display_name: "Quiet Ember" },
+        seconds_remaining: 20,
+        phase_lock: { transition_style: "bass_swap", phrase_tier: "16-bar", bass_swap: { drop_at_incoming_sec: 12 } },
+      });
+      ws.pushServerEvent({ type: "decision", kind: "endless_pick", tier: "recycled", track: { id: "t9", display_name: "Nine" } });
+      ws.pushServerEvent({
+        type: "critic_warning", kind: "phase_lock_fallback", reason: "no_beatgrid_incoming",
+        message: "Incoming track has no beatgrid — linear fade.",
+      });
+    });
+    expect(result.current.reasoning.map((e) => [e.kind, e.text])).toEqual([
+      ["transition", "Bass swap into Quiet Ember"],
+      ["decision", "Safety net queued Nine"],
+      ["warning", "Incoming track has no beatgrid — linear fade."],
+    ]);
+    // The warning still reaches its own list too.
+    expect(result.current.criticWarnings).toHaveLength(1);
+  });
+});
