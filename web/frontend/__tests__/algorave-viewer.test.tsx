@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import * as React from "react";
 import { VIEWER_PARAM, useViewerFlag, viewerUrlFor } from "@/lib/viewer";
-import { fetchRun, publishRun, readRunId, resolveRunId } from "@/lib/algorave-run";
+import { HISTORY_MAX, fetchRun, lastApplied, publishRun, readRunId, recordChange, resolveRunId } from "@/lib/algorave-run";
 
 afterEach(() => {
   cleanup();
@@ -101,6 +101,7 @@ describe("the run mirror", () => {
       barsNow: 8,
       phraseBars: 8,
       reason: "sparser",
+      history: [], thinking: false, intent: "", model: null,
     });
     const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("/api/algorave/run?id=run-1");
@@ -112,6 +113,7 @@ describe("the run mirror", () => {
     await expect(
       publishRun("run-1", {
         buffer: "x", pen: "human", barsNow: 0, phraseBars: 8, reason: "",
+        history: [], thinking: false, intent: "", model: null,
       }),
     ).resolves.toBeUndefined();
   });
@@ -132,6 +134,57 @@ describe("the run mirror", () => {
     ));
     expect(await fetchRun("run-1")).toEqual({
       buffer: 's("cp")', pen: "mind", barsNow: 16, phraseBars: 4, reason: "r",
+      history: [], thinking: false, intent: "", model: null,
     });
+  });
+
+  it("reads the applied history — the reason for the code that IS playing", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          buffer: "x", pen: "mind", barsNow: 16, phraseBars: 8, reason: "",
+          thinking: true, intent: "darker", model: "google/gemma-4-e4b",
+          history: [
+            { source: "mind", bar: 8, reason: "sparser hats", model: "google/gemma-4-e4b", added: 1, removed: 1, lines: ['s("hh*4")'], ts: 1 },
+            "not a change",
+            { source: "human", bar: 12, reason: "human: +1 line", lines: ["x"] },
+          ],
+        }),
+        { status: 200 },
+      ),
+    ));
+    const snap = await fetchRun("run-1");
+    expect(snap?.thinking).toBe(true);
+    expect(snap?.intent).toBe("darker");
+    expect(snap?.history).toHaveLength(2);
+    expect(lastApplied(snap!.history)).toMatchObject({ source: "human", bar: 12, added: 1, removed: 0 });
+  });
+});
+
+describe("recordChange — one shape for every path that changes the room", () => {
+  const diff = [
+    { type: "same" as const, text: "stack(" },
+    { type: "del" as const, text: '  s("hh*8")' },
+    { type: "add" as const, text: '  s("hh*4")' },
+    { type: "add" as const, text: "  " },
+  ];
+
+  it("derives the counts and the highlighted lines from the diff", () => {
+    const h = recordChange([], { source: "mind", bar: 8.7, reason: " sparser hats ", model: "m", diff }, 42);
+    expect(h).toEqual([
+      { source: "mind", bar: 8, reason: "sparser hats", model: "m", added: 2, removed: 1, lines: ['s("hh*4")'], ts: 42 },
+    ]);
+  });
+
+  it("is bounded and non-mutating", () => {
+    const first = recordChange([], { source: "human", bar: 0, reason: "a", model: null, diff: [] });
+    let h = first;
+    for (let i = 0; i < HISTORY_MAX + 3; i++) {
+      h = recordChange(h, { source: "mind", bar: i, reason: `r${i}`, model: null, diff: [] });
+    }
+    expect(h).toHaveLength(HISTORY_MAX);
+    expect(first).toHaveLength(1);
+    expect(lastApplied(h)?.reason).toBe(`r${HISTORY_MAX + 2}`);
+    expect(lastApplied([])).toBeNull();
   });
 });

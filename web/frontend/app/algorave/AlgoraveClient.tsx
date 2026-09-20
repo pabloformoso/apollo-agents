@@ -29,13 +29,16 @@ import { loadSession, saveSession } from "@/lib/algorave-persist";
 import { boot, type StrudelModule } from "@/lib/strudel";
 import {
   fetchRun,
+  lastApplied,
   publishRun,
   readRunId,
+  recordChange,
   resolveRunId,
+  type AppliedChange,
   type RunSnapshot,
 } from "@/lib/algorave-run";
 import { useViewerFlag, viewerUrlFor } from "@/lib/viewer";
-import { MindError, askMind, autoApplyDecision, diffLines, fetchMindModels, pushReason, summarizeHumanEdit } from "@/lib/mind";
+import { MindError, askMind, autoApplyDecision, diffLines, fetchMindModels, humanizeWhy, pushReason, summarizeHumanEdit } from "@/lib/mind";
 import type { MindModels } from "@/lib/mind";
 import { MindServicePanel } from "@/components/ember/MindServicePanel";
 import {
@@ -67,6 +70,22 @@ const KEYS = [
 /** Cycles per second at 4/4 — one cycle is one bar, which is what the pen counts. */
 const cpsFor = (bpm: number) => bpm / 60 / 4;
 
+/**
+ * The buffer, line by line, with the lines the last change ADDED lit up.
+ * An audience sees text mutate; this shows them what moved. Matching is by
+ * trimmed text — the diff is line-based, so that is exactly what changed.
+ */
+function highlightLines(buffer: string, added: string[]): React.ReactNode {
+  if (added.length === 0) return buffer;
+  const hot = new Set(added);
+  return buffer.split("\n").map((line, i, all) => (
+    <span key={i} data-added={hot.has(line.trim()) ? "1" : undefined} className={hot.has(line.trim()) ? "text-ok" : undefined}>
+      {line}
+      {i < all.length - 1 ? "\n" : ""}
+    </span>
+  ));
+}
+
 interface Proposal {
   code: string;
   reason: string;
@@ -75,6 +94,8 @@ interface Proposal {
   diff: DiffRow[];
   /** True when the scheduler asked, false when the human clicked. */
   scheduled: boolean;
+  /** Which model answered — carried so a hand-applied proposal is recorded with it. */
+  model: string | null;
 }
 
 /**
@@ -127,6 +148,14 @@ export function AlgoraveClient() {
   const [proposal, setProposal] = useState<Proposal | null>(null);
   const [mindError, setMindError] = useState<MindError | null>(null);
   const [reasons, setReasons] = useState<string[]>([]);
+  /**
+   * What reached the room and why — the mind's applied answers and the
+   * human's own edits, with the lines each added. `reasons` above is what
+   * the MIND is told; this is what the ROOM is told. It is rendered in every
+   * mode and mirrored to the OBS viewer, so the reason sits next to the code
+   * that is playing rather than vanishing the moment it is applied.
+   */
+  const [history, setHistory] = useState<AppliedChange[]>([]);
 
   // --- turn taking (S6) -----------------------------------------------------
   const [pen, setPen] = useState<PenHolder>("human");
@@ -180,8 +209,12 @@ export function AlgoraveClient() {
       barsNow,
       phraseBars,
       reason: proposal?.reason ?? "",
+      history,
+      thinking,
+      intent,
+      model: answeredBy,
     });
-  }, [viewerResolved, isViewer, runId, buffer, pen, barsNow, phraseBars, proposal]);
+  }, [viewerResolved, isViewer, runId, buffer, pen, barsNow, phraseBars, proposal, history, thinking, intent, answeredBy]);
 
   // --- genre, key and live validation --------------------------------------
   // The genre and key are not decoration: they are what the validator checks
@@ -407,6 +440,9 @@ export function AlgoraveClient() {
           if (summary) {
             setReasons((r) => pushReason(r, summary) as string[]);
             note(barsRef.current, `${summary} — the mind will be told`);
+            const humanDiff = diffLines(lastEvaluated.current, code) as DiffRow[];
+            const at = barsRef.current;
+            setHistory((h) => recordChange(h, { source: "human", bar: at, reason: summary, model: null, diff: humanDiff }));
           }
         }
         lastEvaluated.current = code;
@@ -469,8 +505,9 @@ export function AlgoraveClient() {
           setBuffer(out.code);
           void evaluate(out.code);
           note(at, `mind applied · ${out.reason.slice(0, 60)}`);
+          setHistory((h) => recordChange(h, { source: "mind", bar: at, reason: out.reason, model: out.model, diff }));
         } else {
-          setProposal({ code: out.code, reason: out.reason, seen, diff, scheduled });
+          setProposal({ code: out.code, reason: out.reason, seen, diff, scheduled, model: out.model });
           if (scheduled) note(at, `held · ${tie.why}`);
         }
       } catch (err) {
@@ -570,9 +607,15 @@ export function AlgoraveClient() {
     setBuffer(proposal.code);
     setProposal(null);
     void evaluate(proposal.code);
+    const at = barsRef.current;
+    setHistory((h) =>
+      recordChange(h, { source: "mind", bar: at, reason: proposal.reason, model: proposal.model, diff: proposal.diff }),
+    );
   }, [proposal, evaluate]);
 
   const playing = phase === "playing";
+  /** The change the room is hearing right now. */
+  const applied = lastApplied(history);
   const tie = proposal
     ? autoApplyDecision({ askedWith: proposal.seen, current: buffer })
     : null;
@@ -587,7 +630,7 @@ export function AlgoraveClient() {
       nextBoundaryBar={playing ? (nextBoundaryBar(barsNow, phraseBars) as number) : null}
       barsToFlip={b2b && playing ? (barsUntilFlip(barsNow, b2bBars) as number) : null}
       working={thinking ? intent : null}
-      why={playing ? why : null}
+      why={playing ? humanizeWhy(why) : null}
       onTogglePen={handTheP}
       onToggleB2b={() => setB2b((v) => !v)}
       b2b={b2b}
@@ -599,8 +642,27 @@ export function AlgoraveClient() {
       data-testid="code-display"
       className="font-mono text-ember-text whitespace-pre-wrap break-words"
     >
-      {buffer}
+      {highlightLines(buffer, applied?.lines ?? [])}
     </pre>
+  );
+
+  /** The reason for the code the room is hearing — shown, not logged. */
+  const whyLine = (
+    <div data-testid="why-line" className="flex flex-col gap-1">
+      {applied ? (
+        <>
+          <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+            bar {applied.bar} · {applied.source === "mind" ? "the mind" : "you"} · +{applied.added} −{applied.removed}
+            {applied.model ? ` · ${applied.model}` : ""}
+          </span>
+          <p className={"font-display italic text-2xl leading-snug " + (applied.source === "mind" ? "text-ok" : "text-cream")}>
+            {applied.reason || "no reason given"}
+          </p>
+        </>
+      ) : (
+        <p className="font-display italic text-mute text-base">nothing has changed yet</p>
+      )}
+    </div>
   );
 
   const numberField = (
@@ -822,6 +884,29 @@ export function AlgoraveClient() {
         )}
       </div>
 
+      {/* What reached the room, newest first. The scheduler log below says
+          WHEN the mind was asked; this says WHAT changed and WHY. */}
+      <div data-testid="why-history" className="flex flex-col gap-1.5 border-t border-line pt-3">
+        <span className="font-mono uppercase tracking-mono text-[10px] text-faint">
+          Why — what changed
+        </span>
+        {history.length === 0 ? (
+          <span className="font-mono text-[10.5px] text-faint">nothing applied yet</span>
+        ) : (
+          [...history].reverse().map((h, i) => (
+            <div key={`${h.ts}-${i}`} className={"flex flex-col " + (i === 0 ? "" : "opacity-60")}>
+              <span className="font-mono text-[9.5px] uppercase tracking-mono text-faint">
+                bar {h.bar} · {h.source === "mind" ? "mind" : "you"} · +{h.added} −{h.removed}
+                {h.model ? ` · ${h.model}` : ""}
+              </span>
+              <span className={"font-display italic text-sm " + (h.source === "mind" ? "text-ok" : "text-ember-text")}>
+                {h.reason || "no reason given"}
+              </span>
+            </div>
+          ))
+        )}
+      </div>
+
       <div
         data-testid="scheduler-log"
         className="flex flex-col gap-1 font-mono text-[10.5px] text-faint max-h-[220px] overflow-y-auto"
@@ -954,16 +1039,56 @@ export function AlgoraveClient() {
           )}
         </div>
 
-        {mirror?.reason && (
-          <p className="font-display italic text-mute text-lg">{mirror.reason}</p>
+        {/* The reason for the code that IS playing, with the lines it added lit
+            up below — not the pending proposal's, which was empty at exactly
+            the moment the music changed. */}
+        {(() => {
+          const now = mirror ? lastApplied(mirror.history) : null;
+          return now ? (
+            <div data-testid="viewer-why" className="flex flex-col gap-1">
+              <span className="font-mono uppercase tracking-mono text-[10.5px] text-faint">
+                bar {now.bar} · {now.source === "mind" ? "the mind" : "the human"} · +{now.added} −{now.removed}
+                {now.model ? ` · ${now.model}` : ""}
+              </span>
+              <p className={"font-display italic text-2xl " + (now.source === "mind" ? "text-ok" : "text-cream")}>
+                {now.reason || "no reason given"}
+              </p>
+            </div>
+          ) : null;
+        })()}
+
+        {mirror?.thinking && (
+          <p data-testid="viewer-thinking" className="font-display italic text-mute text-lg animate-pulse">
+            the mind is listening{mirror.intent ? ` — “${mirror.intent}”` : ""}
+          </p>
+        )}
+        {!mirror?.thinking && mirror?.reason && (
+          <p data-testid="viewer-proposal" className="font-display italic text-mute text-lg">
+            proposing: {mirror.reason}
+          </p>
         )}
 
         <pre
           data-testid="viewer-code"
           className="font-mono text-ember-text text-lg leading-relaxed whitespace-pre-wrap break-words"
         >
-          {mirror?.buffer ?? "waiting for the set to start…"}
+          {mirror
+            ? highlightLines(mirror.buffer, lastApplied(mirror.history)?.lines ?? [])
+            : "waiting for the set to start…"}
         </pre>
+
+        {mirror && mirror.history.length > 1 && (
+          <ol data-testid="viewer-history" className="flex flex-col gap-1 opacity-70">
+            {[...mirror.history].reverse().slice(1).map((h, i) => (
+              <li key={`${h.ts}-${i}`} className="font-display italic text-mute text-base">
+                <span className="font-mono not-italic text-[10px] uppercase tracking-mono text-faint mr-2">
+                  bar {h.bar} · {h.source === "mind" ? "mind" : "human"}
+                </span>
+                {h.reason}
+              </li>
+            ))}
+          </ol>
+        )}
       </main>
     );
   }
@@ -1098,6 +1223,7 @@ export function AlgoraveClient() {
         {mode === "audience" && (
           <div className="flex flex-col gap-5">
             {strip}
+            {whyLine}
             <div className="bg-surf border border-line rounded-md p-8 text-lg leading-relaxed">
               {codeView}
             </div>
@@ -1107,6 +1233,7 @@ export function AlgoraveClient() {
         {mode === "immersive" && (
           <div className="flex-1 flex flex-col items-center justify-center gap-6 text-xl leading-relaxed">
             {codeView}
+            {whyLine}
             {thinking && (
               <p className="font-display italic text-mute text-base">
                 the mind is listening · {elapsed}s

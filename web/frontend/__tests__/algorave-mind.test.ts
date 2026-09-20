@@ -13,6 +13,7 @@ import {
   autoApplyDecision,
   fetchMindModels,
 } from "@/lib/mind";
+import { humanizeWhy } from "@/lib/mind";
 import { diffLines } from "@algorave/pen";
 
 afterEach(() => {
@@ -199,5 +200,20 @@ describe("fetchMindModels", () => {
   it("survives a transport failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("offline"); }));
     expect(await fetchMindModels()).toBeNull();
+  });
+});
+
+describe("humanizeWhy — the scheduler's enums as sentences", () => {
+  it("translates every WHY and B2B_WHY the pen module emits", () => {
+    expect(humanizeWhy("request-in-flight")).toBe("a call is still in flight");
+    expect(humanizeWhy("human-holds-the-pen")).toBe("you hold the pen");
+    expect(humanizeWhy("phrase-boundary")).toBe("phrase boundary — the mind's turn");
+    expect(humanizeWhy("b2b-boundary")).toBe("b2b — the pen changes hands");
+  });
+
+  it("degrades an unknown enum to readable words rather than hiding it", () => {
+    expect(humanizeWhy("some-new-state")).toBe("some new state");
+    expect(humanizeWhy(null)).toBeNull();
+    expect(humanizeWhy("")).toBeNull();
   });
 });

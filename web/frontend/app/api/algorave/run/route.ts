@@ -28,14 +28,57 @@
  */
 import { NextResponse } from "next/server";
 
+/** Mirrors `AppliedChange` in lib/algorave-run.ts — validated here because it arrives from the network. */
+interface StoredChange {
+  source: "human" | "mind";
+  bar: number;
+  reason: string;
+  model: string | null;
+  added: number;
+  removed: number;
+  lines: string[];
+  ts: number;
+}
+
 export interface RunState {
   buffer: string;
   pen: "human" | "mind";
   barsNow: number;
   phraseBars: number;
-  /** The mind's last reason, so the audience can read what changed and why. */
+  /** The PENDING proposal's reason — what the mind would play next. */
   reason: string;
+  /** What already reached the room, oldest first: the reason for the code that IS playing. */
+  history: StoredChange[];
+  thinking: boolean;
+  intent: string;
+  model: string | null;
   updatedAt: number;
+}
+
+const HISTORY_MAX = 6;
+const LINES_MAX = 24;
+const TEXT_MAX = 400;
+
+function text(v: unknown, max = TEXT_MAX): string {
+  return typeof v === "string" ? v.slice(0, max) : "";
+}
+
+function readChange(raw: unknown): StoredChange | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  const lines = Array.isArray(o.lines)
+    ? o.lines.filter((l): l is string => typeof l === "string").slice(0, LINES_MAX).map((l) => l.slice(0, 300))
+    : [];
+  return {
+    source: o.source === "human" ? "human" : "mind",
+    bar: typeof o.bar === "number" && o.bar >= 0 ? Math.floor(o.bar) : 0,
+    reason: text(o.reason),
+    model: typeof o.model === "string" ? o.model.slice(0, 120) : null,
+    added: typeof o.added === "number" && o.added >= 0 ? o.added : lines.length,
+    removed: typeof o.removed === "number" && o.removed >= 0 ? o.removed : 0,
+    lines,
+    ts: typeof o.ts === "number" ? o.ts : 0,
+  };
 }
 
 /** Bounded so a long-lived server cannot accumulate abandoned runs. */
@@ -98,7 +141,13 @@ export async function POST(request: Request) {
     pen: o.pen === "mind" ? "mind" : "human",
     barsNow: typeof o.barsNow === "number" && o.barsNow >= 0 ? o.barsNow : 0,
     phraseBars: typeof o.phraseBars === "number" && o.phraseBars > 0 ? o.phraseBars : 8,
-    reason: typeof o.reason === "string" ? o.reason : "",
+    reason: text(o.reason),
+    history: Array.isArray(o.history)
+      ? o.history.map(readChange).filter((c): c is StoredChange => c !== null).slice(-HISTORY_MAX)
+      : [],
+    thinking: o.thinking === true,
+    intent: text(o.intent, 200),
+    model: typeof o.model === "string" ? o.model.slice(0, 120) : null,
     updatedAt: Date.now(),
   });
 
