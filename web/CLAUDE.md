@@ -268,6 +268,26 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   `playback_pos` every ~250 ms and `track_ended`); `/live/viewer` =
   read-only follower (OBS). Viewers never send. A wrongly-primary OBS
   page tears the session down on disconnect (v3.6.2 fix).
+- **The reasoning feed (2026-09-20) — `lib/reasoning.ts` +
+  `ReasoningFeed`.** The DJ's `text_delta` / `tool_call` / `tool_result`
+  were ALWAYS on both live sockets (`run_agent_streaming` emits through the
+  live emitter, which fans out to viewers) and `useLiveSession` dropped
+  them at `default: break`. They now fold — pure reducer, tested without a
+  socket — into `live.reasoning` + `live.thinking`, together with the
+  engine's verdicts that were computed and never said: the transition
+  style in `approaching_crossfade.phase_lock` (announced once per next
+  track), `critic_warning`, and the new `decision` event. The vocabulary
+  turns arguments into sentences (`pick_next_track(bpm_min, bpm_max,
+  key)` → "Searching the catalog … 74–82 BPM · key 9A"); `emit_chat` is
+  hidden because it is already the chat feed. A streamed thought stays
+  `open` until the turn's `live_message`, which CLOSES it instead of
+  repeating it; a `live_message` with no stream before it — the OBS
+  replay case — IS the thought. The panel is the booth's; the overlay is
+  bottom-right in Audience + Immersive so the OBS Browser Source, and so
+  the YouTube stream, carries the WHY. `live_runtime` replays the last 12
+  reasoning events (never `text_delta`) after the state snapshot, so a
+  reconnecting OBS tab does not come back to a blank panel. Do not add a
+  second feed for a new kind of reason: add a `case` to the reducer.
 - **Server-side stall watchdog** (v3.6.3, `app.py` + engine
   `check_stall`): the browser engine is ping-driven, so a frozen tab
   wedges the set; the watchdog synthesises the missing `track_ended`.
@@ -769,6 +789,20 @@ silent page: **structural checks pass while the music is wrong.**
 
 ## The OBS view (§11 S8)
 
+- **The mirror carries WHY, for the code that IS playing (2026-09-20).**
+  `RunSnapshot.reason` is the PENDING proposal's reason and was the only
+  one mirrored — empty at exactly the moment the music changed, so the
+  OBS view showed a reason for code the room was not hearing. The
+  snapshot now also carries `history` (`AppliedChange[]`, bounded at
+  `HISTORY_MAX`): every change that reached the room — the mind's applied
+  answers AND the human's edits — with its bar, model, ±counts and the
+  added lines, which the code view lights up. One `recordChange` derives
+  all of that from the diff, so the auto-apply path, a hand-clicked Apply
+  and a human edit record the same shape. `thinking` + `intent` let the
+  viewer say "the mind is listening — <intent>"; `model` says who
+  answered. The route validates and clips every field: it arrives from a
+  browser. `humanizeWhy` turns the scheduler's enums into sentences on
+  the strip; the enums themselves stay machine strings in the log.
 - **`afterFiles` rewrites beat DYNAMIC routes, not static ones.** `next.config`
   rewrites `/api/:path*` to the FastAPI backend, and a `rewrites()` returning an
   array is `afterFiles` — checked AFTER static filesystem routes but BEFORE

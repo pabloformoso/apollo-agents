@@ -13,6 +13,22 @@ Apollo turns a sentence such as “a dark, patient techno set that peaks after m
 
 The product is called **Apollo**. This repository is `apollo-agents`.
 
+## See it in action
+
+<!-- Replace VIDEO_ID (twice) with the YouTube id of the recorded showcase. -->
+[![Apollo — a live set, with its reasoning on screen](https://img.youtube.com/vi/VIDEO_ID/maxresdefault.jpg)](https://www.youtube.com/watch?v=VIDEO_ID)
+
+Five minutes, one click: Apollo reads a brief, curates a set, takes the
+booth and performs it — and says **why** at every step. The feed on the
+right of the stream is the DJ thinking: which tempo and key it searched
+for, which transition it planned and where the bass drops, when its
+safety net stepped in instead. The second half is the Algorave: live
+coding with the Mind on the same buffer, each rewrite with its reason.
+
+The script for that video, and for showing Apollo to a room, is
+[`docs/showcase.md`](docs/showcase.md). The **▶ Showcase** button on the
+home page runs it.
+
 ## What Apollo does
 
 Apollo brings several music activities into one system:
@@ -220,6 +236,7 @@ If you change only one area, run that area's checks and explain what you ran in 
 
 ## Documentation map
 
+- [The showcase](docs/showcase.md) — the five-minute demo script, and how to record it.
 - [Contributing](CONTRIBUTING.md) — setup, checks, pull requests, and code boundaries.
 - [Roadmap](ROADMAP.md) — shipped work and the direction of the product.
 - [Environment reference](.env.example) — provider, deployment, identity, and live-service variables.

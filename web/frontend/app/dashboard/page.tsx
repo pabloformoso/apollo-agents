@@ -2,11 +2,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { coverUrl, getCatalog, listSessions } from "@/lib/api";
+import { coverUrl, createSessionWithBrief, getCatalog, listSessions } from "@/lib/api";
 import { clearAuth, useAuth } from "@/lib/auth";
 import type { SessionState, Track } from "@/lib/types";
+import { pickShowcaseBrief } from "@/lib/showcase";
 import { Shell } from "@/components/ember/Shell";
 import { DashboardPlayer } from "@/components/ember/DashboardPlayer";
+import { toast } from "@/components/ember/feedback";
 import { ApolloMark, Arrow, Btn, Crumb, Stripe } from "@/components/ember/primitives";
 
 function fmtDur(min: number | null | undefined): string {
@@ -71,6 +73,26 @@ export default function DashboardPage() {
   const [sessions, setSessions] = useState<SessionState[]>([]);
   const [catalogTracks, setCatalogTracks] = useState<Track[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showcasing, setShowcasing] = useState(false);
+
+  /**
+   * The showcase: one click, a curated brief, the ordinary session flow.
+   * Planning streams on /curate with the critic's thinking as a ticker;
+   * "Apollo, take the booth" opens /live with the reasoning feed on screen.
+   */
+  async function startShowcase() {
+    if (showcasing) return;
+    const pick = pickShowcaseBrief();
+    setShowcasing(true);
+    try {
+      const session = await createSessionWithBrief(pick.brief);
+      toast.info(`Showcase — ${pick.label}. Apollo is reading the brief…`, { duration: 6000 });
+      router.push(`/curate?session=${session.id}`);
+    } catch (e) {
+      toast.error((e as Error).message || "Couldn't start the showcase — try again.");
+      setShowcasing(false);
+    }
+  }
 
   useEffect(() => {
     if (!hydrated) return;
@@ -128,8 +150,14 @@ export default function DashboardPage() {
             </p>
             <div className="mt-7 flex flex-wrap gap-3">
               <Btn onClick={() => router.push("/brief")}>Start a session <Arrow /></Btn>
+              <Btn kind="ghost" onClick={() => void startShowcase()} disabled={showcasing} data-testid="dashboard-showcase">
+                {showcasing ? "Building the showcase…" : "▶ Showcase"}
+              </Btn>
               <Btn kind="ghost" onClick={() => router.push("/catalog")}>Browse catalog</Btn>
             </div>
+            <p className="mt-3 font-mono text-[10px] uppercase tracking-mono text-faint">
+              showcase · one click: apollo briefs, curates and performs a twenty-minute set, thinking out loud
+            </p>
           </div>
 
           <button
