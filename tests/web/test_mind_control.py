@@ -230,6 +230,46 @@ def test_inference_transport_timeout_is_uncertain(monkeypatch):
         mind.ensure_idle()
 
 
+def test_start_and_infer_stay_refused_while_uncertain(monkeypatch):
+    monkeypatch.setattr(mind, "_uncertain", True)
+    monkeypatch.setattr(mind, "service_state", AsyncMock(return_value="active"))
+    monkeypatch.setattr(mind, "loaded_models", AsyncMock(return_value=LOADED))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mind.action("start"))
+    assert exc.value.status_code == 409
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mind.infer({"intent": "continue", "model": "google/gemma-4-e4b"}))
+    assert exc.value.status_code == 409
+
+
+def test_stop_clears_an_uncertain_transport(monkeypatch):
+    """Stopping the unit kills the process that might still be answering: the one
+    action that can resolve an unresolved transport, so it must not be refused by it."""
+    async def scenario():
+        monkeypatch.setattr(mind, "_uncertain", True)
+        monkeypatch.setattr(mind, "service_state", AsyncMock(return_value="active"))
+        command = AsyncMock(return_value="")
+        monkeypatch.setattr(mind, "command", command)
+        assert await mind.action("stop") == {"accepted": True}
+        await mind._task
+        assert not mind._uncertain
+        assert mind._error is None
+        assert command.await_args.args[:3] == ("/usr/bin/systemctl", "--user", "stop")
+    asyncio.run(scenario())
+
+
+def test_a_failed_stop_leaves_the_transport_unresolved(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(mind, "_uncertain", True)
+        monkeypatch.setattr(mind, "service_state", AsyncMock(return_value="active"))
+        monkeypatch.setattr(mind, "command", AsyncMock(side_effect=HTTPException(503, "no systemctl")))
+        await mind.action("stop")
+        await mind._task
+        assert mind._uncertain
+        assert mind._error == "no systemctl"
+    asyncio.run(scenario())
+
+
 def test_ace_admission_refuses_while_any_model_is_resident(monkeypatch):
     """The GPU protocol is symmetric and has no shared-GPU opt-out any more."""
     client = AsyncMock()

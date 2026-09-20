@@ -79,11 +79,20 @@ describe("Main LLM management", () => {
     expect((screen.getByText("Load selected model") as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it.each([{ busy: true }, { uncertain: true }])("disables Mind actions when unsafe: %s", async override => {
-    stubFetch({ ...mindStatus, service: "active", ...override });
+  it("disables both Mind actions while an answer is in flight", async () => {
+    stubFetch({ ...mindStatus, service: "active", busy: true, operation: "inference" });
     render(<MainLlmPanel />);
     await screen.findByText("Stop Mind");
     expect((screen.getByText("Stop Mind") as HTMLButtonElement).disabled).toBe(true);
     expect((screen.getByText("Start Mind") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("keeps Stop available while a transport is unresolved: stopping is what resolves it", async () => {
+    stubFetch({ ...mindStatus, service: "active", uncertain: true });
+    render(<MainLlmPanel />);
+    await screen.findByText("Stop Mind");
+    expect((screen.getByText("Stop Mind") as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByText("Start Mind") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByRole("alert").textContent).toContain("Stop Mind");
   });
 });

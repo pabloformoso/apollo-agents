@@ -51,9 +51,15 @@ the service up; it loads nothing. Open `/algorave` and play. The same panel is
 reachable from the Algorave page's **Main LLM** button.
 
 To change the model, load another from the same panel; the Mind follows on its
-next request. **Unload model** is refused while the Mind reports an answer in
-flight or an unresolved transport — the request outlives the browser, and the
-model must outlive the request.
+next request. The load **evicts whatever is resident first** — LM Studio's own
+load does not, and two models beside each other on the shared GPU is the
+failure this design exists to prevent — so it is refused under the same rule as
+**Unload model**: while the Mind reports an answer in flight or an unresolved
+transport, because the request outlives the browser and the model must outlive
+the request. An unresolved transport is cleared by **Stop Mind** (verify the
+answer finished on the host first): stopping the unit kills the process that
+could still have been working, so it is the one action that can know. Start and
+inference stay refused until then.
 
 There is no shared-GPU opt-in any more. The protocol in the root CLAUDE.md is
 symmetric: unload the main LLM before starting ACE, stop ACE before loading it.

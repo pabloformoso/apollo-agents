@@ -521,6 +521,16 @@ mechanism; read its comment before adding a second sentinel.
   `.tmp/session-model-settings.json` of #207 is still read until the
   first save writes `.tmp/main-llm-settings.json`. ACE is the other GPU
   resident and keeps its own panel: it is not an LLM.
+  **A load EVICTS what is resident first** (`_unload_resident`, shared with
+  the unload action): LM Studio's own load does not, so "load B" with A
+  resident was two copies in VRAM — through the very panel built to stop
+  that. The eviction is gated on the Mind exactly like an unload. And the
+  host's `_uncertain` (a Mind transport that timed out after dispatch) is
+  cleared by ONE thing: a successful `stop` of the unit, which kills the
+  process that could still have been working. Stop is therefore never
+  refused for being uncertain — only for `busy` — or an unresolved
+  transport would wedge the main LLM's unload, and with it ACE, until a
+  controller restart on the GPU host.
 - **The mind's statuses mean different things and must not be flattened**: 400
   the page sent something malformed, 502 it could not produce valid Strudel
   (ask again), 503 the validator is not installed (`npm install`, not a retry),

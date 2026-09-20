@@ -263,7 +263,34 @@ async def _ensure_mind_idle() -> None:
     """
     from . import mind_control  # noqa: PLC0415 — sibling router, imported lazily to avoid a cycle
     if await mind_control.inference_pending():
-        raise HTTPException(409, "The Algorave Mind is answering. Wait for it to finish before unloading the main LLM.")
+        raise HTTPException(
+            409,
+            "The Algorave Mind is answering, or its last request is unresolved. "
+            "Wait for it to finish — or stop the Mind service — before unloading the main LLM.",
+        )
+
+
+def _instance_id(instance: dict[str, Any]) -> Any:
+    return instance.get("instance_id") or instance.get("id") or instance.get("key")
+
+
+async def _unload_resident(models: list[dict[str, Any]]) -> dict[str, Any]:
+    """Unload EVERY instance LM Studio reports resident, or nothing.
+
+    One model resident, ever: this is the whole reason the main LLM
+    exists. Both the unload action and a load that would otherwise sit
+    a second model beside the first go through here, so the Mind guard
+    is consulted in exactly one place and only when something is
+    actually about to be evicted.
+    """
+    instances = [i for m in models for i in m["loaded_instances"] if isinstance(i, dict)]
+    if not instances:
+        return {"status": "unloaded", "instance_id": None}
+    await _ensure_mind_idle()
+    result: dict[str, Any] = {}
+    for instance in instances:
+        result = await _request("/api/v1/models/unload", "POST", {"instance_id": _instance_id(instance)})
+    return result
 
 
 def _selected_settings(settings: Settings | None) -> Settings:
@@ -321,16 +348,16 @@ async def action(
             max_context = selected.get("max_context_length")
             if isinstance(max_context, int):
                 context_length = min(context_length, max_context)
+            # LM Studio's load does not evict what is already resident, so
+            # loading B beside A would put two models on the GPU ACE shares
+            # — the exact failure this module exists to prevent. Evict
+            # first (the same model too: a reload with new settings), and
+            # only if the Mind is not mid-answer on the model going away.
+            await _unload_resident(models)
             return await _request("/api/v1/models/load", "POST", {
                 "model": selected_settings.model_key,
                 "context_length": context_length,
                 "flash_attention": selected_settings.flash_attention,
                 "echo_load_config": True,
             })
-        await _ensure_mind_idle()
-        models = await list_models()
-        instances = [i for m in models for i in m["loaded_instances"] if isinstance(i, dict)]
-        if not instances:
-            return {"status": "unloaded", "instance_id": None}
-        instance_id = instances[0].get("instance_id") or instances[0].get("id") or instances[0].get("key")
-        return await _request("/api/v1/models/unload", "POST", {"instance_id": instance_id})
+        return await _unload_resident(await list_models())

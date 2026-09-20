@@ -85,7 +85,10 @@ export function MainLlmPanel() {
   const inputClass = "w-full min-w-0 border border-line bg-surf rounded p-2";
   const loaded = Boolean(status?.loaded_model);
   const selectedLoaded = Boolean(status?.selected_loaded);
-  const mindDisabled = busy || !mindStatus?.can_manage || mindStatus.busy || mindStatus.uncertain;
+  // Stop stays available while a request is unresolved: stopping the service
+  // is what resolves it (the host clears the flag once the unit is down).
+  const mindDisabled = busy || !mindStatus?.can_manage || mindStatus.busy;
+  const mindStartDisabled = mindDisabled || Boolean(mindStatus?.uncertain);
   const mindServiceLabel = mindStatus
     ? `Service: ${mindStatus.service}${mindStatus.busy ? ` · ${mindStatus.operation}…` : ""}`
     : "Host controller not configured";
@@ -98,7 +101,7 @@ export function MainLlmPanel() {
       <label className="block">Installed model<select className={inputClass} value={draft.model_key} onChange={e => setDraft({ ...draft, model_key: e.target.value })}>{!status.models.some(m => m.key === draft.model_key) && <option value={draft.model_key}>{draft.model_key} (not available)</option>}{status.models.filter(m => m.type === "llm" || m.type === "vlm").map(m => <option key={m.key} value={m.key}>{m.name}</option>)}</select></label>
       <label className="block">Context tokens<input className={inputClass} type="number" min={512} max={131072} step={512} value={draft.context_length} onChange={e => setDraft({ ...draft, context_length: Number(e.target.value) })} /></label>
       <label className="flex items-start gap-2"><input type="checkbox" checked={draft.flash_attention} onChange={e => setDraft({ ...draft, flash_attention: e.target.checked })} />Flash attention</label>
-      <p className="text-mute">One model for everything Apollo thinks with. ACE is separate: it generates audio and shares the GPU, so unload this model before starting ACE and stop ACE before loading it. Save settings to keep the choice as the default, or load directly to apply the current selection.</p>
+      <p className="text-mute">One model for everything Apollo thinks with. ACE is separate: it generates audio and shares the GPU, so unload this model before starting ACE and stop ACE before loading it. Save settings to keep the choice as the default, or load directly to apply the current selection. Loading evicts whatever is resident first: one model on the GPU, ever.</p>
       <button type="button" onClick={() => void act("save")} className="rounded border border-line px-3 py-2">Save settings</button>
     </fieldset>}
     {status && !status.can_manage && <p>Only administrators can manage the main LLM.</p>}
@@ -108,12 +111,12 @@ export function MainLlmPanel() {
       <h3 className="text-base">Algorave Mind service</h3>
       <p role="status">{mindServiceLabel}</p>
       {mindStatus?.can_manage && <div className="flex flex-wrap gap-2">
-        <button type="button" disabled={mindDisabled || mindStatus.service === "active"} onClick={() => void actMind("start")} className="rounded border border-line px-3 py-2 disabled:opacity-40">Start Mind</button>
+        <button type="button" disabled={mindStartDisabled || mindStatus.service === "active"} onClick={() => void actMind("start")} className="rounded border border-line px-3 py-2 disabled:opacity-40">Start Mind</button>
         <button type="button" disabled={mindDisabled || mindStatus.service !== "active"} onClick={() => void actMind("stop")} className="rounded border border-line px-3 py-2 disabled:opacity-40">Stop Mind</button>
       </div>}
       <p className="text-mute">The Mind turns an intent into Strudel on the GPU host and answers with the main LLM above. Starting it loads nothing; stopping it unloads nothing.</p>
       {mindStatus && !mindStatus.can_manage && <p>Only administrators can start or stop the Mind.</p>}
-      {(mindError || mindStatus?.error || mindStatus?.uncertain) && <p role="alert" className="text-warn">{mindError || mindStatus?.error || "A Mind request is unresolved. Check the host before unloading the model."}</p>}
+      {(mindError || mindStatus?.error || mindStatus?.uncertain) && <p role="alert" className="text-warn">{mindError || mindStatus?.error || "A Mind request is unresolved. Verify it finished on the host, then Stop Mind to clear this before unloading the model."}</p>}
     </div>
   </section>;
 }

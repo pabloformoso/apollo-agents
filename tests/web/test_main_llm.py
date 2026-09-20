@@ -206,6 +206,77 @@ def test_unload_proceeds_when_the_mind_is_idle_or_unreachable(monkeypatch):
     assert calls == [("/api/v1/models/unload", "POST", {"instance_id": "model-b"})]
 
 
+def _load_over_resident_fakes(monkeypatch, calls):
+    async def fake_models():
+        return [
+            {"key": "model-a", "name": "Model A", "type": "llm",
+             "loaded_instances": [{"instance_id": "model-a"}], "max_context_length": 8192},
+            {"key": "model-b", "name": "Model B", "type": "llm",
+             "loaded_instances": [], "max_context_length": 8192},
+        ]
+
+    async def fake_request(path, method="GET", payload=None):
+        calls.append((path, method, payload))
+        return {"status": "loaded" if path.endswith("/load") else "unloaded"}
+
+    async def no_capacity_check():
+        return None
+
+    monkeypatch.setattr(main_llm, "list_models", fake_models)
+    monkeypatch.setattr(main_llm, "_request", fake_request)
+    monkeypatch.setattr(main_llm, "_ensure_capacity", no_capacity_check)
+    monkeypatch.setattr(main_llm, "save_settings", lambda settings: None)
+
+
+def test_load_evicts_the_resident_model_first(monkeypatch):
+    """LM Studio's load does not evict: B beside A is two copies on the shared GPU."""
+    calls: list = []
+    _load_over_resident_fakes(monkeypatch, calls)
+
+    async def idle():
+        return False
+
+    monkeypatch.setattr(mind_control, "inference_pending", idle)
+    result = asyncio.run(main_llm.action("load", main_llm.Settings(model_key="model-b"), ADMIN))
+    assert result == {"status": "loaded"}
+    assert [(path, payload.get("instance_id") or payload.get("model")) for path, _, payload in calls] == [
+        ("/api/v1/models/unload", "model-a"),
+        ("/api/v1/models/load", "model-b"),
+    ]
+
+
+def test_load_over_a_resident_model_waits_for_the_mind(monkeypatch):
+    """Evicting for a load is an unload: the same Mind guard, and nothing touched on refusal."""
+    calls: list = []
+    _load_over_resident_fakes(monkeypatch, calls)
+
+    async def pending():
+        return True
+
+    monkeypatch.setattr(mind_control, "inference_pending", pending)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(main_llm.action("load", main_llm.Settings(model_key="model-b"), ADMIN))
+    assert error.value.status_code == 409
+    assert calls == []
+
+
+def test_load_with_nothing_resident_never_consults_the_mind(monkeypatch):
+    calls: list = []
+    _load_over_resident_fakes(monkeypatch, calls)
+
+    async def fake_models():
+        return [{"key": "model-b", "name": "Model B", "type": "llm", "loaded_instances": []}]
+
+    async def never():
+        raise AssertionError("the Mind must not be asked when nothing is being evicted")
+
+    monkeypatch.setattr(main_llm, "list_models", fake_models)
+    monkeypatch.setattr(mind_control, "inference_pending", never)
+    result = asyncio.run(main_llm.action("load", main_llm.Settings(model_key="model-b"), ADMIN))
+    assert result == {"status": "loaded"}
+    assert [path for path, _, _ in calls] == ["/api/v1/models/load"]
+
+
 def test_only_administrators_manage_the_main_llm():
     with pytest.raises(HTTPException) as error:
         asyncio.run(main_llm.action("load", None, {"capabilities": frozenset()}))

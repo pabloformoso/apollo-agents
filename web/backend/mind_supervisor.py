@@ -98,13 +98,21 @@ async def status():
 
 
 async def perform(action: str):
-    global _error
+    global _error, _uncertain
     try:
         await command("/usr/bin/systemctl", "--user", action, UNIT, timeout=20)
     except TimeoutError:
         _error = "Service command timed out; check the host journal before retrying."
     except Exception as exc:
         _error = exc.detail if isinstance(exc, HTTPException) else "Mind service operation failed; inspect the host logs."
+    else:
+        if action == "stop":
+            # The unit is KillMode=control-group: a successful stop means
+            # the process that might still have been answering is gone,
+            # and with it the only work an unresolved transport could
+            # have left behind. This is the ONE path that clears the
+            # flag — nothing else can know the answer finished.
+            _uncertain = False
 
 
 @router.post("/actions/{action}", status_code=202)
@@ -112,7 +120,13 @@ async def action(action: Literal["start", "stop"]):
     global _task, _operation, _error
     from .ace_supervisor import _lock
     async with _lock:
-        ensure_idle()
+        if action == "stop":
+            # Stopping is how an unresolved transport gets resolved, so it
+            # is refused only while an answer is genuinely in flight.
+            if busy():
+                raise HTTPException(409, "Mind is answering. Keep playing and refresh status.")
+        else:
+            ensure_idle()
         state = await service_state()
         if state not in {"active", "inactive", "failed"}:
             raise HTTPException(409, "Mind service is not installed or is changing state.")
@@ -143,7 +157,7 @@ async def infer_request(payload: dict):
         # A transport timeout/disconnect does not cancel work inside the
         # HTTP service or LM Studio. Do not unload underneath that work.
         _uncertain = True
-        _error = "Mind transport failed after dispatch. Verify inference has finished on the host before restarting the controller."
+        _error = "Mind transport failed after dispatch. Verify inference has finished on the host, then Stop Mind to clear this state."
         raise
     try:
         result = response.json()
