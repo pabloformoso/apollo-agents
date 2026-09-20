@@ -750,13 +750,28 @@ def test_clean_paragraph_caps_a_runaway_reply():
 
 
 def test_resolve_critique_model_precedence(monkeypatch):
-    """GENERATIVE_MODEL > AGENT_MODEL > the provider default (#123)."""
+    """GENERATIVE_MODEL > the main LLM saved in Settings > AGENT_MODEL > default."""
+    from web.backend import main_llm
+
     monkeypatch.delenv("GENERATIVE_MODEL", raising=False)
     monkeypatch.delenv("AGENT_MODEL", raising=False)
     assert generator._resolve_critique_model("ollama") == "gemma4:4b"
 
     monkeypatch.setenv("AGENT_MODEL", "the-dj-model")
     assert generator._resolve_critique_model("ollama") == "the-dj-model"
+
+    # The model resident in LM Studio wins over the env name: naming another
+    # one would JIT-load a second copy on the shared GPU.
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://lm:1234/v1")
+    main_llm.save_settings(main_llm.Settings(model_key="the-loaded-model"))
+    assert generator._resolve_critique_model("ollama") == "the-loaded-model"
+
+    # ...and only while the box IS wired to LM Studio: the saved key means
+    # nothing to Anthropic, and the file outlives a provider switch.
+    monkeypatch.setenv("AGENT_PROVIDER", "anthropic")
+    assert generator._resolve_critique_model("anthropic") == "the-dj-model"
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
 
     monkeypatch.setenv("GENERATIVE_MODEL", "the-critic-model")
     assert generator._resolve_critique_model("ollama") == "the-critic-model"

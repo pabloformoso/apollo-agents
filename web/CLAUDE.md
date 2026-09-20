@@ -522,9 +522,54 @@ mechanism; read its comment before adding a second sentinel.
   same-origin route forwards the user's bearer token to `/api/mind/infer` on
   Apollo's backend, which calls the authenticated host supervisor. The fixed
   host service binds loopback:4032; `ALGORAVE_MIND_URL` is no longer used.
-  Settings and the inline Algorave Model management panel control service and
-  model residency separately. See `deploy/acestep/MIND.md` for installation,
-  reserved model alias, concurrency protections and shared-GPU opt-in.
+  See `deploy/acestep/MIND.md` for installation and concurrency protections.
+- **The Mind thinks with the MAIN LLM; it owns no model (2026-09-19).**
+  `main_llm.py` (`/api/main-llm`, `MainLlmPanel.tsx`) is the ONE place the
+  LM Studio model is chosen, loaded and unloaded, and `persisted_model()` /
+  `current_model()` is how every caller names it: `brief_parser`,
+  `pipeline`, the critic in `generator.py` and `mind_control.infer`, which
+  pins `payload["model"]` to it. The host `mind_supervisor` keeps only
+  service start/stop and inference, and forwards a request only when
+  `lms ps` shows that model resident; the playground runs `--any-model`.
+  It was two panels — "Session intelligence" over LM Studio's REST API and
+  "Mind" loading its own copy under the alias `apollo-mind` via `lms` — for
+  one physical model, i.e. two settings files, two Load buttons and, when
+  both were pressed, two copies in VRAM on the GPU ACE shares. Do not
+  reintroduce a per-consumer model selector: a second name is a second
+  JIT load. `GENERATIVE_MODEL` and `BRIEF_MODEL` stay as explicit env
+  overrides ABOVE the Settings choice; `SESSION_MODEL` is gone. The
+  `.tmp/session-model-settings.json` of #207 is still read until the
+  first save writes `.tmp/main-llm-settings.json`. ACE is the other GPU
+  resident and keeps its own panel: it is not an LLM.
+  **A load EVICTS what is resident first** (`_unload_resident`, shared with
+  the unload action): LM Studio's own load does not, so "load B" with A
+  resident was two copies in VRAM — through the very panel built to stop
+  that. The eviction is gated on the Mind exactly like an unload. And the
+  host's `_uncertain` (a Mind transport that timed out after dispatch) is
+  cleared by ONE thing: a successful `stop` of the unit, which kills the
+  process that could still have been working. Stop is therefore never
+  refused for being uncertain — only for `busy` — or an unresolved
+  transport would wedge the main LLM's unload, and with it ACE, until a
+  controller restart on the GPU host.
+  **`persisted_model()` answers only while `main_llm.managed()`** (an LM
+  Studio endpoint under `AGENT_PROVIDER=ollama|lmstudio`): the saved key
+  names an LM Studio model and the file outlives a provider switch, so
+  without that gate the planner, the brief parser and the critic would
+  send `google/gemma-4-e4b` to Anthropic. `managed()` is also what the
+  Mind's `infer` checks (503 naming the fix) — a Claude name can never be
+  resident on the GPU host, and 409 "load it from Settings" forever is
+  the wrong sentence. **The unload guard is exact, not a race**:
+  `mind_control.infer` registers `_inflight` UNDER `ace_control.gate()`
+  and answers outside it (holding the lock for a 20 s answer would hold
+  up live-set registration and ACE), while the unload holds the gate for
+  its whole run — so an ask cannot slip in between the check and the LM
+  Studio call. The host's `busy` stays as the second half, for answers
+  this process did not dispatch. `GET /api/mind` answers 200 with
+  `configured: false` when there is no host controller — a normal
+  install, not a failure — so the panel can tell that apart from a
+  configured host that did not answer (a 503, "Mind status unavailable").
+  "Configured" is `ace_control.configured()` (the URL), one rule for both
+  controllers; a URL with a short token is a loud 503, never "unmanaged".
 - **The mind's statuses mean different things and must not be flattened**: 400
   the page sent something malformed, 502 it could not produce valid Strudel
   (ask again), 503 the validator is not installed (`npm install`, not a retry),

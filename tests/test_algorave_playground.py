@@ -906,6 +906,91 @@ def test_model_is_repeatable_and_the_first_one_is_the_default():
     assert args.model == ["gpt-4o-mini", "google/gemma-4-e4b"]
 
 
+# ─── --any-model: the managed Mind ─────────────────────────────────────
+#
+# In the Apollo deployment nothing is declared at startup: the main LLM is
+# chosen in Settings, loaded into LM Studio by Apollo, and named on every
+# request by the host supervisor — which has already checked it is resident.
+# The allow-list would only ever be stale there, so the request is trusted
+# instead, and required, since there is no declared default to fall back on.
+
+def test_any_model_trusts_the_name_the_request_carries():
+    req = playground.parse_request(
+        _body(intent="d", model="whatever/apollo-chose"), any_model=True,
+    )
+    assert req["model"] == "whatever/apollo-chose"
+
+
+def test_any_model_with_no_declared_default_requires_a_model():
+    with pytest.raises(playground.BadRequest, match="'model' is required"):
+        playground.parse_request(_body(intent="d"), any_model=True)
+    with pytest.raises(playground.BadRequest, match="must not be empty"):
+        playground.parse_request(_body(intent="d", model=""), any_model=True)
+
+
+def test_any_model_still_refuses_a_non_string():
+    with pytest.raises(playground.BadRequest, match="must be a string"):
+        playground.parse_request(_body(intent="d", model=3), any_model=True)
+
+
+def test_any_model_keeps_a_declared_default_for_requests_naming_none():
+    req = playground.parse_request(
+        _body(intent="d"), allowed_models=("google/gemma-4-e4b",), any_model=True,
+    )
+    assert req["model"] is None  # the factory applies the declared default
+
+
+def test_a_managed_server_serves_the_model_each_request_names(serve, validator_ok):
+    factory = _factory(StrudelCode(code='s("bd*4")', reason="r", stats={}))
+    factory.models = ()
+    factory.any_model = True
+    url = serve(factory)
+
+    status, body, _ = post(url, {"code": "", "intent": "d", "model": "qwen/qwen3.6-27b"})
+    assert status == 200
+    assert factory.calls[-1]["model"] == "qwen/qwen3.6-27b"
+    assert body["model"] == "qwen/qwen3.6-27b"
+
+    status, body, _ = post(url, {"code": "", "intent": "d"})
+    assert status == 400 and "required" in body["detail"]
+    assert len(factory.calls) == 1
+
+
+def test_any_model_mode_builds_a_factory_with_nothing_declared(monkeypatch):
+    sent = {}
+
+    def _create(**kwargs):
+        sent.update(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="stack()"))])
+
+    fake = types.ModuleType("openai")
+    fake.OpenAI = lambda **kwargs: SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=_create))
+    )
+    monkeypatch.setitem(sys.modules, "openai", fake)
+
+    args = playground.build_parser().parse_args(["--any-model", "--base-url", "http://host:1234/v1"])
+    factory = playground.build_mind_factory(args)
+    assert args.model == [] and factory.models == () and factory.any_model is True
+
+    mind = factory({"code": "", "intent": "d", "genre": "deep", "key": "A:minor",
+                    "model": "the/one-apollo-loaded"})
+    mind._llm("SYS", "USR")
+    assert sent["model"] == "the/one-apollo-loaded"
+
+    with pytest.raises(ValueError, match="no model"):
+        factory({"code": "", "intent": "d", "genre": "deep", "key": "A:minor"})
+
+
+def test_any_model_is_off_by_default_and_the_unit_file_turns_it_on():
+    assert playground.build_parser().parse_args([]).any_model is False
+    unit = (_ROOT / "deploy" / "acestep" / "apollo-mind.service").read_text(encoding="utf-8")
+    assert "--any-model" in unit
+    assert "apollo-mind" not in unit.split("ExecStart=", 1)[1].splitlines()[0], (
+        "the private alias is gone: the Mind names the main LLM per request"
+    )
+
+
 # ─── the startup model check ───────────────────────────────────────────
 #
 # `parse_request` allow-lists whatever was declared, so a typo — or a model

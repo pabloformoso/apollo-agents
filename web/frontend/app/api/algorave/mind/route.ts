@@ -21,7 +21,7 @@ async function forward(request: Request) {
     }
     return NextResponse.json(payload, { status: response.status });
   } catch {
-    return NextResponse.json({ error: "Mind is unreachable — keep playing your current pattern", detail: "Check Model management for service and model status." }, { status: 502 });
+    return NextResponse.json({ error: "Mind is unreachable — keep playing your current pattern", detail: "Check Main LLM in Settings for the model and the Mind service." }, { status: 502 });
   }
 }
 export const GET = forward;

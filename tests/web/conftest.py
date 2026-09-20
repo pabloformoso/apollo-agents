@@ -17,6 +17,20 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+@pytest.fixture(autouse=True)
+def isolated_main_llm_settings(tmp_path, monkeypatch):
+    """Never let the checkout's persisted main-LLM choice leak into a test.
+
+    ``main_llm.persisted_model()`` sits in the model precedence of the brief
+    parser, the planner and the critic, and it reads ``.tmp/`` under the repo
+    root — which in the main checkout holds whatever an administrator last
+    saved. Both the current and the legacy path are pointed at this test's
+    own directory; a test that wants a saved choice writes one itself.
+    """
+    monkeypatch.setenv("APOLLO_MAIN_LLM_SETTINGS_PATH", str(tmp_path / "main-llm-settings.json"))
+    monkeypatch.setenv("APOLLO_SESSION_MODEL_SETTINGS_PATH", str(tmp_path / "session-model-settings.json"))
+
+
 @pytest.fixture
 def tmp_db(tmp_path, monkeypatch):
     """Point the user DB at an isolated temp file and initialise schema."""

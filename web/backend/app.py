@@ -16,7 +16,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Response, WebSocket,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 
-from . import ace_control, covers, db, auth, keycloak, permissions, pipeline, youtube_auth, track_processing, session_model
+from . import ace_control, covers, db, auth, keycloak, permissions, pipeline, youtube_auth, track_processing, main_llm
 from .generator import router as generator_router
 from .render import router as render_router
 from .models import (
@@ -120,7 +120,7 @@ app.include_router(generator_router)
 app.include_router(ace_control.router)
 from . import mind_control
 app.include_router(mind_control.router)
-app.include_router(session_model.router)
+app.include_router(main_llm.router)
 app.include_router(track_processing.router)
 
 

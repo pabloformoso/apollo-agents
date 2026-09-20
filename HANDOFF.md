@@ -2,10 +2,12 @@
 
 **Fecha:** 2026-09-19  
 **Rama de referencia:** `main`  
-**Commit desplegado:** `107f3fa` (`feat: manage session generation model`, PR #207)  
+**Commit desplegado:** `748227c` (`fix: apply selected session model safely`, PR #208)  
 **Repositorio:** `https://github.com/pabloformoso/apollo-agents`
 
 Este documento sustituye al handoff anterior, que describía un estado de agosto y ya no era una guía fiable para continuar el producto.
+
+**Corrección (2026-09-19, tarde).** La versión anterior de este handoff interpretó mal la instrucción sobre la pantalla de Settings: presentaba "Mind" y "Session intelligence" como dos modelos con dos paneles, cuando son el **mismo LLM**. Desde la rama `claude/handoff-settings-screen-1qayie` Settings tiene exactamente dos residentes de la GPU: el **Main LLM** (todo lo que Apollo piensa: brief, planificación, DJ en directo y Mind de Algorave) y **ACE** (el generador de canciones, tal y como estaba). La sección "Gestión de modelos" y la decisión de arquitectura 2 están reescritas abajo.
 
 ## Estado actual
 
@@ -19,6 +21,8 @@ Este documento sustituye al handoff anterior, que describía un estado de agosto
 | [#205](https://github.com/pabloformoso/apollo-agents/pull/205) | Dashboard como entrada principal de Apollo | Mergeada |
 | [#206](https://github.com/pabloformoso/apollo-agents/pull/206) | Rediseño de Sign in | Mergeada |
 | [#207](https://github.com/pabloformoso/apollo-agents/pull/207) | Gestión del modelo de sesiones | Mergeada |
+| [#208](https://github.com/pabloformoso/apollo-agents/pull/208) | Load aplica la selección del desplegable; 409 si ACE ocupa la GPU | Mergeada |
+| `claude/handoff-settings-screen-1qayie` | Un solo **Main LLM** en Settings (Mind + sesiones unificados); ACE sin cambios | En PR |
 
 El stack local se reinició después del último merge. En la última comprobación, backend y frontend estaban activos, `/settings` local respondía `200` y `https://apollo.pabloformoso.com/settings` respondía `200`.
 
@@ -69,25 +73,22 @@ La metadata de géneros sale del backend en `GET /api/generator/genres`, de modo
 
 La UI muestra el caption combinado y evita truncar silenciosamente las palabras del usuario. Los errores del backend, incluidos 409 por conflicto de GPU y 503 por servicio apagado, se muestran en el diálogo.
 
-### Gestión de modelos de sesiones
+### Main LLM y ACE: los dos residentes de la GPU
 
-La gestión de Mind y la gestión del modelo de sesiones son superficies distintas:
+Settings tiene dos paneles, uno por residente de la GPU compartida:
 
-- **Mind** controla la mente del Algorave y su servicio host-side.
-- **ACE** controla el servicio de generación musical.
-- **Session intelligence** controla el modelo que extrae el brief y ejecuta la planificación de sesiones.
+- **Main LLM** es el único modelo de LM Studio con el que Apollo piensa: extracción del brief, planificación de sesiones, DJ en directo y **Mind de Algorave**. Se elige, se carga y se descarga desde un solo sitio.
+- **ACE** es el servicio de generación musical. No es un LLM y no ha cambiado.
 
-El nuevo router `web/backend/session_model.py` y el panel `SessionModelPanel.tsx` permiten a un administrador:
+Lo que había antes (PR #202 + #207) eran dos paneles para un mismo modelo: "Session intelligence" cargaba por la API REST de LM Studio y "Mind" cargaba **otra copia** en el host con `lms load --identifier apollo-mind`, cada uno con su fichero de settings y su botón Load. Pulsar los dos ponía dos copias del mismo LLM en los 16 GB que ACE comparte. Eso es lo que se ha deshecho:
 
-- consultar los modelos disponibles en LM Studio;
-- ver cuál está cargado;
-- seleccionar modelo, contexto y Flash Attention;
-- persistir la configuración en `.tmp/session-model-settings.json`;
-- cargar y descargar modelos;
-- ver el error devuelto por LM Studio;
-- bloquear cambios de residencia mientras hay una sesión live activa.
-
-La selección persistida se resuelve en tiempo de ejecución por el parser y el pipeline, por lo que no requiere reiniciar Apollo. `BRIEF_MODEL`, cuando está definido explícitamente, conserva prioridad para la extracción del brief. `SESSION_MODEL` sirve como valor inicial y `APOLLO_SESSION_MODEL_SETTINGS_PATH` permite cambiar la ubicación del fichero.
+- `web/backend/main_llm.py` (router `/api/main-llm`, antes `session_model.py`) es la única gestión de modelo: inventario, selección (modelo, contexto, Flash Attention), load/unload por REST, persistencia en `.tmp/main-llm-settings.json` (`APOLLO_MAIN_LLM_SETTINGS_PATH`). El fichero antiguo `.tmp/session-model-settings.json` se sigue leyendo hasta el primer guardado, así que la selección hecha en prod sobrevive al cambio.
+- Todos los consumidores resuelven el modelo por `main_llm.persisted_model()` / `current_model()`: `brief_parser`, `pipeline`, el crítico de `generator.py` y la inferencia del Mind. Nombrar un modelo distinto al residente provoca un JIT load de una segunda copia; por eso no hay selector por consumidor.
+- El gateway `/api/mind` conserva sólo **start/stop del servicio** y `infer`, que fija `model` al Main LLM. El supervisor host (`mind_supervisor.py`) ya no tiene settings, alias ni load/unload: reenvía una petición sólo si `lms ps` muestra ese modelo residente y el servicio está activo. La unidad `apollo-mind.service` arranca el playground con `--any-model` (sirve el modelo que nombra cada petición) en lugar de `--model apollo-mind`.
+- `MainLlmPanel.tsx` reemplaza a `SessionModelPanel.tsx` y `MindServicePanel.tsx`; incluye el bloque "Algorave Mind service" (Start/Stop). El botón de la página Algorave abre este mismo panel.
+- **Unload** se rechaza mientras el Mind informa de una respuesta en vuelo o un transporte sin resolver (la petición sobrevive al navegador; el modelo debe sobrevivir a la petición).
+- Ha desaparecido el opt-in `allow_shared_gpu`: el protocolo de la GPU es simétrico y sin excepciones. El supervisor de ACE rechaza arrancar mientras haya cualquier modelo residente en LM Studio.
+- `SESSION_MODEL` ya no existe; `AGENT_MODEL` es el valor inicial. `BRIEF_MODEL` y `GENERATIVE_MODEL` siguen siendo overrides explícitos de entorno **por encima** de la selección de Settings.
 
 La gestión funciona con el proveedor compatible con LM Studio configurado mediante `AGENT_PROVIDER=ollama` y `OLLAMA_BASE_URL`. No es todavía un selector abstracto para Anthropic, Azure o LiteLLM.
 
@@ -103,12 +104,12 @@ La prueba aislada confirmó la causa: al detener ACE, Gemma E4B cargó en 2,5 s 
 
 También se corrigió un fallo de contrato en el selector: antes el desplegable sólo cambiaba el estado React y **Load selected model** leía de nuevo `AGENT_MODEL`, por lo que siempre intentaba Gemma. Ahora Load envía y persiste el borrador elegido de forma atómica. Si ACE mantiene la GPU ocupada, Apollo responde 409 con instrucciones para detenerlo, en lugar de propagar un 500 opaco de LM Studio.
 
-La operación recomendada es detener ACE, cargar el modelo de sesiones con el contexto adecuado, validar brief + planificación y volver a iniciar ACE cuando se vaya a generar audio.
+La operación recomendada es detener ACE, cargar el Main LLM con el contexto adecuado, validar brief + planificación (y el Mind, si se va a tocar en Algorave: Start Mind en el mismo panel) y volver a iniciar ACE cuando se vaya a generar audio, descargando antes el Main LLM.
 
 ## Decisiones de arquitectura que deben mantenerse
 
 1. **Una fuente de verdad para géneros.** Las ventanas BPM, estilo y demás metadata deben derivarse de `agent/genres.py`. No duplicarlas en React.
-2. **Separación de responsabilidades.** ACE genera audio; el modelo de sesiones planifica; Mind atiende Algorave. No mezclar sus ciclos de carga ni sus estados en un único panel.
+2. **Dos residentes de la GPU, dos paneles.** ACE genera audio y es un servicio propio. Todo lo demás que piensa — brief, planificación, DJ en directo y Mind de Algorave — es **un solo LLM**, el Main LLM, con una sola selección y un solo ciclo de carga. El Mind es un *servicio* (start/stop) que usa ese modelo, nunca un segundo modelo. No volver a separar "modelo de sesiones" y "modelo del Mind": un segundo nombre es un segundo JIT load en la misma GPU.
 3. **El modelo no controla el callback de audio.** La planificación y las decisiones agénticas pueden ser asíncronas, pero la reproducción y el timing de audio siguen en el motor.
 4. **El usuario conserva la decisión irreversible.** Publicar una take, construir una sesión o poner algo en directo debe seguir siendo una acción explícita.
 5. **Persistencia server-side de la operación.** La selección del modelo no debe depender del estado React ni de una edición manual de `.env`; los cambios deben ser auditables y reaplicables al reiniciar.
@@ -117,9 +118,10 @@ La operación recomendada es detener ACE, cargar el modelo de sesiones con el co
 
 ## Pendiente prioritario
 
-### P0 · Resolver la carga del modelo de sesiones
+### P0 · Desplegar y validar el Main LLM unificado
 
-- Validar en producción el flujo coordinado: detener ACE, cargar Session Intelligence, ejecutar una sesión completa y volver a iniciar ACE.
+- Desplegar la rama en el host GPU además del checkout principal: `mind_supervisor.py` forma parte del controlador ACE (`apollo-ace-control.service`) y la unidad `apollo-mind.service` ha cambiado su `ExecStart` (`--any-model`); hace falta `systemctl --user daemon-reload` y reiniciar el controlador **sin una petición del Mind en vuelo**.
+- Validar en producción el flujo coordinado: detener ACE, cargar el Main LLM desde Settings, ejecutar una sesión completa, arrancar el Mind y pedirle una mutación en `/algorave` (comprobar en `lms ps` que sólo hay **una** instancia), descargar el Main LLM y volver a iniciar ACE.
 - Probar un modelo alternativo desde Settings y comparar latencia, tool calling y calidad musical frente a Gemma E4B.
 - Decidir si el contexto 4096 y la residencia exclusiva deben quedar documentados como default operativo.
 
@@ -150,14 +152,16 @@ También existen worktrees antiguos de agentes para ramas ya mergeadas (`feat/db
 
 ## Verificación realizada en este ciclo
 
-- `tests/web/test_session_model.py`: 8 pasadas.
-- `tests/web/test_brief_parser.py`: 62 pasadas.
-- `tests/web/test_pipeline_v260.py`: 7 pasadas.
-- `tests/web/test_mind_control.py`: 14 pasadas.
-- ESLint específico de los archivos frontend nuevos: correcto.
-- Prueba React del selector: 1 pasada; verifica que Load envía el modelo seleccionado.
-- `npm run build`: correcto.
-- CI de PR #207: backend Python 3.12/3.13, frontend, E2E y Algorave: todo verde.
+Rama `claude/handoff-settings-screen-1qayie` (unificación del Main LLM):
+
+- `tests/web/test_main_llm.py` (antes `test_session_model.py`): 16 pasadas, incluida la lectura del fichero legado y el rechazo de unload con el Mind respondiendo.
+- `tests/web/test_mind_control.py`: 17 pasadas; pinan que `/api/mind` ya no tiene load/unload/settings, que `infer` fija el Main LLM y que el host sólo reenvía con el modelo residente.
+- `tests/test_algorave_playground.py`: `--any-model` cubierto (7 pruebas nuevas).
+- `tests/web/test_generator_critique.py`: la precedencia del crítico incluye la selección de Settings.
+- `tests/web/test_brief_parser.py`, `test_pipeline_v260.py`, `test_ace_control.py`: verdes.
+- Vitest `__tests__/main-llm.test.tsx` (4) y `mind-route.test.ts` (3): verdes. ESLint de los archivos tocados: limpio. `tsc --noEmit`: 9 errores, los mismos 9 que en `main` (ficheros de test heredados).
+
+Ciclo anterior (PR #207/#208): `test_brief_parser.py` 62, `test_pipeline_v260.py` 7, `npm run build` correcto, CI verde.
 
 El lint completo tiene los fallos heredados descritos arriba; no son introducidos por el panel de modelo.
 
@@ -173,8 +177,8 @@ git log -1 --oneline
 docker compose ps
 curl -fsS -o /dev/null -w '%{http_code}\n' https://apollo.pabloformoso.com/settings
 
-# Backend afectado por el modelo de sesiones
-docker compose run --rm -T backend uv run pytest -q tests/web/test_session_model.py tests/web/test_brief_parser.py tests/web/test_pipeline_v260.py
+# Backend afectado por el Main LLM
+docker compose run --rm -T backend uv run pytest -q tests/web/test_main_llm.py tests/web/test_mind_control.py tests/web/test_brief_parser.py tests/web/test_pipeline_v260.py tests/test_algorave_playground.py
 
 # Frontend
 docker compose run --rm frontend npm run build

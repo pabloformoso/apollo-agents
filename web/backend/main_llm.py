@@ -1,9 +1,21 @@
-"""Manage the LM Studio model used for brief parsing and session planning.
+"""Manage the ONE LM Studio model Apollo thinks with: the main LLM.
 
-The session model is served by the OpenAI-compatible endpoint configured in
-``OLLAMA_BASE_URL``.  LM Studio's native REST API is used for inventory and
-model residency so operators do not have to edit ``.env`` or restart Apollo
-just to switch the planner model.
+Brief extraction, session planning, the live DJ and the Algorave Mind
+are four callers of the SAME model. Until 2026-09-19 Apollo managed it
+as two — a "session model" loaded over LM Studio's REST API and a "Mind
+model" loaded on the host under a private alias — so one physical LLM
+had two settings files, two load buttons and, when both were pressed,
+two copies in VRAM on a GPU shared with ACE. This module is the single
+place that model is chosen, loaded and unloaded; every caller resolves
+it through ``persisted_model()`` / ``current_model()``.
+
+ACE is the other resident of that GPU and stays its own service: it
+generates audio, it is not an LLM, and it keeps its own panel.
+
+The model is served by the OpenAI-compatible endpoint configured in
+``OLLAMA_BASE_URL``.  LM Studio's native REST API is used for inventory
+and residency so operators do not have to edit ``.env`` or restart
+Apollo just to switch.
 """
 from __future__ import annotations
 
@@ -22,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from . import ace_control, auth, permissions
 
 log = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/session-model")
+router = APIRouter(prefix="/api/main-llm")
 
 _DEFAULT_MODEL = "gemma4:4b"
 _DEFAULT_CONTEXT = 8192
@@ -35,37 +47,75 @@ class Settings(BaseModel):
     flash_attention: bool = True
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
 def settings_path() -> Path:
+    configured = os.getenv("APOLLO_MAIN_LLM_SETTINGS_PATH", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return _repo_root() / ".tmp" / "main-llm-settings.json"
+
+
+def _legacy_settings_path() -> Path:
+    """Where the "session model" era (PR #207/#208) persisted its choice.
+
+    Read-only: a selection an administrator saved before the rename still
+    applies on the first boot after it, and the first save writes the new
+    file. Same shape, so the same ``Settings`` validates it.
+    """
     configured = os.getenv("APOLLO_SESSION_MODEL_SETTINGS_PATH", "").strip()
     if configured:
         return Path(configured).expanduser()
-    return Path(__file__).resolve().parents[2] / ".tmp" / "session-model-settings.json"
+    return _repo_root() / ".tmp" / "session-model-settings.json"
 
 
 def default_model() -> str:
-    return os.getenv("SESSION_MODEL", "").strip() or os.getenv("BRIEF_MODEL", "").strip() or os.getenv("AGENT_MODEL", _DEFAULT_MODEL).strip()
+    return os.getenv("AGENT_MODEL", "").strip() or _DEFAULT_MODEL
+
+
+def _stored_path() -> Path | None:
+    path = settings_path()
+    if path.exists():
+        return path
+    legacy = _legacy_settings_path()
+    return legacy if legacy.exists() else None
 
 
 def read_settings() -> Settings:
-    path = settings_path()
-    if not path.exists():
+    path = _stored_path()
+    if path is None:
         return Settings(model_key=default_model())
     try:
         return Settings.model_validate(json.loads(path.read_text()))
     except (OSError, ValueError, TypeError) as exc:
-        raise HTTPException(503, "Session model settings are unreadable; check the server configuration.") from exc
+        raise HTTPException(503, "Main LLM settings are unreadable; check the server configuration.") from exc
 
 
 def persisted_model() -> str | None:
-    """Return the operator-selected model, without breaking inference startup."""
+    """Return the operator-selected model, without breaking inference startup.
+
+    The saved key names a model in LM STUDIO, so it is only an answer while
+    Apollo is wired to one (``managed()``). The file outlives a provider
+    switch — an operator who saved a choice on LM Studio and later pointed
+    ``AGENT_PROVIDER`` at Anthropic would otherwise have the planner, the
+    brief parser and the critic send ``google/gemma-4-e4b`` to Anthropic.
+    """
+    if not managed():
+        return None
     try:
-        path = settings_path()
-        if not path.exists():
+        if _stored_path() is None:
             return None
         return read_settings().model_key
     except HTTPException:
-        log.warning("Session model settings could not be read", exc_info=True)
+        log.warning("Main LLM settings could not be read", exc_info=True)
         return None
+
+
+def current_model() -> str:
+    """The model every caller should name: the saved choice, else the env default."""
+    return persisted_model() or default_model()
 
 
 def save_settings(settings: Settings) -> None:
@@ -84,7 +134,7 @@ def save_settings(settings: Settings) -> None:
             if os.path.exists(name):
                 os.unlink(name)
     except OSError as exc:
-        raise HTTPException(503, "Session model settings could not be saved.") from exc
+        raise HTTPException(503, "Main LLM settings could not be saved.") from exc
 
 
 def provider() -> str:
@@ -101,6 +151,17 @@ def endpoint() -> str:
     if path.endswith("/v1"):
         path = path[:-3]
     return urlunsplit((parts.scheme, parts.netloc, path, "", "")).rstrip("/")
+
+
+def managed() -> bool:
+    """Whether Apollo's LLM is an LM Studio instance this module can manage.
+
+    One definition: the Settings panel, ``persisted_model()`` and the
+    Algorave Mind (which can only ever think with an LM Studio model on
+    the GPU host) all read it, so they cannot disagree about what
+    "configured" means.
+    """
+    return bool(endpoint()) and provider() in {"ollama", "lmstudio"}
 
 
 def _headers() -> dict[str, str]:
@@ -127,7 +188,7 @@ def _model_record(raw: dict[str, Any]) -> dict[str, Any]:
 async def _request(path: str, method: str = "GET", payload: dict[str, Any] | None = None) -> Any:
     base = endpoint()
     if not base or provider() not in {"ollama", "lmstudio"}:
-        raise HTTPException(503, "Session model management requires an LM Studio OpenAI-compatible endpoint.")
+        raise HTTPException(503, "Main LLM management requires an LM Studio OpenAI-compatible endpoint.")
     try:
         async with httpx.AsyncClient(timeout=35, trust_env=False) as client:
             response = await client.request(method, base + path, json=payload, headers=_headers())
@@ -158,7 +219,7 @@ async def list_models() -> list[dict[str, Any]]:
 
 
 async def status_snapshot(user: dict) -> dict[str, Any]:
-    configured = bool(endpoint()) and provider() in {"ollama", "lmstudio"}
+    configured = managed()
     settings = read_settings()
     if not configured:
         return {
@@ -194,7 +255,7 @@ def _shares_host_with_ace() -> bool:
     return bool(lm_host and ace_host and lm_host == ace_host)
 
 
-async def _ensure_session_model_capacity() -> None:
+async def _ensure_capacity() -> None:
     """Avoid an opaque LM Studio load error when ACE owns the shared GPU."""
     if not _shares_host_with_ace() or not ace_control.configured():
         return
@@ -207,8 +268,49 @@ async def _ensure_session_model_capacity() -> None:
     if state.loaded or state.state in {"starting", "stopping"}:
         raise HTTPException(
             409,
-            "Stop ACE before loading a session model. ACE is holding the shared GPU.",
+            "Stop ACE before loading the main LLM. ACE is holding the shared GPU.",
         )
+
+
+async def _ensure_mind_idle() -> None:
+    """Never pull the model out from under an Algorave answer in flight.
+
+    The Mind service runs on the GPU host and is the one caller whose
+    request outlives the browser (``mind_supervisor.infer``). Its
+    supervisor reports ``busy``/``uncertain``; when it is not configured
+    or cannot be reached there is nothing to consult and the unload goes
+    ahead — LM Studio is the authority on its own residency.
+    """
+    from . import mind_control  # noqa: PLC0415 — sibling router, imported lazily to avoid a cycle
+    if await mind_control.inference_pending():
+        raise HTTPException(
+            409,
+            "The Algorave Mind is answering, or its last request is unresolved. "
+            "Wait for it to finish — or stop the Mind service — before unloading the main LLM.",
+        )
+
+
+def _instance_id(instance: dict[str, Any]) -> Any:
+    return instance.get("instance_id") or instance.get("id") or instance.get("key")
+
+
+async def _unload_resident(models: list[dict[str, Any]]) -> dict[str, Any]:
+    """Unload EVERY instance LM Studio reports resident, or nothing.
+
+    One model resident, ever: this is the whole reason the main LLM
+    exists. Both the unload action and a load that would otherwise sit
+    a second model beside the first go through here, so the Mind guard
+    is consulted in exactly one place and only when something is
+    actually about to be evicted.
+    """
+    instances = [i for m in models for i in m["loaded_instances"] if isinstance(i, dict)]
+    if not instances:
+        return {"status": "unloaded", "instance_id": None}
+    await _ensure_mind_idle()
+    result: dict[str, Any] = {}
+    for instance in instances:
+        result = await _request("/api/v1/models/unload", "POST", {"instance_id": _instance_id(instance)})
+    return result
 
 
 def _selected_settings(settings: Settings | None) -> Settings:
@@ -224,7 +326,7 @@ def _find_model(models: list[dict[str, Any]], key: str) -> dict[str, Any]:
 
 def admin(user: dict) -> None:
     if not permissions.has_capability(user, permissions.MANAGE_GENERATOR):
-        raise HTTPException(403, "Only an Apollo administrator can manage session models.")
+        raise HTTPException(403, "Only an Apollo administrator can manage the main LLM.")
 
 
 @router.get("")
@@ -249,11 +351,11 @@ async def action(
 ):
     admin(user)
     if action not in {"load", "unload"}:
-        raise HTTPException(404, "Unknown session model action.")
+        raise HTTPException(404, "Unknown main LLM action.")
     async with ace_control.gate():
         ace_control.reject_live()
         if action == "load":
-            await _ensure_session_model_capacity()
+            await _ensure_capacity()
             selected_settings = _selected_settings(settings)
             models = await list_models()
             selected = _find_model(models, selected_settings.model_key)
@@ -266,15 +368,16 @@ async def action(
             max_context = selected.get("max_context_length")
             if isinstance(max_context, int):
                 context_length = min(context_length, max_context)
+            # LM Studio's load does not evict what is already resident, so
+            # loading B beside A would put two models on the GPU ACE shares
+            # — the exact failure this module exists to prevent. Evict
+            # first (the same model too: a reload with new settings), and
+            # only if the Mind is not mid-answer on the model going away.
+            await _unload_resident(models)
             return await _request("/api/v1/models/load", "POST", {
                 "model": selected_settings.model_key,
                 "context_length": context_length,
                 "flash_attention": selected_settings.flash_attention,
                 "echo_load_config": True,
             })
-        models = await list_models()
-        instances = [i for m in models for i in m["loaded_instances"] if isinstance(i, dict)]
-        if not instances:
-            return {"status": "unloaded", "instance_id": None}
-        instance_id = instances[0].get("instance_id") or instances[0].get("id") or instances[0].get("key")
-        return await _request("/api/v1/models/unload", "POST", {"instance_id": instance_id})
+        return await _unload_resident(await list_models())

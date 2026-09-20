@@ -1,10 +1,35 @@
-# Managed Mind and Settings
+# The Algorave Mind service, and the main LLM it thinks with
 
-The existing single-worker ACE supervisor also exposes authenticated `/v1/mind`
-routes. Apollo proxies these through `/api/mind`; only administrators can change
-settings or residency. Browser inference uses the authenticated same-origin
-`/api/algorave/mind` gateway. The former `ALGORAVE_MIND_URL` override is no longer
-used: the managed host service is loopback-only on port 4032.
+The Mind is an HTTP process on the GPU host (`apollo-mind.service`, the
+algorave playground on loopback:4032). It turns an intent into Strudel.
+**It owns no model.** It thinks with the **main LLM** — the one LM Studio
+model Apollo chooses, loads and unloads from **Settings → Main LLM**
+(`web/backend/main_llm.py`, over LM Studio's REST API) — the same model that
+extracts briefs, plans sessions and drives the live DJ.
+
+Until 2026-09-19 this file described a second model: the Mind loaded its own
+copy under the alias `apollo-mind` with `lms load`, with its own settings file
+and its own Load button. One physical LLM was managed as two, and pressing both
+Load buttons put two copies on the 16 GB GPU ACE shares. That alias, that
+settings file (`~/.config/apollo/mind-settings.json`) and the load/unload
+routes are gone; `APOLLO_MIND_SETTINGS_PATH` is no longer read.
+
+The ACE supervisor still exposes the authenticated `/v1/mind` routes, now
+three: status, `start`/`stop` of the service, and `infer`. Apollo proxies them
+through `/api/mind`; only administrators may start or stop. Browser inference
+uses the authenticated same-origin `/api/algorave/mind` gateway.
+
+## How a request reaches the model
+
+1. The page asks `/api/algorave/mind` (Next, same origin).
+2. Apollo's `/api/mind/infer` sets `model` to the main LLM's key
+   (`main_llm.current_model()`), refusing any other name with 422.
+3. The host supervisor forwards it only if `lms ps --json` shows that model
+   resident and the service is active — otherwise 409 naming the fix. The
+   playground never JIT-loads.
+4. The playground runs with `--any-model`: it trusts the model each request
+   names instead of an allow-list declared at startup (there is nothing to
+   declare — the choice lives in Settings). A request naming no model is 400.
 
 ## Host installation
 
@@ -13,36 +38,46 @@ systemd unit directory, then run `systemctl --user daemon-reload`. Check the Nod
 version in its PATH matches the host installation. The main checkout needs its
 Python virtualenv and `scripts/algorave-spike/node_modules` dependencies installed.
 LM Studio must be running at localhost:1234, with the `lms` executable available
-at `~/.lmstudio/bin/lms`. Restart the ACE controller only when no host operation
-or Mind request is active; keep exactly one worker. Do not enable Mind at boot.
-
-Settings persist atomically with mode 0600 at
-`~/.config/apollo/mind-settings.json` (`APOLLO_MIND_SETTINGS_PATH` can override it
-in the controller's environment). Secrets and server addresses stay in deployment
-configuration, not the web form.
+at `~/.lmstudio/bin/lms` (the supervisor only reads `lms ps`). Restart the ACE
+controller only when no Mind request is active; keep exactly one worker. Do not
+enable Mind at boot.
 
 ## Operator workflow
 
-Open Model management in Algorave without leaving the performance, or Settings
-in the main navigation. Choose an installed model, context and GPU offload; save,
-then Start Mind and Load model. Saving does not reload a model. To change a loaded
-model, Unload model and Load model after saving. Start/stop controls only the HTTP
-service. Load/unload controls only the reserved LM Studio identifier `apollo-mind`;
-other applications must not use that identifier.
+In **Settings → Main LLM**: choose an installed model, context and flash
+attention, then **Load selected model** (stop ACE first — they share the GPU,
+and the load answers 409 while ACE holds it). Below it, **Start Mind** brings
+the service up; it loads nothing. Open `/algorave` and play. The same panel is
+reachable from the Algorave page's **Main LLM** button.
 
-Shared GPU is off by default. Enable it explicitly to permit ACE and Mind together.
-Offload is a fraction of model layers, **not a VRAM cap**: memory fit depends on
-both models, context and inference. Zero offload uses CPU. Other loaded models
-still block ACE admission. Nothing automatically stops ACE or unloads other models.
+To change the model, load another from the same panel; the Mind follows on its
+next request. The load **evicts whatever is resident first** — LM Studio's own
+load does not, and two models beside each other on the shared GPU is the
+failure this design exists to prevent — so it is refused under the same rule as
+**Unload model**: while the Mind reports an answer in flight or an unresolved
+transport, because the request outlives the browser and the model must outlive
+the request. An unresolved transport is cleared by **Stop Mind** (verify the
+answer finished on the host first): stopping the unit kills the process that
+could still have been working, so it is the one action that can know. Start and
+inference stay refused until then.
 
-In-flight managed inference blocks model changes, even after the browser disconnects.
-Model-operation timeouts are uncertain: do not blindly retry. Verify `lms ps --json`
-and the LM Studio server logs first. A timed-out load can reconcile when its alias
-appears; unresolved unloads require operator verification and controller restart
-after the operation has genuinely finished. Avoid controller restarts during work.
-Inference transport timeouts also leave state uncertain: the model server may
-still be processing after the HTTP client disconnects. Verify completion on the
-host before restarting the controller; no unload is admitted in the meantime.
+The Mind needs the main LLM to be an LM Studio model: with `AGENT_PROVIDER`
+pointing at Anthropic or Azure, asking it answers 503 naming that, and the
+Settings choice is ignored by every caller until the box is wired back to LM
+Studio. An install without the host controller (`ACESTEP_CONTROL_URL` unset) is
+a normal shape — the panel says "Host controller not configured" and manages
+the model as usual.
+
+There is no shared-GPU opt-in any more. The protocol in the root CLAUDE.md is
+symmetric: unload the main LLM before starting ACE, stop ACE before loading it.
+The ACE supervisor refuses to start while any model is resident in LM Studio.
+
+Model-operation timeouts belong to LM Studio's REST API now and surface in the
+panel's error line. An inference transport timeout still leaves the host
+supervisor `uncertain`: the model server may be processing after the client
+disconnected, so `stop` and a new `infer` are refused until the controller is
+restarted, and Apollo refuses to unload the model meanwhile. Verify on the host
+(`lms ps --json`, the LM Studio logs) before restarting.
 
 Rollout must wait for a performance-safe window: frontend reloads may interrupt
 browser audio. This feature does not restore autoplay or automatically resume B2B.

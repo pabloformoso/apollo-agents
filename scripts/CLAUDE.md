@@ -160,6 +160,14 @@
   - `validate.mjs`'s token screen covers **comments**, so a comment
     saying "cannot import Python" rejects the whole buffer. Cost a 502
     on the seed file's own header, 2026-08-29.
+  - **`--any-model` is the managed deployment** (`deploy/acestep/
+    apollo-mind.service`): nothing is declared with `--model`, and the
+    request's `model` is trusted instead of allow-listed, because the
+    caller in front of it — Apollo's host supervisor — names the main LLM
+    chosen in Settings and has already checked it is resident. A request
+    naming no model is then a 400, since there is no declared default.
+    The rehearsal-room playground on :4031 keeps the allow-list: there
+    the PAGE chooses and the server must own the list.
   - **Stability rules from the first real practice (2026-08-30),** all
     three page-side: the /mind fetch aborts at 130 s (longer than the
     server's own 120 s transport timeout, so a slow model is still the
