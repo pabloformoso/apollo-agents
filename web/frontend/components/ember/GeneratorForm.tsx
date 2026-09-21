@@ -467,17 +467,25 @@ export function GeneratorForm({
     return (
       <form onSubmit={submit} data-testid="generator-composer" className="flex flex-col gap-4">
         {errorBanner}
-        <textarea
-          value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          maxLength={PROMPT_MAX}
-          rows={3}
-          data-testid="generator-prompt"
-          placeholder="Describe a song — the mood, the instruments, how it moves…"
-          className="bg-transparent border-0 text-cream font-display italic text-[28px] sm:text-[34px] leading-[1.2] tracking-[-0.015em] resize-none outline-none p-0 placeholder:text-faint disabled:opacity-50"
-          disabled={inert}
-        />
-        <div className="h-px bg-line2" />
+        {/* A FIELD, unmistakably: a bare italic placeholder under the
+            heading read as a subtitle, and nobody typed into it. Label,
+            border, surface, a tall box — and still the display face, because
+            the words ARE the song. */}
+        <Field
+          label="song description"
+          hint="The mood, the instruments, how it moves. One or two sentences is plenty; the genre preset adds the style."
+        >
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            maxLength={PROMPT_MAX}
+            rows={3}
+            data-testid="generator-prompt"
+            placeholder="a slow, hypnotic techno track with a warm bassline and rain on the window…"
+            className="bg-surf border border-line2 px-4 py-3 text-cream font-display italic text-[22px] sm:text-[26px] leading-[1.3] tracking-[-0.01em] min-h-[128px] resize-y outline-none placeholder:text-faint focus:border-ember disabled:opacity-50"
+            disabled={inert}
+          />
+        </Field>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-[1fr_1fr_1fr_auto] sm:items-end">
           {genreField}
           {durationField}
@@ -493,7 +501,7 @@ export function GeneratorForm({
             className="bg-transparent border-0 p-0 cursor-pointer font-mono text-[10px] uppercase tracking-mono text-mute hover:text-ember-text"
             disabled={inert}
           >
-            {withLyrics ? "− instrumental instead" : "+ add lyrics"}
+            {withLyrics ? "− no lyrics · instrumental" : "+ add lyrics"}
           </button>
           <button
             type="button"
@@ -519,8 +527,21 @@ export function GeneratorForm({
           )}
         </div>
         {withLyrics && (
-          <div className="grid grid-cols-1 sm:grid-cols-[2fr_1fr] gap-4">
-            {lyricsField}
+          <div className="grid grid-cols-1 sm:grid-cols-[2fr_1fr] gap-4 items-start border border-line p-4">
+            <Field
+              label="lyrics"
+              hint="Structure tags like [Verse] and [Chorus] guide the arrangement. Write them in the vocal language."
+            >
+              <textarea
+                value={lyrics}
+                onChange={(e) => setLyrics(e.target.value)}
+                rows={8}
+                data-testid="generator-lyrics"
+                placeholder={LYRICS_PLACEHOLDER}
+                className="bg-surf border border-line2 px-4 py-3 text-ember-text font-mono text-[13px] leading-[1.6] min-h-[200px] resize-y outline-none placeholder:text-faint focus:border-ember disabled:opacity-50"
+                disabled={inert}
+              />
+            </Field>
             {languageField}
           </div>
         )}

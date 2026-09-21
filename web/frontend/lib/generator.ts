@@ -1639,7 +1639,14 @@ export function generationTitle(gen: Generation): string {
 export function generationPrompt(gen: Generation): string {
   const raw = gen?.request?.user_prompt;
   const fromUser = typeof raw === "string" ? raw.trim() : "";
-  return fromUser || String(gen?.request?.prompt ?? "").trim();
+  if (fromUser) return fromUser;
+  // A row from before `user_prompt`: the caption is `<style>. <words>`,
+  // and the style descriptor never contains ". " (it is one clause list),
+  // so the user's words are what follows the first sentence break. A
+  // caption with no break is a bare style or a bare prompt — keep it whole.
+  const caption = String(gen?.request?.prompt ?? "").trim();
+  const cut = caption.indexOf(". ");
+  return cut > 0 && cut + 2 < caption.length ? caption.slice(cut + 2).trim() : caption;
 }
 
 /** The prompt itself, collapsed to one line, under the title. */
@@ -1833,6 +1840,12 @@ export type GenerationsFeedApi = {
   ) => void;
   /** ACE accepted a job from the composer: show its card now, pending. */
   adopt: (res: CreateTaskResponse, request: CreateTaskRequest) => void;
+  /**
+   * Ids the COMPOSER is still polling. Their cards say "ACE is writing"
+   * instead of offering Resume — that button is for a batch whose tab
+   * died, and on a card someone is watching fill in it reads as a fault.
+   */
+  inFlight: string[];
 };
 
 /**
@@ -1848,6 +1861,7 @@ export function useGenerationsFeed(
 ): GenerationsFeedApi {
   const [state, setState] = useState<FeedState>(INITIAL_FEED_STATE);
   const [resuming, setResuming] = useState<string[]>([]);
+  const [adopted, setAdopted] = useState<string[]>([]);
   const inFlight = useRef(false);
 
   useEffect(() => {
@@ -1932,6 +1946,9 @@ export function useGenerationsFeed(
       setState((prev) => feedFailed(prev, err));
     } finally {
       setResuming((prev) => prev.filter((id) => id !== generationId));
+      // A resume is also how the composer says "it landed": the card is
+      // its own again, Resume included if it is somehow still pending.
+      setAdopted((prev) => prev.filter((id) => id !== generationId));
     }
   }, []);
 
@@ -1952,6 +1969,7 @@ export function useGenerationsFeed(
   );
 
   const adopt = useCallback((res: CreateTaskResponse, request: CreateTaskRequest) => {
+    setAdopted((prev) => (prev.includes(res.task_id) ? prev : [...prev, res.task_id]));
     setState((prev) => ({
       ...prev,
       loading: false,
@@ -1959,7 +1977,7 @@ export function useGenerationsFeed(
     }));
   }, []);
 
-  return { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt };
+  return { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight: adopted };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────
