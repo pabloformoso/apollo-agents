@@ -40,8 +40,20 @@ html, body {
   padding: 0;
   background: var(--ink);
   color: var(--ember-text);
+  /* Native form controls follow the page: the dropdown a <select> pops
+     is drawn by the browser from its own light palette, and with the
+     page's cream text on it the genre list was unreadable (2026-09-21). */
+  color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Belt and braces for the popup list itself: Chromium and Firefox paint
+   <option> rows from these, not from the page. */
+select,
+option {
+  background-color: var(--surf);
+  color: var(--ember-text);
 }
 
 * {
