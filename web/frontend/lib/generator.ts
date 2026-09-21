@@ -1667,9 +1667,18 @@ export function generationSubtitle(gen: Generation): string {
  * stripe rather than to a broken image.
  */
 export function generationCoverUrl(gen: Generation): string | null {
-  if (!gen?.cover_url) return null;
   const token = getToken() ?? "";
-  return `${BASE}/generator/generations/${encodeURIComponent(gen.id)}/cover${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  if (gen?.cover_url) {
+    return `${BASE}/generator/generations/${encodeURIComponent(gen.id)}/cover${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  }
+  // Artwork is paid for at PUBLISH: once a take of this batch is in the
+  // catalog, the batch wears that track's cover. The first published take
+  // is the one the batch is named after (`variant of` for the rest).
+  const published = (gen?.takes ?? []).find((t) => t?.published_track_id);
+  if (published?.published_track_id) {
+    return `${BASE}/tracks/${encodeURIComponent(published.published_track_id)}/cover${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+  }
+  return null;
 }
 
 /** The lyrics this generation was asked with, if any take carries them. */

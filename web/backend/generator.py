@@ -964,6 +964,11 @@ def _decoded_take_path(file: str | None) -> str | None:
         return None
 
 
+def _cover_on_release() -> bool:
+    """Read at CALL time, the env rule every generator flag follows."""
+    return os.getenv("APOLLO_COVER_ON_RELEASE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _record_release(
     user_id: int,
     task_id: str,
@@ -1296,19 +1301,19 @@ async def create_generation_task(
         current_user["id"], released.task_id, payload, req.genre_folder,
         user_prompt=req.prompt,
     )
-    # The song's cover, drawn from the user's words in the genre's visual
-    # language, in the BACKGROUND: the image call takes ~20 s and ACE takes
-    # longer, so it is usually on disk before the takes are. Drawn at
-    # release rather than at the done-poll because the poll has no
-    # BackgroundTasks and re-runs every 3 s; a failed task costs one image,
-    # which is the price of a card that never shows a blank. Failures are
-    # logged inside covers and never surface — the publish cover's rule.
-    background.add_task(
-        covers.generate_generation_cover,
-        released.task_id,
-        req.prompt,
-        req.genre_folder,
-    )
+    # A cover per GENERATION costs an image call (Azure, gpt-image-1) for
+    # every batch, kept or not — the agreement is to pay for artwork only
+    # when a take is PUBLISHED, and the card borrows that catalog cover
+    # (`generationCoverUrl` falls back to a published take's). Drawing at
+    # release is an opt-in for a box that wants every card dressed:
+    # APOLLO_COVER_ON_RELEASE=1. Background, ~20 s, never fatal.
+    if _cover_on_release():
+        background.add_task(
+            covers.generate_generation_cover,
+            released.task_id,
+            req.prompt,
+            req.genre_folder,
+        )
 
     stats = await _stats_or_none(client)
     return {

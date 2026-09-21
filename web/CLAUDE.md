@@ -1090,7 +1090,15 @@ silent page: **structural checks pass while the music is wrong.**
   from it would call every techno song "Driving Techno"; `_record_release`
   now also writes `request.user_prompt`, the raw words, and
   `generationPrompt` prefers it. Older rows fall back to the caption.
-- **One cover per generation, drawn at release, in its own namespace.**
+- **Covers are paid for at PUBLISH, not per batch.** A release draws a
+  cover only with `APOLLO_COVER_ON_RELEASE=1` (default off — the
+  agreement of 2026-09-21: every batch costs an Azure `gpt-image-1` call
+  otherwise, kept or not). Without it the card wears the catalog cover of
+  its first published take (`generationCoverUrl` falls back to
+  `/api/tracks/{published_track_id}/cover`), so a kept song still gets its
+  picture at no extra cost. The per-generation mechanism below stays for
+  the opt-in.
+- **One cover per generation (opt-in), drawn at release, in its own namespace.**
   `covers.generate_generation_cover(task_id, user_prompt, genre_folder)`
   runs as a `BackgroundTasks` on `POST /tasks` (the image takes ~20 s, ACE
   longer, so it is usually on disk before the takes are; the done-poll has

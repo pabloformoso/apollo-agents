@@ -398,6 +398,15 @@ describe("the card's header", () => {
     expect(generationSubtitle(generation("a", "2026-08-29T09:00:00Z", { request: null }))).toBe("");
   });
 
+  it("wears a published take's catalog cover when the batch has none of its own", () => {
+    const gen = generation("a", "2026-08-29T09:00:00Z", {
+      takes: [take(0), take(1, { state: "published", published_track_id: "techno--neon-rain" })],
+    });
+    expect(generationCoverUrl(gen)).toContain("/api/tracks/techno--neon-rain/cover");
+    // A cover of its own wins over the borrowed one.
+    expect(generationCoverUrl({ ...gen, cover_url: "/api/generator/generations/a/cover" })).toContain("/generations/a/cover");
+  });
+
   it("serves the cover only once the backend says it drew one", () => {
     expect(generationCoverUrl(generation("a", "2026-08-29T09:00:00Z"))).toBeNull();
     const url = generationCoverUrl(

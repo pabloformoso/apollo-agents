@@ -1045,16 +1045,29 @@ def test_a_corrupt_json_column_degrades_to_an_empty_object(tmp_db):
 # ══ The cover: one per generation, drawn at release ═══════════════════
 
 
-def test_a_release_schedules_the_generation_cover_from_the_users_words(
-    auth_client, ace_on, monkeypatch
-):
-    """TestClient runs BackgroundTasks after the response, so the call is
-    observable here; the image itself is never bought in tests."""
+def test_a_release_draws_no_cover_unless_asked(auth_client, ace_on, monkeypatch):
+    """Artwork is paid for at PUBLISH, not per batch: a release schedules no
+    image call by default. TestClient runs BackgroundTasks after the
+    response, so a scheduled call would be observable here."""
     seen: list[tuple] = []
     monkeypatch.setattr(
         generator.covers, "generate_generation_cover",
         lambda task_id, prompt, genre: seen.append((task_id, prompt, genre)),
     )
+    monkeypatch.delenv("APOLLO_COVER_ON_RELEASE", raising=False)
+    _release(auth_client, monkeypatch)
+    assert seen == []
+
+
+def test_a_release_draws_the_cover_from_the_users_words_when_opted_in(
+    auth_client, ace_on, monkeypatch
+):
+    seen: list[tuple] = []
+    monkeypatch.setattr(
+        generator.covers, "generate_generation_cover",
+        lambda task_id, prompt, genre: seen.append((task_id, prompt, genre)),
+    )
+    monkeypatch.setenv("APOLLO_COVER_ON_RELEASE", "1")
     task_id = _release(auth_client, monkeypatch)
     assert seen == [(task_id, "dark melodic techno, hypnotic", "techno")]
 
