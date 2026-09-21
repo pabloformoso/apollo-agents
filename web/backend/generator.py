@@ -1652,6 +1652,7 @@ async def publish_take(
         entry["id"],
         entry["display_name"],
         req.genre_folder,
+        req.prompt,
     )
 
     return {

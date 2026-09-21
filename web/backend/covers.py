@@ -73,7 +73,83 @@ def has_cover(track_id: str) -> bool:
     return bool(p and p.is_file())
 
 
-def _render(path: Path, directory: Path, name: str, genre_folder: str, cache_name: str) -> str | None:
+#: A chat deployment that writes the ART DIRECTION per song. The genre
+#: template alone gave every organic-zen track the same stacked stones:
+#: one prompt per style, only the title varying, and the image model
+#: latching onto the template's first motif. Unset → the template, no call.
+ART_DIRECTION_ENV = "APOLLO_COVER_PROMPT_DEPLOYMENT"
+_ART_DIRECTION_SYSTEM = (
+    "You are an art director for album covers. Given a song's title, the "
+    "words it was made from and the genre's visual language, write ONE "
+    "image-generation prompt of at most 80 words: a concrete subject, a "
+    "composition, the light, a palette, a medium. Stay inside the genre's "
+    "visual language but choose a subject the words suggest — never the "
+    "genre's generic motif, never a person's face, never any text or "
+    "lettering in the image. Answer with the prompt only."
+)
+
+
+def _style_template(genre_folder: str) -> str:
+    """The genre's visual language, straight from the video renderer's table."""
+    try:
+        main = importlib.import_module("main")
+        theme = main.GENRE_THEMES.get((genre_folder or "").strip().lower())
+        style = (theme or {}).get("artwork_style", "abstract")
+        return str(main.ARTWORK_PROMPTS.get(style, main.ARTWORK_PROMPTS["abstract"]))
+    except Exception:  # noqa: BLE001 — a missing table means no reference, not a failure
+        return ""
+
+
+def _ask_art_direction(deployment: str, system: str, user: str) -> str:
+    """One short chat completion on the Azure resource the covers already use."""
+    from openai import AzureOpenAI  # noqa: PLC0415 — off the API's import path
+
+    client = AzureOpenAI(
+        api_key=os.environ["AZURE_OPENAI_API_KEY"],
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
+    )
+    response = client.chat.completions.create(
+        model=deployment,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=200,
+        temperature=1.0,
+        timeout=20,
+    )
+    return (response.choices[0].message.content or "").strip()
+
+
+def art_direction(title: str, words: str | None, genre_folder: str) -> str | None:
+    """A prompt written for THIS song, or ``None`` to fall back to the template.
+
+    ``None`` when no deployment is configured (no call is made), when the
+    model answers nothing usable, or when the call fails — a cover is
+    never worth an exception, and the template is a fine second answer.
+    """
+    deployment = os.getenv(ART_DIRECTION_ENV, "").strip()
+    if not deployment:
+        return None
+    reference = _style_template(genre_folder)
+    user = (
+        f"Title: {title}\n"
+        f"Genre: {genre_folder or 'unknown'}\n"
+        f"The song's words: {(words or '').strip() or '(none given)'}\n"
+        f"The genre's visual language (a reference, not a prompt to copy): {reference.replace('{track_name}', title) or '(none)'}"
+    )
+    try:
+        text = _ask_art_direction(deployment, _ART_DIRECTION_SYSTEM, user)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[covers] art direction failed for {title!r}: {exc}", flush=True)
+        return None
+    text = " ".join(text.split())
+    if len(text) < 20:
+        return None
+    return text[:900] + " No text or lettering in the image."
+
+
+def _render(
+    path: Path, directory: Path, name: str, genre_folder: str, cache_name: str, words: str | None = None,
+) -> str | None:
     """The one image call, shared by tracks and generations.
 
     Returns the file path on success, ``None`` when it was skipped (no
@@ -90,23 +166,29 @@ def _render(path: Path, directory: Path, name: str, genre_folder: str, cache_nam
     try:
         main = importlib.import_module("main")
         theme = main.GENRE_THEMES.get((genre_folder or "").strip().lower())
-        return main._generate_artwork(name, str(directory), theme, cache_name=cache_name)
+        return main._generate_artwork(
+            name, str(directory), theme, cache_name=cache_name,
+            prompt=art_direction(name, words, genre_folder),
+        )
     except Exception as exc:  # noqa: BLE001 — a cover is never worth a 500
         print(f"[covers] cover generation failed for {cache_name}: {exc}", flush=True)
         return None
 
 
-def generate_cover(track_id: str, display_name: str, genre_folder: str) -> str | None:
+def generate_cover(
+    track_id: str, display_name: str, genre_folder: str, words: str | None = None,
+) -> str | None:
     """Render and cache a cover for one catalog track.
 
     ``None`` for an unsafe id, a missing image deployment or a failed
-    call — the caller is a publish that has already succeeded.
+    call — the caller is a publish that has already succeeded. ``words``
+    is the prompt the take was made from, for the art direction.
     """
     path = cover_path(track_id)
     if path is None:
         print(f"[covers] refusing unsafe track id {track_id!r}", flush=True)
         return None
-    return _render(path, cover_dir(), display_name or track_id, genre_folder, track_id)
+    return _render(path, cover_dir(), display_name or track_id, genre_folder, track_id, words)
 
 
 def cover_url_for(track_id: str) -> str | None:
@@ -174,7 +256,7 @@ def generate_generation_cover(task_id: str, prompt: str | None, genre_folder: st
     if path is None:
         print(f"[covers] refusing unsafe generation id {task_id!r}", flush=True)
         return None
-    return _render(path, generation_cover_dir(), cover_title(prompt), genre_folder, task_id)
+    return _render(path, generation_cover_dir(), cover_title(prompt), genre_folder, task_id, prompt)
 
 
 def generation_cover_url_for(task_id: str) -> str | None:
@@ -185,6 +267,8 @@ def generation_cover_url_for(task_id: str) -> str | None:
 
 
 __all__ = [
+    "ART_DIRECTION_ENV",
+    "art_direction",
     "cover_dir",
     "cover_path",
     "cover_title",

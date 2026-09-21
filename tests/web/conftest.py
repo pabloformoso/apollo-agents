@@ -58,6 +58,7 @@ def no_image_api(monkeypatch):
     """
     monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("APOLLO_COVER_PROMPT_DEPLOYMENT", raising=False)
 
 
 @pytest.fixture

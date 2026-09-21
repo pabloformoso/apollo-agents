@@ -3985,7 +3985,7 @@ def _get_video_bg_frame(t, transitions, video_loops, frame_buf, blend_buf):
 
 # === Artwork generation ===
 
-def _generate_artwork(track_name, artwork_dir, theme=None, cache_name=None):
+def _generate_artwork(track_name, artwork_dir, theme=None, cache_name=None, prompt=None):
     """Generate artwork for a track using DALL-E 3, with caching.
 
     Uses theme["artwork_style"] to select prompt template from ARTWORK_PROMPTS.
@@ -3999,6 +3999,10 @@ def _generate_artwork(track_name, artwork_dir, theme=None, cache_name=None):
     slash). The prompt still gets ``track_name`` so the image is about
     the song, not about a slug. Defaults to ``track_name`` — every
     existing caller keeps its current behaviour.
+
+    ``prompt`` replaces the genre template entirely — the art direction
+    ``web/backend/covers.art_direction`` writes per song, so two songs of
+    one genre stop sharing a picture. ``None`` keeps the template.
     """
     os.makedirs(artwork_dir, exist_ok=True)
     cache_path = os.path.join(artwork_dir, f"{cache_name or track_name}.png")
@@ -4019,9 +4023,10 @@ def _generate_artwork(track_name, artwork_dir, theme=None, cache_name=None):
     if theme:
         style = theme.get("artwork_style", "abstract")
     template = ARTWORK_PROMPTS.get(style, ARTWORK_PROMPTS["abstract"])
-    prompt = template.format(track_name=track_name)
+    directed = bool(prompt and prompt.strip())
+    prompt = prompt.strip() if directed else template.format(track_name=track_name)
 
-    print(f"  Generating artwork for '{track_name}' (style: {style})...")
+    print(f"  Generating artwork for '{track_name}' (style: {style}{', directed' if directed else ''})...")
     try:
         client = _build_azure_image_client()
         # Minimal kwargs — gpt-image-1/2 reject DALL-E-3-only params like
