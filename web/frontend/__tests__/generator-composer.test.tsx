@@ -102,6 +102,18 @@ describe("GeneratorComposer", () => {
     expect(JSON.parse(String(post!.init!.body)).lyrics).toBe("[Verse]\nrain");
   });
 
+  it("says why Generate is grey until there is a description", async () => {
+    stubFetch();
+    render(<GeneratorComposer onAdopt={() => {}} onLanded={() => {}} />);
+    const genre = (await screen.findByTestId("generator-genre")) as HTMLSelectElement;
+    await waitFor(() => expect(genre.options.length).toBeGreaterThan(1));
+    expect((screen.getByTestId("generator-submit") as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("generator-composer-hint").textContent).toBe("describe the song to generate");
+    fireEvent.change(screen.getByTestId("generator-prompt"), { target: { value: "a song" } });
+    expect(screen.queryByTestId("generator-composer-hint")).toBeNull();
+    expect((screen.getByTestId("generator-submit") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("stays on screen, inert and explained, when ACE is off", async () => {
     stubFetch({ health: { available: false, blocked_by_live: false, stats: {} } });
     render(<GeneratorComposer onAdopt={() => {}} onLanded={() => {}} />);

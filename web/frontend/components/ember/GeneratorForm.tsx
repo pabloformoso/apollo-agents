@@ -166,6 +166,18 @@ export function GeneratorForm({
   const lyricsShown = composer ? withLyrics : true;
   const canSubmit =
     Boolean(prompt.trim()) && Boolean(genre) && captionLength <= PROMPT_MAX && !inert;
+  // Why Generate is grey, in words — a disabled button with no reason reads
+  // as broken. ACE requires a description (the backend refuses an empty
+  // prompt); the preset's style alone is not a song.
+  const holdReason = inert
+    ? null
+    : !prompt.trim()
+      ? "describe the song to generate"
+      : !genre
+        ? "pick a genre preset"
+        : captionLength > PROMPT_MAX
+          ? `${captionLength - PROMPT_MAX} characters over`
+          : null;
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -495,6 +507,11 @@ export function GeneratorForm({
           <span className="font-mono text-[10px] uppercase tracking-mono text-faint">
             {captionLength}/{PROMPT_MAX}
           </span>
+          {holdReason && (
+            <span data-testid="generator-composer-hint" className="font-mono text-[10px] uppercase tracking-mono text-ember">
+              {holdReason}
+            </span>
+          )}
           {disabled && disabledReason && (
             <span data-testid="generator-composer-disabled" className="font-mono text-[10px] uppercase tracking-mono text-warn">
               {disabledReason}

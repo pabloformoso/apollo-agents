@@ -45,11 +45,11 @@ Apollo is designed for DJs, producers, live coders, and curious listeners who wa
 
 | Surface | What happens there |
 | --- | --- |
-| **Library** | Your sessions, saved sets, and recent work. |
+| **Home** | Where you start: the showcase, your recent sessions, the rooms. |
 | **Generations** | New takes from ACE-Step, with playback, scoring, editing, and publishing. |
 | **Catalog** | The tracks Apollo can audition, rate, and use in a set. |
-| **Create** | Brief → Curate → Editor → Render. One journey with several focused screens. |
-| **Perform** | Live playback, audience mode, DJ controls, and the OBS-friendly visual view. |
+| **Create** | Brief → Curate → Editor → Render. One journey with several focused screens, started from Home. |
+| **Perform** | Live playback, audience mode, DJ controls, and the OBS-friendly visual view — where a session sends you. |
 | **Algorave** | Live coding with Strudel, Apollo's mind, a shared pen, and MIDI output. |
 
 The web client uses the Ember visual language: dark surfaces, warm cream type, an ember accent, and a small set of shared components. The interface is one product even when the work moves between planning, generation, editing, and performance.
