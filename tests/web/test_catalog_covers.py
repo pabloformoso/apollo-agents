@@ -131,7 +131,7 @@ def test_the_genre_theme_reaches_the_artwork_call(tmp_path, monkeypatch):
         GENRE_THEMES = {"synthware": {"artwork_style": "dark-techno"}}
 
         @staticmethod
-        def _generate_artwork(name, _dir, theme, cache_name=None):
+        def _generate_artwork(name, _dir, theme, cache_name=None, prompt=None):
             seen.update(name=name, theme=theme, cache_name=cache_name)
             return "/tmp/x.png"
 
@@ -187,7 +187,7 @@ def test_a_generation_cover_is_drawn_from_the_users_words(tmp_path, monkeypatch)
         GENRE_THEMES = {"techno": {"artwork_style": "dark-techno"}}
 
         @staticmethod
-        def _generate_artwork(name, directory, theme, cache_name=None):
+        def _generate_artwork(name, directory, theme, cache_name=None, prompt=None):
             seen.update(name=name, directory=directory, theme=theme, cache_name=cache_name)
             return str(tmp_path / f"{cache_name}.png")
 
@@ -211,3 +211,81 @@ def test_a_generation_cover_already_on_disk_is_never_bought_twice(tmp_path, monk
     monkeypatch.setattr(covers.importlib, "import_module", explode)
     assert covers.generate_generation_cover("task-1", "x", "techno") == str(tmp_path / "task-1.png")
     assert covers.generate_generation_cover("../x", "x", "techno") is None
+
+
+# --- art direction: one prompt per SONG, not one per genre -----------------
+
+class _FakeMain:
+    GENRE_THEMES = {"aural": {"artwork_style": "organic-zen"}}
+    ARTWORK_PROMPTS = {
+        "abstract": "Abstract artwork inspired by '{track_name}'.",
+        "organic-zen": "Warm painterly landscape, {track_name} atmosphere. Desert dunes or misty forest.",
+    }
+    seen: dict = {}
+
+    @staticmethod
+    def _generate_artwork(name, directory, theme, cache_name=None, prompt=None):
+        _FakeMain.seen.update(name=name, theme=theme, cache_name=cache_name, prompt=prompt)
+        return f"{directory}/{cache_name}.png"
+
+
+@pytest.fixture
+def fake_main(monkeypatch, tmp_path):
+    _FakeMain.seen.clear()
+    monkeypatch.setattr(covers, "generation_cover_dir", lambda: tmp_path)
+    monkeypatch.setattr(covers, "cover_dir", lambda: tmp_path / "catalog")
+    monkeypatch.setattr(covers.importlib, "import_module", lambda _n: _FakeMain)
+    monkeypatch.delenv("APOLLO_COVER_PROMPT_DEPLOYMENT", raising=False)
+    return _FakeMain
+
+
+def test_without_a_prompt_deployment_the_template_is_used_and_nothing_is_asked(fake_main, monkeypatch):
+    def never(*_a):
+        raise AssertionError("no chat call without APOLLO_COVER_PROMPT_DEPLOYMENT")
+    monkeypatch.setattr(covers, "_ask_art_direction", never)
+    covers.generate_generation_cover("t1", "neon rain at dawn", "aural")
+    assert fake_main.seen["prompt"] is None
+    assert fake_main.seen["name"] == "Neon Rain At Dawn"
+
+
+def test_the_art_director_gets_the_song_and_the_genre_language_and_its_answer_becomes_the_prompt(fake_main, monkeypatch):
+    monkeypatch.setenv("APOLLO_COVER_PROMPT_DEPLOYMENT", "gpt-4o-mini")
+    asked = {}
+
+    def fake_ask(deployment, system, user):
+        asked.update(deployment=deployment, system=system, user=user)
+        return "  A single paper lantern drifting over dark water at dawn,\n wide shot, amber and slate, gouache.  "
+
+    monkeypatch.setattr(covers, "_ask_art_direction", fake_ask)
+    covers.generate_generation_cover("t1", "neon rain at dawn, hypnotic", "aural")
+
+    assert asked["deployment"] == "gpt-4o-mini"
+    assert "Title: Neon Rain At Dawn" in asked["user"]
+    assert "neon rain at dawn, hypnotic" in asked["user"]
+    assert "Desert dunes or misty forest" in asked["user"], "the genre's visual language is the reference"
+    assert "Neon Rain At Dawn atmosphere" in asked["user"]
+    assert "never any text" in asked["system"]
+    prompt = fake_main.seen["prompt"]
+    assert prompt.startswith("A single paper lantern drifting over dark water at dawn, wide shot")
+    assert prompt.endswith("No text or lettering in the image.")
+
+
+def test_a_failed_or_empty_art_direction_falls_back_to_the_template(fake_main, monkeypatch):
+    monkeypatch.setenv("APOLLO_COVER_PROMPT_DEPLOYMENT", "gpt-4o-mini")
+    monkeypatch.setattr(covers, "_ask_art_direction", lambda *_a: (_ for _ in ()).throw(RuntimeError("429")))
+    covers.generate_generation_cover("t1", "x", "aural")
+    assert fake_main.seen["prompt"] is None
+
+    monkeypatch.setattr(covers, "_ask_art_direction", lambda *_a: "ok")
+    covers.generate_generation_cover("t2", "x", "aural")
+    assert fake_main.seen["prompt"] is None, "a too-short answer is no answer"
+
+
+def test_a_published_track_is_directed_from_the_takes_words_too(fake_main, monkeypatch):
+    monkeypatch.setenv("APOLLO_COVER_PROMPT_DEPLOYMENT", "gpt-4o-mini")
+    asked = {}
+    monkeypatch.setattr(covers, "_ask_art_direction", lambda d, s, u: asked.update(user=u) or "A lone kite above a flooded rice terrace at first light, soft mist, celadon and gold, ink wash.")
+    covers.generate_cover("aural--neon-rain", "Neon Rain", "aural", "neon rain at dawn")
+    assert "Title: Neon Rain" in asked["user"]
+    assert "neon rain at dawn" in asked["user"]
+    assert fake_main.seen["prompt"].startswith("A lone kite")

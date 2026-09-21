@@ -1098,6 +1098,17 @@ silent page: **structural checks pass while the music is wrong.**
   `/api/tracks/{published_track_id}/cover`), so a kept song still gets its
   picture at no extra cost. The per-generation mechanism below stays for
   the opt-in.
+- **The art direction is per SONG, not per genre (2026-09-21).** The
+  genre template alone gave every organic-zen track the same stacked
+  stones: one prompt per style, only the title varying, and the image
+  model latching onto the template's first motif. With
+  `APOLLO_COVER_PROMPT_DEPLOYMENT` set (prod: `gpt-4o-mini`, a fraction
+  of a cent), `covers.art_direction` asks that chat deployment for one
+  ≤80-word prompt from the title, the song's words and the genre template
+  as a *reference*, and `main._generate_artwork(prompt=…)` uses it whole.
+  Unset, failed or too short → the template, no call. NOT the main LLM:
+  covers are drawn while ACE holds the GPU, and a call to LM Studio then
+  JIT-loads a model beside ACE (the 2026-08-29 OOM).
 - **One cover per generation (opt-in), drawn at release, in its own namespace.**
   `covers.generate_generation_cover(task_id, user_prompt, genre_folder)`
   runs as a `BackgroundTasks` on `POST /tasks` (the image takes ~20 s, ACE
