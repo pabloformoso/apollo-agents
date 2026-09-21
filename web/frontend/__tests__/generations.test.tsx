@@ -383,6 +383,17 @@ describe("the card's header", () => {
     expect(generationSubtitle(gen)).toBe("neon rain at dawn");
   });
 
+  it("titles an older row from the words after the style descriptor, not from the descriptor", () => {
+    // Before `user_prompt` the store kept only `<style>. <words>`.
+    const gen = generation("a", "2026-08-29T09:00:00Z", {
+      request: { prompt: "techno: driving four-on-the-floor kick, hypnotic sequenced synths. neon rain at dawn, slow build" },
+    });
+    expect(generationTitle(gen)).toBe("Neon Rain At Dawn");
+    expect(generationSubtitle(gen)).toBe("neon rain at dawn, slow build");
+    // A caption with no sentence break is kept whole.
+    expect(generationTitle(generation("b", "2026-08-29T09:00:00Z", { request: { prompt: "warm lofi keys, tape hiss" } }))).toBe("Warm Lofi Keys");
+  });
+
   it("has no subtitle without a prompt", () => {
     expect(generationSubtitle(generation("a", "2026-08-29T09:00:00Z", { request: null }))).toBe("");
   });
@@ -597,6 +608,27 @@ describe("useGenerationsFeed", () => {
     expect(urlOf(fetchMock.mock.calls[0])).toContain(
       "/generator/generations?limit=2&offset=0",
     );
+  });
+
+  it("marks a composer-adopted card in flight until its resume lands", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, []));
+    const { result } = renderHook(() => useGenerationsFeed(2));
+    await flush();
+    act(() => {
+      result.current.adopt(
+        { task_id: "t-1", queue_position: 0, eta_seconds: 10 },
+        { prompt: "p", genre_folder: "techno", audio_duration: 180 },
+      );
+    });
+    expect(result.current.inFlight).toEqual(["t-1"]);
+    expect(result.current.state.generations[0]).toMatchObject({ id: "t-1", status: "pending" });
+
+    fetchMock.mockResolvedValue(jsonResponse(200, { ...generation("t-1", "2026-09-21T10:00:00Z"), status: "done" }));
+    await act(async () => {
+      await result.current.resume("t-1");
+    });
+    expect(result.current.inFlight).toEqual([]);
+    expect(result.current.state.generations[0].status).toBe("done");
   });
 
   it("loads the first page from the router's BARE array too", async () => {

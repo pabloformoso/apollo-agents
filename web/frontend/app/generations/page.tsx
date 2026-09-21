@@ -91,6 +91,7 @@ function GenerationCard({
   gen,
   genres,
   resuming,
+  inFlight = false,
   onResume,
   onDiscarded,
   onPublished,
@@ -99,6 +100,8 @@ function GenerationCard({
   /** Real genre folders, for the publish confirm inside a take row. */
   genres: string[];
   resuming: boolean;
+  /** The composer is still polling this one: say so instead of offering Resume. */
+  inFlight?: boolean;
   onResume: (generationId: string) => void;
   onDiscarded: (generationId: string, index: number, discarded: boolean) => void;
   onPublished: (
@@ -272,7 +275,18 @@ function GenerationCard({
         </div>
       </header>
 
-      {read.resumable && (
+      {/* A card the composer is watching fill in: no Resume, no hint about
+          24-hour windows — those are for a batch whose tab died. */}
+      {read.resumable && inFlight && (
+        <span
+          data-testid="generation-writing"
+          className="flex items-center gap-2 font-mono text-[11px] uppercase tracking-mono text-mute"
+        >
+          <Spinner /> ACE is writing — the takes land here when they arrive
+        </span>
+      )}
+
+      {read.resumable && !inFlight && (
         <div className="flex items-center gap-3 flex-wrap">
           <Btn
             kind="ghost"
@@ -361,7 +375,7 @@ function GenerationCard({
 // ── The feed ──────────────────────────────────────────────────────────────
 
 function GenerationsFeed() {
-  const { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt } =
+  const { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight } =
     useGenerationsFeed();
   const [genres, setGenres] = useState<string[]>([]);
 
@@ -454,6 +468,7 @@ function GenerationsFeed() {
                 gen={gen}
                 genres={genres}
                 resuming={resuming.includes(gen.id)}
+                inFlight={inFlight.includes(gen.id)}
                 onResume={onResume}
                 onDiscarded={onDiscarded}
                 onPublished={notePublished}
