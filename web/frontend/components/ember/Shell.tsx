@@ -19,15 +19,26 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { ApolloMark, Crumb } from "./primitives";
 
+/**
+ * Every product surface, for the active-tab mapping and the per-route
+ * behaviour below — but only the ROOMS are tabs (`nav: true`). Create is
+ * a journey you start from Home ("Start a session", the showcase); Perform
+ * is where a session sends you ("Apollo, take the booth"). As top-level
+ * tabs they read as two more places to be, which in a room full of people
+ * is two more places to lose them (2026-09-21).
+ */
 export const ROUTES = [
-  { id: "library", label: "Library", href: "/dashboard" },
-  { id: "generations", label: "Generations", href: "/generations" },
-  { id: "catalog", label: "Catalog", href: "/catalog" },
-  { id: "create", label: "Create", href: "/brief" },
-  { id: "perform", label: "Perform", href: "/live" },
-  { id: "algorave", label: "Algorave", href: "/algorave" },
-  { id: "settings", label: "Settings", href: "/settings" },
+  { id: "library", label: "Home", href: "/dashboard", nav: true },
+  { id: "catalog", label: "Catalog", href: "/catalog", nav: true },
+  { id: "generations", label: "Generations", href: "/generations", nav: true },
+  { id: "create", label: "Create", href: "/brief", nav: false },
+  { id: "perform", label: "Perform", href: "/live", nav: false },
+  { id: "algorave", label: "Algorave", href: "/algorave", nav: true },
+  { id: "settings", label: "Settings", href: "/settings", nav: true },
 ] as const;
+
+/** The tabs, in order: Home · Catalog · Generations · Algorave · Settings. */
+export const NAV_ROUTES = ROUTES.filter((r) => r.nav);
 
 type RouteId = (typeof ROUTES)[number]["id"];
 
@@ -95,7 +106,7 @@ export function Shell({
           </Link>
 
           <nav aria-label="Apollo product" className="flex min-w-0 overflow-x-auto gap-1 border border-line p-[3px]">
-            {ROUTES.map((r) => {
+            {NAV_ROUTES.map((r) => {
               const active = r.id === route;
               return (
                 <Link
