@@ -235,7 +235,12 @@ test.describe("G6 — the generations library", () => {
     );
 
     const done = page.locator('[data-generation-id="gen-done"]');
+    // A song has a title, not a request line: the first clause of the
+    // prompt in Title Case, with the prompt itself underneath.
     await expect(done.getByTestId("generation-title")).toHaveText(
+      "Dark Melodic Techno.",
+    );
+    await expect(done.getByTestId("generation-prompt")).toHaveText(
       "dark melodic techno, hypnotic, driving",
     );
     await expect(done.getByTestId("generation-status")).toHaveText("done");

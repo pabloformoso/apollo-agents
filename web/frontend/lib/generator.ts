@@ -1368,6 +1368,8 @@ export type Generation = {
   /** Set by `/refresh` when ACE could not be reached — a blip, not a verdict. */
   degraded?: boolean;
   error?: string | null;
+  /** Relative URL of the generation's cover, once the backend has drawn one. */
+  cover_url?: string | null;
 };
 
 /** The listing, either shape. */
@@ -1614,14 +1616,79 @@ export function readGeneration(gen: Generation): GenerationRead {
 const MAX_CARD_TITLE = 90;
 
 /** The prompt is the card's title — it is what the operator asked for. */
+/**
+ * The card's TITLE: a name, not the prompt. Suno gives every song a title
+ * and it is what makes a feed of songs read as songs rather than as a log
+ * of requests. Same heuristic the publish confirm suggests
+ * (`suggestDisplayName`): the first clause of the prompt, Title Case,
+ * five words at most — so the name a take is published under is the name
+ * its card already carried.
+ */
 export function generationTitle(gen: Generation): string {
-  const prompt = String(gen?.request?.prompt ?? "")
+  const prompt = generationPrompt(gen);
+  if (!prompt) return "Untitled generation";
+  return suggestDisplayName(prompt);
+}
+
+/**
+ * The USER's words. The store keeps the composed ACE caption in `prompt`
+ * (the genre's style descriptor first, the user's words after) and, since
+ * the composer, the raw words in `user_prompt`; a card titled from the
+ * caption would call every techno song "Driving Techno".
+ */
+export function generationPrompt(gen: Generation): string {
+  const raw = gen?.request?.user_prompt;
+  const fromUser = typeof raw === "string" ? raw.trim() : "";
+  return fromUser || String(gen?.request?.prompt ?? "").trim();
+}
+
+/** The prompt itself, collapsed to one line, under the title. */
+export function generationSubtitle(gen: Generation): string {
+  const prompt = generationPrompt(gen)
     .replace(/\s+/g, " ")
     .trim();
-  if (!prompt) return "Untitled generation";
+  if (!prompt) return "";
   return prompt.length > MAX_CARD_TITLE
     ? `${prompt.slice(0, MAX_CARD_TITLE - 1).trimEnd()}…`
     : prompt;
+}
+
+/**
+ * Where the generation's cover is served — the same query-string token
+ * trick as `coverUrl`, because an <img> cannot set a header. Null until the
+ * backend says it drew one (`cover_url`), so the card falls back to its
+ * stripe rather than to a broken image.
+ */
+export function generationCoverUrl(gen: Generation): string | null {
+  if (!gen?.cover_url) return null;
+  const token = getToken() ?? "";
+  return `${BASE}/generator/generations/${encodeURIComponent(gen.id)}/cover${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+}
+
+/** The lyrics this generation was asked with, if any take carries them. */
+export function generationLyrics(gen: Generation): string | null {
+  const fromRequest = typeof gen?.request?.lyrics === "string" ? gen.request.lyrics : "";
+  const fromTake = (gen?.takes ?? []).map((t) => t?.lyrics ?? "").find((l) => l && l.trim()) ?? "";
+  const text = (fromRequest || fromTake).trim();
+  return text || null;
+}
+
+/**
+ * The card the feed shows the moment ACE accepts a job, before the store
+ * has been re-read: pending, no takes, the request as it went out.
+ */
+export function pendingGeneration(
+  res: CreateTaskResponse,
+  request: CreateTaskRequest,
+  nowIso: string = new Date().toISOString(),
+): Generation {
+  return {
+    id: res.task_id,
+    created_at: nowIso,
+    status: "pending",
+    request: { ...request },
+    takes: [],
+  };
 }
 
 function chipText(value: unknown): string | null {
@@ -1764,6 +1831,8 @@ export type GenerationsFeedApi = {
     index: number,
     trackId: string | null,
   ) => void;
+  /** ACE accepted a job from the composer: show its card now, pending. */
+  adopt: (res: CreateTaskResponse, request: CreateTaskRequest) => void;
 };
 
 /**
@@ -1882,7 +1951,15 @@ export function useGenerationsFeed(
     [],
   );
 
-  return { state, loadMore, setDiscarded, resume, resuming, notePublished };
+  const adopt = useCallback((res: CreateTaskResponse, request: CreateTaskRequest) => {
+    setState((prev) => ({
+      ...prev,
+      loading: false,
+      generations: generationsMerged(prev.generations, [pendingGeneration(res, request)]),
+    }));
+  }, []);
+
+  return { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────

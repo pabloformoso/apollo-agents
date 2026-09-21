@@ -32,8 +32,12 @@ import {
   feedLoadingMore,
   formatCreatedAt,
   generationChips,
+  generationCoverUrl,
+  generationLyrics,
   generationReplaced,
+  generationSubtitle,
   generationTitle,
+  pendingGeneration,
   generationsFromPayload,
   generationsMerged,
   hasMorePages,
@@ -352,23 +356,62 @@ describe("readGeneration — the three refusals stay distinct", () => {
 // ── 4. Card gating ────────────────────────────────────────────────────────
 
 describe("the card's header", () => {
-  it("titles the card with the prompt, collapsed to one line", () => {
-    expect(
-      generationTitle(
-        generation("a", "2026-08-29T09:00:00Z", {
-          request: { prompt: "  warm lofi keys,\n  tape hiss  " },
-        }),
-      ),
-    ).toBe("warm lofi keys, tape hiss");
+  it("titles the card like a song — the first clause of the prompt, Title Case", () => {
+    const gen = generation("a", "2026-08-29T09:00:00Z", {
+      request: { prompt: "  warm lofi keys,\n  tape hiss  " },
+    });
+    // The same name the publish confirm suggests, so a take is published
+    // under the name its card already carried.
+    expect(generationTitle(gen)).toBe("Warm Lofi Keys");
+    expect(generationSubtitle(gen)).toBe("warm lofi keys, tape hiss");
   });
 
-  it("truncates a very long prompt rather than breaking the row", () => {
+  it("truncates a very long prompt in the subtitle rather than breaking the row", () => {
     const long = "a".repeat(400);
-    const title = generationTitle(
+    const subtitle = generationSubtitle(
       generation("a", "2026-08-29T09:00:00Z", { request: { prompt: long } }),
     );
-    expect(title.length).toBeLessThan(100);
-    expect(title.endsWith("…")).toBe(true);
+    expect(subtitle.length).toBeLessThan(100);
+    expect(subtitle.endsWith("…")).toBe(true);
+  });
+
+  it("titles and subtitles from the user's own words when the store kept them", () => {
+    const gen = generation("a", "2026-08-29T09:00:00Z", {
+      request: { prompt: "driving techno, four on the floor. neon rain at dawn", user_prompt: "neon rain at dawn" },
+    });
+    expect(generationTitle(gen)).toBe("Neon Rain At Dawn");
+    expect(generationSubtitle(gen)).toBe("neon rain at dawn");
+  });
+
+  it("has no subtitle without a prompt", () => {
+    expect(generationSubtitle(generation("a", "2026-08-29T09:00:00Z", { request: null }))).toBe("");
+  });
+
+  it("serves the cover only once the backend says it drew one", () => {
+    expect(generationCoverUrl(generation("a", "2026-08-29T09:00:00Z"))).toBeNull();
+    const url = generationCoverUrl(
+      generation("a b", "2026-08-29T09:00:00Z", { cover_url: "/api/generator/generations/a%20b/cover" }),
+    );
+    expect(url).toContain("/api/generator/generations/a%20b/cover");
+  });
+
+  it("reads the lyrics from the request, else from a take, else none", () => {
+    expect(generationLyrics(generation("a", "2026-08-29T09:00:00Z", { request: { lyrics: " [Verse]\nrain " } }))).toBe("[Verse]\nrain");
+    expect(generationLyrics(generation("a", "2026-08-29T09:00:00Z", { takes: [take(0, { lyrics: "la" })] }))).toBe("la");
+    expect(generationLyrics(generation("a", "2026-08-29T09:00:00Z", { takes: [take(0)] }))).toBeNull();
+  });
+
+  it("builds the pending card the composer hands the feed", () => {
+    const gen = pendingGeneration(
+      { task_id: "t-9", queue_position: 1, eta_seconds: 30 },
+      { prompt: "p", genre_folder: "techno", audio_duration: 180 },
+      "2026-09-20T10:00:00Z",
+    );
+    expect(gen).toEqual({
+      id: "t-9", created_at: "2026-09-20T10:00:00Z", status: "pending",
+      request: { prompt: "p", genre_folder: "techno", audio_duration: 180 }, takes: [],
+    });
+    expect(generationsMerged([generation("old", "2026-09-19T10:00:00Z")], [gen])[0].id).toBe("t-9");
   });
 
   it("names a generation whose prompt never made it to the store", () => {

@@ -1,6 +1,6 @@
 "use client";
 /**
- * Apollo G6 — the Generations library.
+ * Apollo G6 — the Generations library, now the place you MAKE songs too.
  *
  * The wizard's dialog only ever knew about the batch you were watching:
  * close the tab and the history was gone, even though ACE's files were
@@ -8,6 +8,13 @@
  * backend recorded, newest first, with the SAME take rows the dialog
  * renders (`components/ember/GeneratorTakes`), so a take plays, scores,
  * edits and publishes here exactly as it does there.
+ *
+ * The composer at the top (`GeneratorComposer`) is the Suno shape: describe
+ * a song where you will listen to it; the card appears below the moment ACE
+ * accepts the job and fills in when the takes land. Each card is a song,
+ * not a request — a title, a cover, the prompt as a subtitle, the lyrics if
+ * there were any — and the takes play through the persistent dock at the
+ * bottom, the same one the home page uses.
  *
  * What the feed adds on top of a take row:
  *   - **Discard / Restore** — a take you don't want falls behind the card's
@@ -33,6 +40,9 @@ import {
   discardedTakes,
   formatCreatedAt,
   generationChips,
+  generationCoverUrl,
+  generationLyrics,
+  generationSubtitle,
   generationTitle,
   isPublishedTake,
   readGeneration,
@@ -45,11 +55,12 @@ import {
 } from "@/lib/generator";
 import type { Playable } from "@/lib/player";
 import { Shell } from "@/components/ember/Shell";
-import { Btn, Crumb } from "@/components/ember/primitives";
+import { Btn, Crumb, Stripe } from "@/components/ember/primitives";
 import { Banner, Spinner } from "@/components/ember/feedback";
 import { TakeRow, playableFor } from "@/components/ember/GeneratorTakes";
-import { GenerateSongs } from "@/components/ember/GenerateSongs";
+import { GeneratorComposer } from "@/components/ember/GeneratorComposer";
 import { AceServicePanel } from "@/components/ember/AceServicePanel";
+import { DashboardPlayer } from "@/components/ember/DashboardPlayer";
 
 /** The badge. `stale` is deliberately the quietest of the four — it is not
  *  a fault, just a record that aged out. */
@@ -97,6 +108,7 @@ function GenerationCard({
   ) => void;
 }) {
   const [showDiscarded, setShowDiscarded] = useState(false);
+  const [showLyrics, setShowLyrics] = useState(false);
   // Names published from THIS card, in publish order — the first is what a
   // second take of the same batch is offered as a variant OF, exactly as in
   // the wizard. The store keeps ids, not display names, so a name only
@@ -105,17 +117,22 @@ function GenerationCard({
 
   const read = readGeneration(gen);
   const chips = generationChips(gen);
+  const title = generationTitle(gen);
+  const subtitle = generationSubtitle(gen);
+  const cover = generationCoverUrl(gen);
+  const lyrics = generationLyrics(gen);
 
   // Split and dress the takes in one pass, keyed on the generation itself:
   // the two lists and their playables always have to agree about which take
-  // is where, and a take's `Playable` id is what the player matches on.
+  // is where, and a take's `Playable` id is what the player matches on. The
+  // dock shows the song's title and cover, not "Take 2".
   const { genre, shown, hidden, shownPlayables, hiddenPlayables } = useMemo(() => {
     const folder = String(gen.request?.genre_folder ?? "").trim();
     const g = folder || genres[0] || "";
     const s = visibleTakes(gen);
     const h = discardedTakes(gen);
     const dress = (takes: StoredTake[]): Playable[] =>
-      takes.map((t) => playableFor(t, gen.id, g, takeLabel(t)));
+      takes.map((t) => playableFor(t, gen.id, g, `${title} · ${takeLabel(t).toLowerCase()}`, cover));
     return {
       genre: g,
       shown: s,
@@ -123,7 +140,7 @@ function GenerationCard({
       shownPlayables: dress(s),
       hiddenPlayables: dress(h),
     };
-  }, [gen, genres]);
+  }, [gen, genres, title, cover]);
 
   const renderRow = (
     take: StoredTake,
@@ -170,16 +187,56 @@ function GenerationCard({
       data-status={read.status}
       className="border border-line bg-surf p-5 flex flex-col gap-3"
     >
-      <header className="flex items-start justify-between gap-5">
-        <div className="min-w-0 flex-1">
-          <h2
-            data-testid="generation-title"
-            className="font-display italic font-normal text-2xl leading-[1.15] m-0"
-          >
-            {generationTitle(gen)}
-          </h2>
+      <header className="grid grid-cols-[96px_1fr] sm:grid-cols-[128px_1fr] gap-5 items-start">
+        {/* The cover: drawn once per generation by the backend, in the
+            genre's own visual language. Until it exists (or when it never
+            will — no image key) the stripe is the honest fallback. */}
+        <div
+          data-testid="generation-cover"
+          data-has-cover={cover ? "1" : "0"}
+          className="aspect-square overflow-hidden border border-line2 bg-ink"
+        >
+          {cover ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={cover} alt="" className="h-full w-full object-cover" />
+          ) : (
+            <Stripe alpha={0.18} className="h-full w-full border-0" />
+          )}
+        </div>
+        <div className="min-w-0 flex flex-col gap-2">
+          <div className="flex items-start justify-between gap-5">
+            <div className="min-w-0 flex-1">
+              <h2
+                data-testid="generation-title"
+                className="font-display italic font-normal text-3xl leading-[1.05] m-0"
+              >
+                {title}<span className="text-ember">.</span>
+              </h2>
+              {subtitle && (
+                <p
+                  data-testid="generation-prompt"
+                  className="mt-1.5 text-sm text-mute leading-[1.45] m-0"
+                >
+                  {subtitle}
+                </p>
+              )}
+            </div>
+            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+              <span
+                data-testid="generation-status"
+                data-status={read.status}
+                className={
+                  "font-mono text-[10px] uppercase tracking-mono border px-1.5 py-0.5 " +
+                  STATUS_CLS[read.status]
+                }
+              >
+                {read.status}
+              </span>
+              <Crumb>{formatCreatedAt(gen.created_at)}</Crumb>
+            </div>
+          </div>
           {chips.length > 0 && (
-            <div className="flex flex-wrap gap-x-2 gap-y-1 mt-2">
+            <div className="flex flex-wrap gap-x-2 gap-y-1">
               {chips.map((c) => (
                 <span
                   key={c}
@@ -191,19 +248,27 @@ function GenerationCard({
               ))}
             </div>
           )}
-        </div>
-        <div className="flex flex-col items-end gap-2 flex-shrink-0">
-          <span
-            data-testid="generation-status"
-            data-status={read.status}
-            className={
-              "font-mono text-[10px] uppercase tracking-mono border px-1.5 py-0.5 " +
-              STATUS_CLS[read.status]
-            }
-          >
-            {read.status}
-          </span>
-          <Crumb>{formatCreatedAt(gen.created_at)}</Crumb>
+          {lyrics && (
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                onClick={() => setShowLyrics((v) => !v)}
+                aria-expanded={showLyrics}
+                data-testid="generation-lyrics-toggle"
+                className="self-start bg-transparent border-0 p-0 cursor-pointer font-mono text-[10px] uppercase tracking-mono text-faint hover:text-ember-text"
+              >
+                {showLyrics ? "− lyrics" : "+ lyrics"}
+              </button>
+              {showLyrics && (
+                <pre
+                  data-testid="generation-lyrics"
+                  className="m-0 whitespace-pre-wrap font-mono text-[12px] leading-[1.5] text-ember-text/90 max-h-[240px] overflow-auto"
+                >
+                  {lyrics}
+                </pre>
+              )}
+            </div>
+          )}
         </div>
       </header>
 
@@ -296,7 +361,7 @@ function GenerationCard({
 // ── The feed ──────────────────────────────────────────────────────────────
 
 function GenerationsFeed() {
-  const { state, loadMore, setDiscarded, resume, resuming, notePublished } =
+  const { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt } =
     useGenerationsFeed();
   const [genres, setGenres] = useState<string[]>([]);
 
@@ -337,31 +402,24 @@ function GenerationsFeed() {
 
   return (
     <>
-      <section className="px-[60px] pt-10 pb-6 border-b border-line">
-        <Crumb>
-          generations ·{" "}
-          {state.loading
-            ? "loading…"
-            : `${count} recorded${state.hasMore ? "+" : ""}`}
-        </Crumb>
-        <h1 className="font-display italic font-normal text-[64px] leading-[0.95] tracking-display-tight m-0 mt-2">
-          Generations<span className="text-ember">.</span>
-        </h1>
-        <p className="text-sm text-mute mt-4 max-w-[560px] leading-[1.55]">
-          Everything ACE has written for you, newest first. The takes outlive
-          the tab they were asked for in — play them, score them, edit them,
-          and publish the keepers into the catalog.
-        </p>
-        {/* The feed is where you come back to look at what you made, so it is
-            also where wanting another one happens. Renders nothing when ACE
-            is unreachable. */}
-        <div className="mt-6">
-          <GenerateSongs kind="primary" />
+      <section className="px-6 sm:px-[60px] pt-10 pb-8 border-b border-line flex flex-col gap-6">
+        <div>
+          <Crumb>
+            generations ·{" "}
+            {state.loading
+              ? "loading…"
+              : `${count} recorded${state.hasMore ? "+" : ""}`}
+          </Crumb>
+          <h1 className="font-display italic font-normal text-[clamp(44px,6vw,64px)] leading-[0.95] tracking-display-tight m-0 mt-2">
+            Make a song<span className="text-ember">.</span>
+          </h1>
         </div>
+        {/* The composer: the song is described where it will be heard. */}
+        <GeneratorComposer onAdopt={adopt} onLanded={onResume} />
         <AceServicePanel />
       </section>
 
-      <section className="px-[60px] py-8 flex-1 flex flex-col gap-6">
+      <section className="px-6 sm:px-[60px] py-8 pb-32 flex-1 flex flex-col gap-6">
         {state.error && (
           <Banner tone="error">
             <span
@@ -384,8 +442,8 @@ function GenerationsFeed() {
           >
             <p className="text-mute text-sm mb-2">Nothing generated yet.</p>
             <p className="text-faint text-[12px] m-0">
-              Generations start in the Editor, from the “Generate (ACE)” tile
-              beside the track row.
+              Describe a song above and press Generate. It lands here, with
+              its takes, and stays.
             </p>
           </div>
         ) : (
@@ -441,6 +499,9 @@ export default function GenerationsPage() {
   return (
     <Shell username={user.username}>
       <GenerationsFeed />
+      {/* The same dock the home page has: a take plays through it exactly
+          like a catalog track, title and cover included. */}
+      <DashboardPlayer />
     </Shell>
   );
 }

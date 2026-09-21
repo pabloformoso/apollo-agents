@@ -142,3 +142,72 @@ def test_the_genre_theme_reaches_the_artwork_call(tmp_path, monkeypatch):
     # The PROMPT gets the pretty name, the FILENAME gets the id.
     assert seen["name"] == "Neon Rain"
     assert seen["cache_name"] == "synthware--neon"
+
+
+# --- generations: one cover per ACE task, its own namespace ---------------
+
+def test_a_generation_cover_lives_apart_from_track_covers(tmp_path, monkeypatch):
+    """`/api/tracks/{id}/cover` resolves by filename alone; a task id in
+    that directory would be served under a track URL."""
+    monkeypatch.setattr(covers, "cover_dir", lambda: tmp_path / "catalog")
+    monkeypatch.setattr(covers, "generation_cover_dir", lambda: tmp_path / "generations")
+    p = covers.generation_cover_path("9d0f4a21-77c3")
+    assert p == tmp_path / "generations" / "9d0f4a21-77c3.png"
+    assert covers.cover_path("9d0f4a21-77c3") != p
+    assert covers.generation_cover_path("../x") is None
+    assert covers.generation_cover_url_for("9d0f4a21-77c3") is None
+    p.parent.mkdir()
+    p.write_bytes(b"png")
+    assert covers.generation_cover_url_for("9d0f4a21-77c3") == "/api/generator/generations/9d0f4a21-77c3/cover"
+    assert covers.cover_url_for("9d0f4a21-77c3") is None, "the track route must not see it"
+
+
+@pytest.mark.parametrize(
+    ("prompt", "title"),
+    [
+        ("dark melodic techno, hypnotic, driving", "Dark Melodic Techno"),
+        ("  warm lofi keys,\n  tape hiss  ", "Warm Lofi Keys"),
+        ("neon rain at dawn over the harbour lights", "Neon Rain At Dawn Over"),
+        ("a/b: <song>", "A B Song"),
+        ("", "Untitled Take"),
+        (None, "Untitled Take"),
+    ],
+)
+def test_cover_title_mirrors_the_frontend_name(prompt, title):
+    """The card's title, the published name and the words the image is
+    drawn from are ONE name — `suggestDisplayName`, mirrored."""
+    assert covers.cover_title(prompt) == title
+
+
+def test_a_generation_cover_is_drawn_from_the_users_words(tmp_path, monkeypatch):
+    monkeypatch.setattr(covers, "generation_cover_dir", lambda: tmp_path)
+    seen = {}
+
+    class Fake:
+        GENRE_THEMES = {"techno": {"artwork_style": "dark-techno"}}
+
+        @staticmethod
+        def _generate_artwork(name, directory, theme, cache_name=None):
+            seen.update(name=name, directory=directory, theme=theme, cache_name=cache_name)
+            return str(tmp_path / f"{cache_name}.png")
+
+    monkeypatch.setattr(covers.importlib, "import_module", lambda _n: Fake)
+    out = covers.generate_generation_cover("task-1", "neon rain at dawn, hypnotic", "Techno")
+
+    assert out == str(tmp_path / "task-1.png")
+    assert seen["name"] == "Neon Rain At Dawn"        # the prompt, never the task id
+    assert seen["cache_name"] == "task-1"             # the filename IS the task id
+    assert seen["directory"] == str(tmp_path)
+    assert seen["theme"] == {"artwork_style": "dark-techno"}
+
+
+def test_a_generation_cover_already_on_disk_is_never_bought_twice(tmp_path, monkeypatch):
+    monkeypatch.setattr(covers, "generation_cover_dir", lambda: tmp_path)
+    (tmp_path / "task-1.png").write_bytes(b"png")
+
+    def explode(_name):
+        raise AssertionError("main must not be imported for a cached cover")
+
+    monkeypatch.setattr(covers.importlib, "import_module", explode)
+    assert covers.generate_generation_cover("task-1", "x", "techno") == str(tmp_path / "task-1.png")
+    assert covers.generate_generation_cover("../x", "x", "techno") is None

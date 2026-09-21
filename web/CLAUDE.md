@@ -1062,6 +1062,58 @@ silent page: **structural checks pass while the music is wrong.**
 - The catalog's genre filter preselects the form's genre: the thing you are
   looking at is usually the thing you want more of.
 
+## The composer, the cover and the title — Generations as songs (2026-09-20)
+
+- **`GeneratorForm` is the ONE definition of the ACE request**, behind two
+  frames: the dialog (the editor's "fill THIS slot" door, `variant="dialog"`,
+  byte-for-byte the form it always had, test ids included — the four
+  `generator-*.spec.ts` E2E runs drive it by those ids) and the composer on
+  `/generations` (`GeneratorComposer`, `variant="composer"`: the prompt
+  leads, genre · duration · takes on one row, lyrics and "style & advanced"
+  folded). One state, one submit body, one caption arithmetic. Do not add
+  a field to one variant only.
+- **The composer owns one task and never renders takes.** It submits
+  through `useGeneratorTask` (the dialog's hook), hands the feed a pending
+  card the moment ACE accepts (`useGenerationsFeed.adopt` →
+  `pendingGeneration`), and tells the feed to `resume` that card when the
+  job lands. Adopt and land fire ONCE per task id, from effects keyed on
+  the hook's state — `submit` resolves inside the hook, so the id only
+  exists afterwards. The box stays visible when ACE is off (inert, with
+  the reason): the "unavailable renders NOTHING" rule is right for a door
+  on someone else's page, not for the page whose point is the prompt box.
+- **A card is a song, not a request.** `generationTitle` is
+  `suggestDisplayName` of the user's words — the same name the publish
+  confirm suggests, so a take is published under the name its card
+  carried; `generationSubtitle` is the prompt, one line. **The store keeps
+  the composed ACE caption in `request.prompt`** (the genre's style
+  descriptor FIRST, then the user's words — `_compose_prompt`), so a title
+  from it would call every techno song "Driving Techno"; `_record_release`
+  now also writes `request.user_prompt`, the raw words, and
+  `generationPrompt` prefers it. Older rows fall back to the caption.
+- **One cover per generation, drawn at release, in its own namespace.**
+  `covers.generate_generation_cover(task_id, user_prompt, genre_folder)`
+  runs as a `BackgroundTasks` on `POST /tasks` (the image takes ~20 s, ACE
+  longer, so it is usually on disk before the takes are; the done-poll has
+  no BackgroundTasks and re-runs every 3 s, so it is the wrong hook). The
+  prompt for the image is `covers.cover_title(user_prompt)` — the frontend
+  heuristic mirrored in Python, pinned by a parametrised test — never the
+  task id and never the caption. Files land in `artwork/generations/`, NOT
+  `artwork/catalog/`: `/api/tracks/{id}/cover` resolves by filename alone,
+  so a task id in the catalog directory would be served under a track URL.
+  `GET /api/generator/generations/{id}/cover` takes `?token=` (an `<img>`
+  cannot set a header) and answers 404 for unknown, foreign and
+  not-yet-drawn alike; the listing and `/refresh` hydrate `cover_url` from
+  the disk (`_with_cover`) — it is a fact about a file, not a column.
+- **The dock is shared.** `/generations` mounts `DashboardPlayer`, and a
+  take's `Playable` carries `artwork_url` (the generation's cover) and the
+  song's title as `display_name`; `lib/player.artworkFor` is the one
+  answer to "what picture goes with this" for every dock.
+- **Tests never buy an image.** `tests/web/conftest.py` deletes
+  `AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_IMAGE_DEPLOYMENT` for every test:
+  publish and release both schedule a cover in the background, and a box
+  that exports those would otherwise issue real DALL·E calls from the
+  publish and library suites.
+
 ## The shared-GPU status panel (2026-09-04)
 
 - **`available` and RESIDENT are different questions**, and confusing them cost
