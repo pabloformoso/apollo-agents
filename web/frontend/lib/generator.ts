@@ -1809,6 +1809,20 @@ export function feedLanded(
   };
 }
 
+/**
+ * Page 1 read again, merged in place: a fresher read of what is already on
+ * screen. Neither the offset nor `hasMore` move — this is not pagination,
+ * and advancing the offset here would skip a page on the next "load more".
+ */
+export function feedReloaded(prev: FeedState, incoming: Generation[]): FeedState {
+  return {
+    ...prev,
+    generations: generationsMerged(prev.generations, incoming ?? []),
+    loading: false,
+    error: null,
+  };
+}
+
 export function feedLoadingMore(prev: FeedState): FeedState {
   if (prev.loading || prev.loadingMore || !prev.hasMore) return prev;
   return { ...prev, loadingMore: true, error: null };
@@ -1855,6 +1869,16 @@ export type GenerationsFeedApi = {
    * died, and on a card someone is watching fill in it reads as a fault.
    */
   inFlight: string[];
+  /**
+   * Read page 1 again and merge it in place. What the composer calls when
+   * its task lands: the poll that landed it already recorded the takes in
+   * the store, so `/refresh` would answer 409 ("is done") — the card just
+   * needs the store's fresher read. Also what a Resume falls back to when
+   * the store says the generation is already terminal.
+   */
+  reload: () => Promise<void>;
+  /** The composer's task resolved: its card is its own again (Resume back, if still pending). */
+  landed: (generationId: string) => void;
 };
 
 /**
@@ -1935,6 +1959,15 @@ export function useGenerationsFeed(
     [],
   );
 
+  const reload = useCallback(async () => {
+    try {
+      const rows = await listGenerations(pageSize, 0);
+      setState((prev) => feedReloaded(prev, rows));
+    } catch (err: unknown) {
+      setState((prev) => feedFailed(prev, err));
+    }
+  }, [pageSize]);
+
   const resume = useCallback(async (generationId: string) => {
     setResuming((prev) =>
       prev.includes(generationId) ? prev : [...prev, generationId],
@@ -1952,13 +1985,22 @@ export function useGenerationsFeed(
         }),
       }));
     } catch (err: unknown) {
-      setState((prev) => feedFailed(prev, err));
+      // 409 is the store saying "already done/failed/stale": the card on
+      // screen is simply stale, not the batch. Re-read instead of showing
+      // the refusal as if something had gone wrong.
+      if (err instanceof GeneratorError && err.status === 409) {
+        await reload();
+      } else {
+        setState((prev) => feedFailed(prev, err));
+      }
     } finally {
       setResuming((prev) => prev.filter((id) => id !== generationId));
-      // A resume is also how the composer says "it landed": the card is
-      // its own again, Resume included if it is somehow still pending.
       setAdopted((prev) => prev.filter((id) => id !== generationId));
     }
+  }, [reload]);
+
+  const landed = useCallback((generationId: string) => {
+    setAdopted((prev) => prev.filter((id) => id !== generationId));
   }, []);
 
   const notePublished = useCallback(
@@ -1986,7 +2028,7 @@ export function useGenerationsFeed(
     }));
   }, []);
 
-  return { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight: adopted };
+  return { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight: adopted, reload, landed };
 }
 
 // ── Health / feature flag ─────────────────────────────────────────────────

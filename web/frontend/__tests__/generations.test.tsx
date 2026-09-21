@@ -632,11 +632,34 @@ describe("useGenerationsFeed", () => {
     expect(result.current.inFlight).toEqual(["t-1"]);
     expect(result.current.state.generations[0]).toMatchObject({ id: "t-1", status: "pending" });
 
-    fetchMock.mockResolvedValue(jsonResponse(200, { ...generation("t-1", "2026-09-21T10:00:00Z"), status: "done" }));
+    // The task lands: the composer says so, and re-reads page 1 — the poll
+    // that landed it already recorded the takes, so /refresh would 409.
+    fetchMock.mockResolvedValue(jsonResponse(200, [{ ...generation("t-1", "2026-09-21T10:00:00Z"), status: "done" }]));
+    act(() => result.current.landed("t-1"));
     await act(async () => {
-      await result.current.resume("t-1");
+      await result.current.reload();
     });
     expect(result.current.inFlight).toEqual([]);
+    expect(result.current.state.generations[0].status).toBe("done");
+    expect(result.current.state.offset).toBe(0);
+    expect(urlOf(fetchMock.mock.calls.at(-1)!)).toContain("offset=0");
+  });
+
+  it("re-reads instead of complaining when Resume meets a generation the store already finished", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, [generation("g", "2026-09-21T10:00:00Z", { status: "pending" })]));
+    const { result } = renderHook(() => useGenerationsFeed(2));
+    await flush();
+    expect(result.current.state.generations[0].status).toBe("pending");
+
+    fetchMock.mockImplementation(async (url: string) =>
+      String(url).includes("/refresh")
+        ? jsonResponse(409, { detail: "generation 'g' is done — refresh is the resume lane for a generation still pending" })
+        : jsonResponse(200, [{ ...generation("g", "2026-09-21T10:00:00Z"), status: "done" }]),
+    );
+    await act(async () => {
+      await result.current.resume("g");
+    });
+    expect(result.current.state.error).toBeNull();
     expect(result.current.state.generations[0].status).toBe("done");
   });
 

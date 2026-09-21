@@ -31,7 +31,7 @@
  * scroller would fight the audio player for the viewport and there is no
  * total to show progress against anyway.
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getCatalog } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -375,7 +375,7 @@ function GenerationCard({
 // ── The feed ──────────────────────────────────────────────────────────────
 
 function GenerationsFeed() {
-  const { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight } =
+  const { state, loadMore, setDiscarded, resume, resuming, notePublished, adopt, inFlight, reload, landed } =
     useGenerationsFeed();
   const [genres, setGenres] = useState<string[]>([]);
 
@@ -412,6 +412,21 @@ function GenerationsFeed() {
     [resume],
   );
 
+  // The cover is drawn in the background at release (~50 s) and the takes
+  // land at ~60 s, so one re-read usually carries it; a second, a little
+  // later, catches the batch that finished first. Cleared on unmount.
+  const coverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (coverTimer.current) clearTimeout(coverTimer.current); }, []);
+  const onLanded = useCallback(
+    (generationId: string) => {
+      landed(generationId);
+      void reload();
+      if (coverTimer.current) clearTimeout(coverTimer.current);
+      coverTimer.current = setTimeout(() => void reload(), 45_000);
+    },
+    [landed, reload],
+  );
+
   const count = state.generations.length;
 
   return (
@@ -428,8 +443,11 @@ function GenerationsFeed() {
             Make a song<span className="text-ember">.</span>
           </h1>
         </div>
-        {/* The composer: the song is described where it will be heard. */}
-        <GeneratorComposer onAdopt={adopt} onLanded={onResume} />
+        {/* The composer: the song is described where it will be heard. When
+            its task lands the store already holds the takes (the landing poll
+            recorded them), so the card re-reads the listing rather than
+            asking /refresh, which would refuse a terminal generation. */}
+        <GeneratorComposer onAdopt={adopt} onLanded={onLanded} />
         <AceServicePanel />
       </section>
 
