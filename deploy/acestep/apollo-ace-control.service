@@ -1,13 +1,20 @@
 [Unit]
 Description=Apollo ACE lifecycle controller
 After=network.target
+# The installed copy binds to the tailnet IP, which may not exist yet at
+# boot: keep retrying instead of giving up after five attempts. On
+# 2026-09-20 the box rebooted, the bind failed five times in three
+# seconds and systemd stopped trying — ACE was unmanageable from Settings
+# until someone started the unit by hand.
+StartLimitIntervalSec=0
 
 [Service]
 Type=exec
 WorkingDirectory=%h/code/apollo-agents
 EnvironmentFile=%h/.config/apollo/ace-control.env
 ExecStart=%h/code/apollo-agents/.venv/bin/uvicorn web.backend.ace_supervisor:app --host 127.0.0.1 --port 8010 --workers 1
-Restart=on-failure
+Restart=always
+RestartSec=5
 NoNewPrivileges=true
 UMask=0077
 
