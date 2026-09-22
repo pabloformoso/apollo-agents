@@ -262,9 +262,11 @@ def test_the_art_director_gets_the_song_and_the_genre_language_and_its_answer_be
     assert asked["deployment"] == "gpt-4o-mini"
     assert "Title: Neon Rain At Dawn" in asked["user"]
     assert "neon rain at dawn, hypnotic" in asked["user"]
-    assert "Desert dunes or misty forest" in asked["user"], "the genre's visual language is the reference"
-    assert "Neon Rain At Dawn atmosphere" in asked["user"]
+    assert "Desert dunes or misty forest" in asked["user"], "the genre's mood reference"
+    assert "OFF LIMITS" in asked["user"], "its objects are forbidden, not copied"
+    assert "Kind of subject to use this time:" in asked["user"]
     assert "never any text" in asked["system"]
+    assert "OFF LIMITS" in asked["system"]
     prompt = fake_main.seen["prompt"]
     assert prompt.startswith("A single paper lantern drifting over dark water at dawn, wide shot")
     assert prompt.endswith("No text or lettering in the image.")
@@ -289,3 +291,24 @@ def test_a_published_track_is_directed_from_the_takes_words_too(fake_main, monke
     assert "Title: Neon Rain" in asked["user"]
     assert "neon rain at dawn" in asked["user"]
     assert fake_main.seen["prompt"].startswith("A lone kite")
+
+
+def test_the_genre_style_descriptor_is_stripped_from_a_takes_words(monkeypatch):
+    """A take's stored prompt is `<style>. <user words>`; the director must see the words."""
+    import types, sys
+    fake_tools = types.SimpleNamespace(genre_style_prompt=lambda g: "healing meditation music: slow binaural drones, no percussion" if g == "healing" else "")
+    monkeypatch.setitem(sys.modules, "agent.tools", fake_tools)
+    caption = "healing meditation music: slow binaural drones, no percussion. slow sounds to meditate on a garden"
+    assert covers.user_words(caption, "Healing") == "slow sounds to meditate on a garden"
+    assert covers.user_words("just the user's words", "healing") == "just the user's words"
+    assert covers.user_words("healing meditation music: slow binaural drones, no percussion", "healing") == ""
+    assert covers.user_words(None, "healing") == ""
+
+
+def test_the_subject_kind_differs_between_songs_of_one_genre(fake_main, monkeypatch):
+    monkeypatch.setenv("APOLLO_COVER_PROMPT_DEPLOYMENT", "gpt-4o-mini")
+    kinds = []
+    monkeypatch.setattr(covers, "_ask_art_direction", lambda d, s, u: kinds.append([l for l in u.splitlines() if l.startswith("Kind of subject")][0]) or "A long enough answer to be used as a prompt for the image.")
+    for title in ("Xiexie Binaural", "Ethereal Beatless", "Green Sky Reflection", "Aural Black Sphera"):
+        covers.art_direction(title, "", "aural")
+    assert len(set(kinds)) >= 3, kinds
