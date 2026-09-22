@@ -351,6 +351,7 @@ def test_make_llm_sends_the_same_shape_the_live_path_sends():
     assert out == "stack()"
     assert captured["model"] == "qwen/qwen3.6-27b"
     assert captured["max_tokens"] == 4096
+    assert captured["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
     assert captured["messages"] == [
         {"role": "system", "content": "SYS"},
         {"role": "user", "content": "USR"},

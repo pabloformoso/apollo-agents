@@ -353,6 +353,7 @@ def _make_llm_helper():
                         {"role": "user", "content": user},
                     ],
                     max_tokens=max_tokens,
+                    extra_body=strudel_mind.lm_studio_extra_body(),
                 )
                 return resp.choices[0].message.content or ""
 
