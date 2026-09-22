@@ -80,12 +80,30 @@ def has_cover(track_id: str) -> bool:
 ART_DIRECTION_ENV = "APOLLO_COVER_PROMPT_DEPLOYMENT"
 _ART_DIRECTION_SYSTEM = (
     "You are an art director for album covers. Given a song's title, the "
-    "words it was made from and the genre's visual language, write ONE "
+    "words it was made from and a MOOD REFERENCE for its genre, write ONE "
     "image-generation prompt of at most 80 words: a concrete subject, a "
-    "composition, the light, a palette, a medium. Stay inside the genre's "
-    "visual language but choose a subject the words suggest — never the "
-    "genre's generic motif, never a person's face, never any text or "
-    "lettering in the image. Answer with the prompt only."
+    "composition, the light, a palette, a medium.\n"
+    "The reference is for mood and palette ONLY. Every object, place, scene "
+    "and camera named in it is OFF LIMITS — if it mentions stones, water, "
+    "mist, a city or a lens, your prompt contains none of those. Invent the "
+    "subject from the song's words and title; when they only describe "
+    "sound, choose a concrete, unexpected subject that carries the same "
+    "mood, of the kind you are asked for (an object, a place, a natural "
+    "phenomenon, a texture, an architectural detail). Never a person's face, "
+    "never any text or lettering in the image. Answer with the prompt only."
+)
+
+#: A different kind of subject per song, chosen from the title so two songs
+#: never get the same nudge — the one lever that keeps a model from
+#: drifting back to the genre's first motif.
+_SUBJECT_KINDS = (
+    "a single everyday object, seen very close",
+    "a place with no one in it",
+    "a natural phenomenon (weather, light, tide, growth)",
+    "a texture or material filling the whole frame",
+    "an architectural detail",
+    "something seen from above",
+    "something small held in a large empty space",
 )
 
 
@@ -119,6 +137,28 @@ def _ask_art_direction(deployment: str, system: str, user: str) -> str:
     return (response.choices[0].message.content or "").strip()
 
 
+def user_words(words: str | None, genre_folder: str) -> str:
+    """The user's own words, with the genre's style descriptor stripped.
+
+    A take's stored prompt is the composed ACE caption — the genre's style
+    descriptor first ("healing meditation music: slow binaural drones…"),
+    then what the user typed. Fed whole, the descriptor drowns the words
+    and every song of the genre is directed the same way.
+    """
+    text = (words or "").strip()
+    if not text:
+        return ""
+    try:
+        from agent.tools import genre_style_prompt  # noqa: PLC0415
+
+        style = (genre_style_prompt((genre_folder or "").strip().lower()) or "").strip()
+    except Exception:  # noqa: BLE001 — no table, nothing to strip
+        style = ""
+    if style and text.lower().startswith(style.lower()):
+        text = text[len(style):].lstrip(" .;,\n")
+    return text
+
+
 def art_direction(title: str, words: str | None, genre_folder: str) -> str | None:
     """A prompt written for THIS song, or ``None`` to fall back to the template.
 
@@ -129,12 +169,15 @@ def art_direction(title: str, words: str | None, genre_folder: str) -> str | Non
     deployment = os.getenv(ART_DIRECTION_ENV, "").strip()
     if not deployment:
         return None
-    reference = _style_template(genre_folder)
+    reference = _style_template(genre_folder).replace("{track_name}", title)
+    kind = _SUBJECT_KINDS[sum(map(ord, title)) % len(_SUBJECT_KINDS)]
     user = (
         f"Title: {title}\n"
         f"Genre: {genre_folder or 'unknown'}\n"
-        f"The song's words: {(words or '').strip() or '(none given)'}\n"
-        f"The genre's visual language (a reference, not a prompt to copy): {reference.replace('{track_name}', title) or '(none)'}"
+        f"The song's words: {user_words(words, genre_folder) or '(none given — go by the title)'}\n"
+        f"Kind of subject to use this time: {kind}\n"
+        f"Mood reference for the genre (palette and feeling only; its objects, places and camera are OFF LIMITS): "
+        f"{reference or '(none)'}"
     )
     try:
         text = _ask_art_direction(deployment, _ART_DIRECTION_SYSTEM, user)
@@ -270,6 +313,7 @@ __all__ = [
     "ART_DIRECTION_ENV",
     "art_direction",
     "cover_dir",
+    "user_words",
     "cover_path",
     "cover_title",
     "cover_url_for",
