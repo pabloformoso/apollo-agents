@@ -252,12 +252,14 @@ class TestAgentToolsUnderCp1252:
         assert isinstance(out, str)
 
     def test_insert_bridge_track(self, utf8_catalog):
-        playlist = [dict(_CATALOG_TRACKS[0]), dict(_CATALOG_TRACKS[1])]
+        # The inserted track must not already be in the playlist — the
+        # no-repeat guard would (rightly) refuse it.
+        playlist = [dict(_CATALOG_TRACKS[0])]
         ctx = self._ctx(playlist=playlist)
         with _force_cp1252_default():
             out = tools.insert_bridge_track(1, "techno--clean-track", ctx)
         assert isinstance(out, str)
-        assert len(ctx["playlist"]) == 3
+        assert len(ctx["playlist"]) == 2
 
     def test_catalog_status(self, utf8_catalog):
         with _force_cp1252_default():
