@@ -156,6 +156,9 @@ class StrudelCode:
     code: str
     reason: str | None = None
     stats: dict = field(default_factory=dict)
+    # What `repair_banks` changed before the validator saw the code — empty
+    # when the model's own (sound, bank) pairs were all playable.
+    repairs: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +297,41 @@ def roles_block(genre: str | None = "deep") -> str:
     return "\n".join(lines)
 
 
+def rejections_block(genre: str | None = "deep") -> str:
+    """The REJECTIONS section: every way a real set lost a phrase (2026-09-22).
+
+    Written from a night of logs, not from the docs: 17 replies, 11 refused.
+    The bank half is data — which sounds the FIRST bank (the genre's home kit)
+    lacks, and who has them — because that pair (`sh` on the 909) was the
+    single biggest killer and the registry is the only true source of it.
+    The rest is the mini-notation and API dialect the model kept inventing.
+    """
+    pal = genre_palette(genre)
+    banks = pal["banks"]
+    lines = ["REJECTIONS SEEN IN REAL SETS — each one costs a whole phrase:"]
+    if banks:
+        home, home_sounds = next(iter(banks.items()))
+        missing = [s for s in pal["drums"] if s not in home_sounds]
+        for sound in missing:
+            carriers = [name for name, sounds in banks.items() if sound in sounds]
+            if carriers:
+                lines.append(
+                    f"- `{sound}` is NOT in {home}: s(\"{sound}\").bank(\"{home}\") is silence. "
+                    f"It lives in {', '.join(carriers)} — use one of those."
+                )
+    lines += [
+        "- Mini-notation is ONLY names, numbers, ~, [ ], < >, comma, *N and /N. No ^, no { },",
+        "  no dots, no letters as rests, no regex: \"[0.3 0.2]*8\" is right, \"[0.3 0.2]^2\" breaks.",
+        "- Drum names go in s(\"...\") only. n(\"~ cp ~ cp\") is wrong: n() and note() take pitches.",
+        "- .struct(\"...\") strings use x and ~ only. Never .scale() on a layer without n()/note().",
+        "- One layer = one chain starting with s(...), n(...) or note(...) and carrying a sound.",
+        "  Never .add(s(...)), never nest a layer inside another, never a method you have not",
+        "  seen in this prompt.",
+        "- The ONLY comment is the leading `// reason:` line — no trailing comments on code.",
+    ]
+    return "\n".join(lines)
+
+
 GENRE_BRIEFS: dict[str, str] = {
     "deep": """GENRE: deep house.
 - ~122 BPM feel, one cycle = one bar of 4/4. Kick on every beat, s("bd*4"), 909 family.
@@ -345,7 +383,7 @@ def genre_brief(genre: str | None) -> str:
 
 
 def build_system_prompt(genre: str | None = "deep", key: str = DEFAULT_KEY) -> str:
-    """Contract + palette + roles + genre idiom + key + few-shot, in that order.
+    """Contract + palette + roles + genre idiom + rejections + key + few-shot, in that order.
 
     The palette comes from the registry, per genre — the sounds, each bank's
     actual sound set, and the role table (voice + register) are DATA
@@ -361,6 +399,7 @@ def build_system_prompt(genre: str | None = "deep", key: str = DEFAULT_KEY) -> s
     brief = genre_brief(genre)
     if brief:
         parts.append(brief)
+    parts.append(rejections_block(genre))
     parts.append(
         f'KEY: {key}. Every pitched layer goes through .scale("{key}") so the set stays '
         "in key by construction."
@@ -393,6 +432,31 @@ def _max_tokens() -> int:
         return int(os.getenv("GENERATIVE_MAX_TOKENS", "4096"))
     except ValueError:
         return 4096
+
+
+def thinking_enabled() -> bool:
+    """Whether a local reasoning model may think before it writes code.
+
+    Off unless `GENERATIVE_THINKING` says otherwise. Measured 2026-09-22 on
+    gemma-4-e4b in LM Studio: thinking cost 6-11 s per reply (600-1150
+    reasoning tokens) and made the code no more likely to validate (4/13
+    valid with, 3/6 and 5/6 without). A phrase is 8 bars — 15 s at 124 BPM —
+    so a thinking reply plus its one retry lands a phrase late, which the
+    performer sees as "the mind never arrives".
+    """
+    return os.getenv("GENERATIVE_THINKING", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def lm_studio_extra_body() -> dict:
+    """The `extra_body` for the OpenAI-compatible local path.
+
+    `chat_template_kwargs.enable_thinking` is the switch LM Studio's chat
+    templates (gemma 4, qwen 3.x) honour. The alternatives were tried and
+    rejected: `reasoning_effort: "none"` made gemma think INSIDE the content
+    (prose where code should be), `reasoning: {effort}` was ignored. Only
+    sent on the local path — Azure and Anthropic would refuse the field.
+    """
+    return {"chat_template_kwargs": {"enable_thinking": thinking_enabled()}}
 
 
 def _default_llm(system: str, user: str) -> str:
@@ -439,6 +503,7 @@ def _default_llm(system: str, user: str) -> str:
         )
         model = _resolve_model("gemma4:4b")
         extra["max_tokens"] = _max_tokens()
+        extra["extra_body"] = lm_studio_extra_body()
 
     resp = client.chat.completions.create(
         model=model,
@@ -476,6 +541,62 @@ def _leading_reason(code: str) -> str | None:
     """The `// reason:` line, if the model wrote one."""
     match = _REASON_RE.search(code)
     return match.group(1).strip() if match else None
+
+
+_BANK_CALL_RE = re.compile(r'\.bank\(\s*"([^"]+)"\s*\)')
+_S_CALL_RE = re.compile(r'\bs\(\s*"([^"]*)"\s*\)')
+_MINI_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def repair_banks(code: str, genre: str | None = "deep") -> tuple[str, list[str]]:
+    """Move a drum layer to a bank that actually carries its sounds.
+
+    The validator's most frequent refusal on a real set (5 of 17 replies,
+    2026-09-22) was `s("sh").bank("RolandTR909")` — the model wants a shaker,
+    reads "909 family" in the brief, and pairs them, although the prompt's own
+    bank table says the 909 has none. The retry then fails a DIFFERENT way
+    half the time, and the phrase is lost. The fix is mechanical and comes
+    from the same registry the validator gates against: for each `.bank()`
+    whose nearest `s("...")` on the line names drums the bank lacks, pick the
+    first bank in the genre's list that has ALL of them. A `.bank()` on a
+    bankless sound (an instrument or a synth) is dropped — that pair plays
+    silence too and the fix is the same one the validator's message gives.
+
+    Deliberately narrow: same-line pairs only, drums-only chains only, and
+    the validator still runs on the result, so the worst case is unchanged
+    (the model's code, refused with its coaching). Returns the code and a
+    note per change, so a bench can count how often the model needed it.
+    """
+    pal = genre_palette(genre)
+    drums = set(pal["drums"])
+    bankless = set(pal["synths"]) | set(pal["instruments"])
+    banks = pal["banks"]
+    repairs: list[str] = []
+    out: list[str] = []
+    for line in code.split("\n"):
+        def fix(match: re.Match) -> str:
+            bank = match.group(1)
+            heads = [m for m in _S_CALL_RE.finditer(line) if m.end() <= match.start()]
+            if not heads:
+                return match.group(0)
+            names = _MINI_NAME_RE.findall(heads[-1].group(1))
+            if not names:
+                return match.group(0)
+            if all(n in bankless for n in names):
+                repairs.append(f'dropped .bank("{bank}") on bankless {"/".join(names)}')
+                return ""
+            if not all(n in drums for n in names):
+                return match.group(0)
+            if bank in banks and all(n in banks[bank] for n in names):
+                return match.group(0)
+            for candidate, sounds in banks.items():
+                if all(n in sounds for n in names):
+                    repairs.append(f'{"/".join(names)}: .bank("{bank}") -> .bank("{candidate}")')
+                    return f'.bank("{candidate}")'
+            return match.group(0)
+
+        out.append(_BANK_CALL_RE.sub(fix, line))
+    return "\n".join(out), repairs
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +792,7 @@ class StrudelMind:
             except StrudelMindError as exc:
                 error = str(exc)
             else:
+                code, repairs = repair_banks(code, self._genre)
                 verdict = validate_code(
                     code,
                     cycles=self._cycles,
@@ -683,6 +805,7 @@ class StrudelMind:
                         code=code,
                         reason=verdict.get("reason") or _leading_reason(code),
                         stats=verdict.get("stats") or {},
+                        repairs=tuple(repairs),
                     )
                 error = str(verdict.get("error") or "rejected without an error message")
 

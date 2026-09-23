@@ -208,7 +208,8 @@ class Trial:
 def make_llm(client, model: str, max_tokens: int):
     """The transport StrudelMind will call — deliberately the same shape as
     `strudel_mind._default_llm`'s OpenAI-compatible branch (model, messages,
-    max_tokens; no temperature override), so what is benched is what runs."""
+    max_tokens, the thinking switch; no temperature override), so what is
+    benched is what runs."""
 
     def llm(system: str, user: str) -> str:
         resp = client.chat.completions.create(
@@ -218,6 +219,7 @@ def make_llm(client, model: str, max_tokens: int):
                 {"role": "user", "content": user},
             ],
             max_tokens=max_tokens,
+            extra_body=strudel_mind.lm_studio_extra_body(),
         )
         return resp.choices[0].message.content or ""
 

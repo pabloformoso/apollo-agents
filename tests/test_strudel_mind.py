@@ -39,6 +39,9 @@ from agent.generative.strudel_mind import (
     _leading_reason,
     _resolve_model,
     build_system_prompt,
+    lm_studio_extra_body,
+    rejections_block,
+    repair_banks,
     genre_palette,
     palette_block,
     roles_block,
@@ -1103,3 +1106,68 @@ def test_real_validator_agrees_with_the_prompt_about_instruments():
     assert not banked["valid"]
     assert "instrument 'piano'" in banked["error"]
     assert "not bank-prefixed" in banked["error"]
+
+
+# ─── repair_banks (2026-09-22: the shaker on the 909) ─────────────────────
+
+def test_repair_moves_a_shaker_off_the_909_to_the_first_bank_that_has_it():
+    code = 'stack(\n  s("bd*4").bank("RolandTR909"),\n  s("sh*16").bank("RolandTR909").gain(0.3)\n)'
+    fixed, repairs = repair_banks(code, "deep")
+    assert 's("sh*16").bank("RolandTR808")' in fixed
+    assert 's("bd*4").bank("RolandTR909")' in fixed  # a playable pair is untouched
+    assert repairs == ['sh: .bank("RolandTR909") -> .bank("RolandTR808")']
+
+
+def test_repair_needs_a_bank_that_carries_every_sound_in_the_step():
+    # cb and sh together: the 808 has both; the 727 has sh only.
+    fixed, repairs = repair_banks('s("[sh cb]*4").bank("RolandTR909")', "deep")
+    assert fixed == 's("[sh cb]*4").bank("RolandTR808")'
+    assert len(repairs) == 1
+
+
+def test_repair_drops_a_bank_from_an_instrument():
+    fixed, repairs = repair_banks('s("cabasa").bank("EmuSP12").n("<0 1>").gain(0.3)', "deep")
+    assert fixed == 's("cabasa").n("<0 1>").gain(0.3)'
+    assert repairs == ['dropped .bank("EmuSP12") on bankless cabasa']
+
+
+def test_repair_leaves_what_it_cannot_prove():
+    # No s("...") before the bank on this line, a mixed drum/instrument step,
+    # and a pair every bank lacks: all three go to the validator unchanged.
+    for code in (
+        'note("c3").bank("RolandTR909")',
+        's("[bd cabasa]").bank("RolandTR909")',
+        's("perc").bank("RolandTR909")' if False else 's("misc").bank("RolandTR909")',
+    ):
+        assert repair_banks(code, "deep") == (code, [])
+
+
+def test_repair_is_idempotent_on_valid_code():
+    assert repair_banks(FEW_SHOT_DEEPHOUSE, "deep") == (FEW_SHOT_DEEPHOUSE, [])
+
+
+def test_next_code_repairs_before_validating_and_reports_it(validator):
+    fake = validator(_verdict())
+    mind = StrudelMind(llm=lambda s, u: 'stack(s("sh*16").bank("RolandTR909"))')
+    out = mind.next_code({"current_code": ""}, "breathe")
+    # The validator saw the repaired code, and so does the performer.
+    assert fake.calls[0][1]["input"] == 'stack(s("sh*16").bank("RolandTR808"))'
+    assert out.code == 'stack(s("sh*16").bank("RolandTR808"))'
+    assert out.repairs == ('sh: .bank("RolandTR909") -> .bank("RolandTR808")',)
+
+
+# ─── the rejections block and the thinking switch ──────────────────────────
+
+def test_rejections_block_names_who_carries_what_the_home_kit_lacks():
+    block = rejections_block("deep")
+    assert "`sh` is NOT in RolandTR909" in block
+    assert "RolandTR808" in block and "LinnDrum" in block
+    assert "Mini-notation is ONLY" in block
+    assert block in build_system_prompt("deep")
+
+
+def test_thinking_is_off_unless_the_env_turns_it_on(monkeypatch):
+    monkeypatch.delenv("GENERATIVE_THINKING", raising=False)
+    assert lm_studio_extra_body() == {"chat_template_kwargs": {"enable_thinking": False}}
+    monkeypatch.setenv("GENERATIVE_THINKING", "1")
+    assert lm_studio_extra_body() == {"chat_template_kwargs": {"enable_thinking": True}}

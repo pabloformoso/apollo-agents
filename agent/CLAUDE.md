@@ -43,6 +43,21 @@
   lacks plays silence live — the failure the pairing gate exists for).
   Benched by `scripts/bench_strudel_mind.py` before it goes anywhere
   near a stream.
+  **Two things learned on a real set (2026-09-22, gemma-4-e4b, 17 asks,
+  11 refused):** (1) a local reasoning model THINKS for 6-11 s per reply
+  and its code validates no more often for it, so every OpenAI-compatible
+  transport (`_default_llm`, the bench's `make_llm`, the playground's
+  fallback) sends `chat_template_kwargs.enable_thinking=false` unless
+  `GENERATIVE_THINKING=1` — a phrase is ~15 s and a thinking reply plus
+  its retry lands a phrase late. `reasoning_effort: "none"` is NOT the
+  same switch: gemma then thinks inside the content. (2) The single
+  biggest refusal was `s("sh").bank("RolandTR909")` — the model wants a
+  shaker, the 909 has none — so `repair_banks()` moves a same-line drum
+  step to the first bank in the genre's list that carries all its sounds
+  (and drops a `.bank()` from a bankless instrument) BEFORE the validator
+  runs; the validator remains the gate, and `StrudelCode.repairs` says
+  what moved. `rejections_block()` puts the same facts, derived from the
+  registry, in the prompt.
 
 ## Decisions (do not re-litigate without a reason)
 
