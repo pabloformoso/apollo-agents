@@ -235,6 +235,13 @@ export interface UseLiveSessionApi {
    * precision its sample-accurate gain ramps get.
    */
   audioRef: React.RefObject<VisualAudioShim | HTMLAudioElement | null>;
+  /**
+   * Master-bus analyser for ``<VisualLayer>`` — both decks' gains fan out
+   * into it. It is a TAP: nothing downstream of it reaches the speakers,
+   * so it cannot change what the set sounds like. Null until the first
+   * deck exists (and in environments without Web Audio).
+   */
+  analyserRef: React.RefObject<AnalyserNode | null>;
   /** Send a control command to the backend agent. */
   sendCommand: (cmd: LiveCommand) => void;
   /** Send free-text user message to the agent. */
@@ -662,6 +669,7 @@ export function useLiveSession(
   // virtual position behind the same { currentTime } shape the prior
   // HTMLAudioElement ref provided. Updated every playback_pos tick.
   const audioRef = useRef<VisualAudioShim | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
   const currentTrackIdRef = useRef<string | null>(null);
   // W2/W3 (beatmatch feedback loop) — accumulates the human pitch-bend
   // correction (ms) for the CURRENT transition; rides on the next
@@ -893,6 +901,20 @@ export function useLiveSession(
       try {
         const deck = new BufferDeck(ctx, which === "a" ? 1 : 0);
         refObj.current = deck;
+        // Visual tap: fan the deck's post-gain signal into one shared
+        // analyser. Best-effort — a mocked context without
+        // createAnalyser just leaves the visuals on the beat clock.
+        try {
+          if (!analyserRef.current) {
+            const an = ctx.createAnalyser();
+            an.fftSize = 1024;
+            an.smoothingTimeConstant = 0.78;
+            analyserRef.current = an;
+          }
+          deck.gain.connect(analyserRef.current);
+        } catch {
+          /* visuals fall back to the beat clock */
+        }
         return deck;
       } catch (err) {
         // Test environments / older AudioContext mocks may lack
@@ -2009,6 +2031,7 @@ export function useLiveSession(
           /* ignore */
         }
         audioCtxRef.current = null;
+        analyserRef.current = null;
       }
     };
   }, [stopAllDecks]);
@@ -2354,6 +2377,7 @@ export function useLiveSession(
       error,
       autoplayBlocked,
       audioRef,
+      analyserRef,
       sendCommand,
       sendUserMessage,
       sendRaw,

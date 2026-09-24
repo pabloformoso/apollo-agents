@@ -31,6 +31,7 @@ import {
   type LiveCommand,
 } from "@/lib/live";
 import type { SessionState } from "@/lib/types";
+import LiveLeaveGuard from "@/components/LiveLeaveGuard";
 import VisualLayer from "@/components/VisualLayer";
 import {
   ApolloMark,
@@ -225,6 +226,11 @@ function LivePageInner() {
 
   return (
     <div className="min-h-screen flex flex-col bg-ink text-ember-text font-sans relative">
+      {/* Never on the OBS viewer: the capture must not grow a modal. */}
+      <LiveLeaveGuard
+        active={!isViewer && live.connected && live.currentTrack !== null}
+        trackName={live.currentTrack?.display_name}
+      />
       {/* Live-mode header (replaces the Shell nav per prototype's hideNav) */}
       <header className="flex justify-between items-center px-9 py-3.5 border-b border-line bg-surf relative z-30">
         <div className="flex items-center gap-4">
@@ -742,6 +748,7 @@ function LivePageInner() {
               <div className="flex-1 relative">
                 <VisualLayer
                   audioRef={live.audioRef}
+                  analyserRef={live.analyserRef}
                   currentTrack={live.currentTrack}
                 />
                 <div className="absolute inset-0 grid place-items-center pointer-events-none">
@@ -765,6 +772,7 @@ function LivePageInner() {
           >
             <VisualLayer
               audioRef={live.audioRef}
+              analyserRef={live.analyserRef}
               currentTrack={live.currentTrack}
             />
             <div className="absolute inset-0 grid place-items-center px-12 pointer-events-none">

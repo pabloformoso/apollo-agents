@@ -462,6 +462,7 @@ export default function LiveStage({
       >
         <VisualLayer
           audioRef={live.audioRef}
+          analyserRef={live.analyserRef}
           currentTrack={currentTrack}
         />
       </div>

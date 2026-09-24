@@ -38,10 +38,10 @@ test.describe("v2.5.3 — visual layer", () => {
     await expect(page.getByTestId("visual-layer")).toBeVisible();
     await expect(page.getByTestId("visual-canvas")).toBeVisible();
 
-    // Default is particles.
+    // Default is auto (a shader scene picked per track, 2026-09-24).
     await expect(page.getByTestId("visual-layer")).toHaveAttribute(
       "data-effect",
-      "particles",
+      "auto",
     );
 
     // Toggle to strobe — verify selector switches and overlay is mounted.

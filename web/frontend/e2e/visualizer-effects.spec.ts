@@ -47,13 +47,13 @@ test.describe("v2.5.2 — visualizer effect switching (#44)", () => {
     await expect(page.getByTestId("visual-layer")).toBeVisible();
     await expect(page.getByTestId("visual-canvas")).toBeVisible();
 
-    // Default: particles.
+    // Default: auto (a shader scene picked per track, 2026-09-24).
     await expect(page.getByTestId("visual-layer")).toHaveAttribute(
       "data-effect",
-      "particles",
+      "auto",
     );
 
-    // particles → strobe.
+    // auto → strobe.
     await page.getByTestId("visual-effect-strobe").click();
     await expect(page.getByTestId("visual-layer")).toHaveAttribute(
       "data-effect",

@@ -25,6 +25,19 @@
  * single ``AudioContext`` with ``useLiveSession`` and adding a second
  * graph for analysis would risk double-instantiation in tests.  The
  * banner makes the degraded sync mode user-visible.
+ *
+ * 2026-09-24 — shader scenes
+ * --------------------------
+ * The default is now ``auto``: one of four audio-reactive shader scenes
+ * (``lib/visualizer/effects/shader_scenes.ts``) picked per track by
+ * ``scene_picker.autoScene`` — aurora for beatless genres, prism for
+ * mid-tempo, tunnel for driving sets — painted in the track's key and
+ * eased between tracks. They listen to ``analyserRef`` (a TAP on the
+ * master bus that ``useLiveSession`` owns — still one audio graph) and
+ * fall back to the beat clock without it. Scene changes dip through
+ * black instead of cutting. The v2.5 effects stay selectable as
+ * "classic". Controls fade out after a few idle seconds so a fullscreen
+ * capture is clean.
  */
 
 import {
@@ -55,8 +68,41 @@ import {
   createFractalEffect,
   type FractalEffect,
 } from "@/lib/visualizer/effects/fractal";
+import {
+  createShaderSceneEffect,
+  SHADER_SCENES,
+  type ShaderSceneEffect,
+} from "@/lib/visualizer/effects/shader_scenes";
+import {
+  bandsFromSpectrum,
+  beatEnvelopes,
+  createFollower,
+  followFeatures,
+  syntheticFeatures,
+} from "@/lib/visualizer/audio_features";
+import {
+  autoScene,
+  easeRgb,
+  paletteFor,
+  symmetryFor,
+  type RGB,
+  type ShaderScene,
+} from "@/lib/visualizer/scene_picker";
 
-export type VisualEffectKind = "particles" | "strobe" | "fractal";
+export type ClassicEffectKind = "particles" | "strobe" | "fractal";
+export type VisualEffectKind = "auto" | ShaderScene | ClassicEffectKind;
+
+const CLASSIC_EFFECTS: readonly ClassicEffectKind[] = ["particles", "strobe", "fractal"];
+const MODERN_EFFECTS: readonly VisualEffectKind[] = ["auto", ...SHADER_SCENES];
+
+/** Seconds of stillness before the controls fade out. */
+const CONTROLS_IDLE_MS = 3000;
+/** Half of a scene change: fade to black, swap, fade back. */
+const SCENE_DIP_MS = 450;
+
+function isShaderKind(k: VisualEffectKind): k is "auto" | ShaderScene {
+  return k === "auto" || (SHADER_SCENES as readonly string[]).includes(k);
+}
 
 /**
  * v3.4 — accept either an HTMLAudioElement or the BufferDeck shim
@@ -72,11 +118,20 @@ interface AudioTimeSource {
 interface VisualLayerProps {
   audioRef: React.RefObject<AudioTimeSource | null>;
   currentTrack: LiveTrackSummary | null;
+  /** Master-bus (or mic) analyser. Absent → scenes follow the beat clock. */
+  analyserRef?: React.RefObject<AnalyserNode | null>;
+  /** Initial selection; the lab page pins a scene. */
+  defaultEffect?: VisualEffectKind;
 }
 
 const STROBE_BARS_OPTIONS = [1, 4, 8] as const;
 
-export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps) {
+export default function VisualLayer({
+  audioRef,
+  currentTrack,
+  analyserRef,
+  defaultEffect = "auto",
+}: VisualLayerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const rafIdRef = useRef<number | null>(null);
@@ -86,14 +141,27 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
   const particlesRef = useRef<ParticlesEffect | null>(null);
   const fractalRef = useRef<FractalEffect | null>(null);
   const strobeRef = useRef<StrobeEffect | null>(null);
+  const shaderRef = useRef<ShaderSceneEffect | null>(null);
+
+  // Shader-scene state, all per-frame and therefore refs.
+  const followerRef = useRef(createFollower());
+  const spectrumRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const colorARef = useRef<RGB | null>(null);
+  const colorBRef = useRef<RGB | null>(null);
+  const startedAtRef = useRef<number | null>(null);
+  const lastFrameAtRef = useRef<number | null>(null);
+  /** Pending scene change: the scene to show once the dip reaches black. */
+  const dipRef = useRef<{ to: ShaderScene; startedAt: number } | null>(null);
 
   // Latest selection / track — kept in refs so the rAF loop reads fresh
   // values without re-binding.
-  const effectKindRef = useRef<VisualEffectKind>("particles");
+  const effectKindRef = useRef<VisualEffectKind>(defaultEffect);
   const currentTrackRef = useRef<LiveTrackSummary | null>(null);
   const strobeBarsRef = useRef<number>(4);
 
-  const [effectKind, setEffectKindState] = useState<VisualEffectKind>("particles");
+  const [effectKind, setEffectKindState] = useState<VisualEffectKind>(defaultEffect);
+  const [shownScene, setShownScene] = useState<ShaderScene | null>(null);
+  const [controlsIdle, setControlsIdle] = useState(false);
   const [strobeBars, setStrobeBars] = useState<number>(4);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
@@ -113,6 +181,87 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
     const bg = currentTrack?.beatgrid;
     return !!bg && Number.isFinite(bg.bpm) && bg.bpm > 0;
   }, [currentTrack]);
+
+  // ── Shader scenes ────────────────────────────────────────────────────
+  const renderShaderScene = (
+    canvas: HTMLCanvasElement,
+    kind: "auto" | ShaderScene,
+    beat: BeatClockResult,
+    track: LiveTrackSummary | null,
+  ) => {
+    const now = performance.now();
+    const startedAt = startedAtRef.current ?? now;
+    startedAtRef.current = startedAt;
+    const dt = lastFrameAtRef.current === null ? 0 : (now - lastFrameAtRef.current) / 1000;
+    lastFrameAtRef.current = now;
+
+    // Which scene should be on screen, and are we mid-dip towards it?
+    const wanted: ShaderScene = kind === "auto" ? autoScene(track) : kind;
+    let eff = shaderRef.current;
+    if (!eff) {
+      eff = createShaderSceneEffect(wanted);
+      eff.init(canvas);
+      eff.resize(canvas.width || 1, canvas.height || 1);
+      shaderRef.current = eff;
+      setShownScene(wanted);
+    } else if (eff.scene !== wanted && !dipRef.current) {
+      dipRef.current = { to: wanted, startedAt: now };
+    }
+    let fade = 1;
+    const dip = dipRef.current;
+    if (dip) {
+      const t = (now - dip.startedAt) / SCENE_DIP_MS;
+      if (t >= 1 && eff.scene !== dip.to) {
+        eff.destroy();
+        eff = createShaderSceneEffect(dip.to);
+        eff.init(canvas);
+        eff.resize(canvas.width || 1, canvas.height || 1);
+        shaderRef.current = eff;
+        setShownScene(dip.to);
+      }
+      if (t >= 2) dipRef.current = null;
+      fade = t < 1 ? 1 - t : Math.min(1, t - 1);
+    }
+    canvas.style.opacity = String(fade);
+
+    // Hearing: the analyser if there is one, else the beat clock.
+    const env = beatEnvelopes(beat);
+    const analyser = analyserRef?.current ?? null;
+    let raw = syntheticFeatures(env);
+    if (analyser) {
+      const n = analyser.frequencyBinCount;
+      if (!spectrumRef.current || spectrumRef.current.length !== n) {
+        spectrumRef.current = new Uint8Array(new ArrayBuffer(n));
+      }
+      analyser.getByteFrequencyData(spectrumRef.current);
+      raw = bandsFromSpectrum(
+        spectrumRef.current,
+        analyser.context.sampleRate,
+        analyser.fftSize,
+      );
+    }
+    const bands = followFeatures(followerRef.current, raw, dt);
+
+    // Colour: the key's palette, eased so a new track tints in over seconds.
+    const target = paletteFor(track?.camelot_key);
+    colorARef.current = colorARef.current
+      ? easeRgb(colorARef.current, target.a, dt)
+      : [...target.a];
+    colorBRef.current = colorBRef.current
+      ? easeRgb(colorBRef.current, target.b, dt)
+      : [...target.b];
+
+    eff.render({
+      time: (now - startedAt) / 1000,
+      beat: env.beat,
+      kick: env.kick,
+      accent: env.accent,
+      ...bands,
+      colorA: colorARef.current,
+      colorB: colorBRef.current,
+      symmetry: symmetryFor(track?.camelot_key),
+    });
+  };
 
   // ── Per-frame logic, wrapped so the rAF effect can stay stable ────────
   const tick = useEffectEvent(() => {
@@ -134,6 +283,10 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
     }
 
     const kind = effectKindRef.current;
+    if (isShaderKind(kind)) {
+      renderShaderScene(canvas, kind, beat, track);
+      return;
+    }
     if (kind === "particles") {
       const eff = particlesRef.current ?? createParticlesEffect();
       if (!particlesRef.current) {
@@ -194,6 +347,7 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
       canvas.style.height = `${h}px`;
       particlesRef.current?.resize(w, h);
       fractalRef.current?.resize(w, h);
+      shaderRef.current?.resize(w, h);
     };
     onResize();
     window.addEventListener("resize", onResize);
@@ -206,9 +360,11 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
       particlesRef.current?.destroy();
       fractalRef.current?.destroy();
       strobeRef.current?.destroy();
+      shaderRef.current?.destroy();
       particlesRef.current = null;
       fractalRef.current = null;
       strobeRef.current = null;
+      shaderRef.current = null;
     };
   }, []);
 
@@ -232,7 +388,32 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
       strobeRef.current.destroy();
       strobeRef.current = null;
     }
+    // Scenes own the GL context too; a manual pick cuts straight to the
+    // new scene (the dip is for changes nobody asked for).
+    if (shaderRef.current) {
+      shaderRef.current.destroy();
+      shaderRef.current = null;
+    }
+    dipRef.current = null;
+    if (canvasRef.current) canvasRef.current.style.opacity = "1";
+    if (!isShaderKind(kind)) setShownScene(null);
     setEffectKindState(kind);
+  }, []);
+
+  // Controls fade out when the pointer has been still for a while, so a
+  // fullscreen view (or a capture of it) is just the picture.
+  const idleTimerRef = useRef<number | null>(null);
+  const wakeControls = useCallback(() => {
+    setControlsIdle(false);
+    if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = window.setTimeout(() => setControlsIdle(true), CONTROLS_IDLE_MS);
+  }, []);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    idleTimerRef.current = window.setTimeout(() => setControlsIdle(true), CONTROLS_IDLE_MS);
+    return () => {
+      if (idleTimerRef.current !== null) window.clearTimeout(idleTimerRef.current);
+    };
   }, []);
 
   // Fullscreen handling — we use the Fullscreen API on the container,
@@ -275,8 +456,11 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
       ref={containerRef}
       data-testid="visual-layer"
       data-effect={effectKind}
+      data-scene={shownScene ?? undefined}
       className="relative w-full h-full bg-black overflow-hidden rounded"
-      style={{ minHeight: 256 }}
+      style={{ minHeight: 256, cursor: controlsIdle ? "none" : undefined }}
+      onPointerMove={wakeControls}
+      onPointerDown={wakeControls}
     >
       <canvas
         ref={canvasRef}
@@ -287,18 +471,40 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
       {/* Effect selector + fullscreen toggle */}
       <div
         data-testid="visual-controls"
-        className="absolute top-2 left-2 right-2 flex flex-wrap gap-2 items-center z-10 pointer-events-none"
+        data-idle={controlsIdle ? "true" : "false"}
+        className={`absolute top-2 left-2 right-2 flex flex-wrap gap-2 items-center z-10 pointer-events-none transition-opacity duration-700 ${
+          controlsIdle ? "opacity-0" : "opacity-100"
+        }`}
       >
-        <div className="pointer-events-auto flex gap-1 bg-black/60 rounded p-1">
-          {(["particles", "strobe", "fractal"] as const).map((k) => (
+        <div className="pointer-events-auto flex gap-1 bg-black/50 backdrop-blur-md rounded-full p-1 border border-white/10">
+          {MODERN_EFFECTS.map((k) => (
             <button
               key={k}
               data-testid={`visual-effect-${k}`}
               onClick={() => setEffectKind(k)}
-              className={`text-[10px] tracking-widest uppercase px-2 py-1 rounded ${
+              title={k === "auto" && shownScene ? `auto · ${shownScene}` : undefined}
+              className={`text-[10px] tracking-[0.2em] uppercase px-3 py-1 rounded-full transition-colors ${
                 effectKind === k
-                  ? "bg-neon text-[#0a0a0f]"
-                  : "text-[#e2e2ff] hover:text-neon"
+                  ? "bg-white text-black"
+                  : "text-white/70 hover:text-white"
+              }`}
+            >
+              {k === "auto" && effectKind === "auto" && shownScene
+                ? `auto · ${shownScene}`
+                : k}
+            </button>
+          ))}
+        </div>
+        <div className="pointer-events-auto flex gap-1 bg-black/40 rounded-full p-1">
+          {CLASSIC_EFFECTS.map((k) => (
+            <button
+              key={k}
+              data-testid={`visual-effect-${k}`}
+              onClick={() => setEffectKind(k)}
+              className={`text-[9px] tracking-widest uppercase px-2 py-1 rounded-full ${
+                effectKind === k
+                  ? "bg-white/80 text-black"
+                  : "text-white/40 hover:text-white/80"
               }`}
             >
               {k}
@@ -328,14 +534,17 @@ export default function VisualLayer({ audioRef, currentTrack }: VisualLayerProps
         <button
           data-testid="visual-fullscreen"
           onClick={toggleFullscreen}
-          className="pointer-events-auto ml-auto bg-black/60 text-[#e2e2ff] hover:text-neon text-[10px] tracking-widest uppercase px-2 py-1 rounded"
+          className="pointer-events-auto ml-auto bg-black/50 backdrop-blur-md border border-white/10 text-white/70 hover:text-white text-[10px] tracking-[0.2em] uppercase px-3 py-1 rounded-full"
         >
           {isFullscreen ? "exit fs" : "fullscreen"}
         </button>
       </div>
 
-      {/* Degraded-sync banner */}
-      {!hasBeatgrid && currentTrack ? (
+      {/* Degraded-sync banner — classic effects only: the shader scenes
+          listen to the audio itself, and beatless genres (healing, aural)
+          have no grid to find, so the banner there would be permanent
+          noise on a public broadcast. */}
+      {!hasBeatgrid && currentTrack && !isShaderKind(effectKind) ? (
         <div
           data-testid="visual-fallback-banner"
           className="absolute bottom-2 left-2 right-2 z-10 bg-yellow-900/60 border border-yellow-400 text-yellow-200 text-[10px] tracking-widest uppercase rounded px-2 py-1 text-center"
