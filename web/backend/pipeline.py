@@ -23,6 +23,7 @@ sys.path.insert(0, str(_PROJECT_DIR))
 # ---------------------------------------------------------------------------
 # Import system prompts, parsers, and schema helpers from existing agent code
 # ---------------------------------------------------------------------------
+from agent import llm_failover  # noqa: E402
 from agent.run import (  # noqa: E402
     _GENRE_GUARD_SYSTEM,
     _PLANNER_SYSTEM,
@@ -579,19 +580,34 @@ async def _run_openai_streaming(
     max_turns: int,
     base_url: str | None = None,
     api_key: str = "ollama",
+    failover: bool = False,
 ) -> str:
     """Streaming runner for OpenAI-compatible APIs.
 
     When base_url is set, uses AsyncOpenAI (Ollama, LM Studio, or a
     LiteLLM proxy). Otherwise constructs an AsyncAzureOpenAI client.
+
+    ``failover`` (the local LM Studio path only): a turn whose stream
+    cannot be OPENED because the local model is down is re-opened on the
+    Azure deployment, and the rest of this run stays there — switching
+    models mid-conversation back and forth would only add latency. A
+    stream that breaks after it started is not retried: its words are
+    already on the audience's screen. See ``agent/llm_failover.py``.
     """
     import json as _json  # noqa: PLC0415
 
+    use_failover = bool(base_url) and failover and llm_failover.configured()
     if base_url:
         from openai import AsyncOpenAI  # noqa: PLC0415
-        client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        if use_failover:
+            client = AsyncOpenAI(
+                base_url=base_url, api_key=api_key, timeout=llm_failover.local_timeout(),
+            )
+        else:
+            client = AsyncOpenAI(base_url=base_url, api_key=api_key)
     else:
         client = _build_async_azure_client()
+    on_azure = False
     schemas = _build_openai_schemas(tool_fns)
     tool_index = {fn.__name__: fn for fn in tool_fns}
     final_text = ""
@@ -606,12 +622,36 @@ async def _run_openai_streaming(
         ctl = ControlTokenFilter()
         tool_calls_acc: dict[int, dict] = {}
 
-        stream = await client.chat.completions.create(
-            model=main_llm.persisted_model() or _MODEL,
-            messages=sys_messages,
-            tools=schemas or [],
-            stream=True,
-        )
+        # An empty ``tools`` array is a 400 on OpenAI/Azure ("[] is too
+        # short"); LM Studio tolerated it. Omit it when there are none.
+        tools_kw = {"tools": schemas} if schemas else {}
+
+        def _open_local():
+            return client.chat.completions.create(
+                model=main_llm.persisted_model() or _MODEL,
+                messages=sys_messages,
+                stream=True,
+                **tools_kw,
+            )
+
+        def _open_azure():
+            nonlocal client, on_azure
+            if not on_azure:
+                client = llm_failover.async_azure_client()
+                on_azure = True
+            return client.chat.completions.create(
+                model=llm_failover.deployment(),
+                messages=sys_messages,
+                stream=True,
+                **tools_kw,
+            )
+
+        if on_azure:
+            stream = await _open_azure()
+        elif use_failover:
+            stream = await llm_failover.acall("pipeline", _open_local, _open_azure)
+        else:
+            stream = await _open_local()
 
         async for chunk in stream:
             delta = chunk.choices[0].delta if chunk.choices else None
@@ -720,7 +760,13 @@ async def run_agent_streaming(
         return await _run_anthropic_streaming(system, tool_fns, messages, ctx, emit, max_turns)
     if _PROVIDER in ("ollama", "litellm"):
         base, key = _openai_compat_config()
-        return await _run_openai_streaming(system, tool_fns, messages, ctx, emit, max_turns, base_url=base, api_key=key)
+        return await _run_openai_streaming(
+            system, tool_fns, messages, ctx, emit, max_turns,
+            base_url=base, api_key=key,
+            # Only the local LM Studio path fails over to Azure; the LiteLLM
+            # proxy is someone else's service with its own availability.
+            failover=_PROVIDER == "ollama",
+        )
     return await _run_openai_streaming(system, tool_fns, messages, ctx, emit, max_turns)
 
 

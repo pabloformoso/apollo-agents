@@ -35,6 +35,8 @@ import logging
 import os
 from typing import TypedDict
 
+from agent import llm_failover
+
 from . import main_llm
 
 log = logging.getLogger(__name__)
@@ -331,15 +333,31 @@ def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
     if not model:
         log.warning("brief_parser: no model configured for provider %r", provider)
         return _empty()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": _SYSTEM + _JSON_SUFFIX},
-            {"role": "user", "content": brief},
-        ],
-        max_tokens=_OPENAI_MAX_TOKENS,
-        temperature=0.0,  # extraction, not composition
-    )
+    messages = [
+        {"role": "system", "content": _SYSTEM + _JSON_SUFFIX},
+        {"role": "user", "content": brief},
+    ]
+
+    def _create(c, m):
+        return c.chat.completions.create(
+            model=m,
+            messages=messages,
+            max_tokens=_OPENAI_MAX_TOKENS,
+            temperature=0.0,  # extraction, not composition
+        )
+
+    if provider in llm_failover.LOCAL_PROVIDERS and llm_failover.configured():
+        # The 2026-09-24 demo: two briefs parsed to all-null while LM
+        # Studio answered 400 "Failed to load model" between swaps.
+        resp = llm_failover.call(
+            "brief_parser",
+            lambda: _create(client, model),
+            lambda: _create(
+                llm_failover.azure_client(timeout=TIMEOUT_SEC), llm_failover.deployment(),
+            ),
+        )
+    else:
+        resp = _create(client, model)
     text = (resp.choices[0].message.content or "").strip()
     raw = extract_json_object(text)
     if raw is None:

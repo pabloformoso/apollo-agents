@@ -1267,6 +1267,39 @@ has to know.
   be asked and the page then plays on the mind's default: being unable to
   CHOOSE must never mean being unable to play.
 
+## Local LLM → Azure failover (2026-09-24, `agent/llm_failover.py`)
+
+- **Why:** the demo of 2026-09-24 swapped models in Settings a few times
+  and LM Studio then answered `400 Failed to load model
+  "google/gemma-4-e4b"` — briefs parsed to all-null. The SDK retries
+  connection errors and 5xx, never a 400.
+- **Where it applies:** every call bound for the LOCAL endpoint
+  (`AGENT_PROVIDER=ollama`): `pipeline._run_openai_streaming` (planner,
+  critic, guard, editor, validator AND the live DJ), `brief_parser`,
+  the generator critique, and the CLI `agent/run.py`. NOT the LiteLLM
+  proxy (not ours) and NOT the Algorave Mind — its LLM call lives in the
+  host-side playground behind a residency gate; that is its own change.
+- **What counts as down** (`is_local_outage`): connection/timeout, 5xx,
+  404, 429, and a 400/422 whose text says the model will not load. A
+  request the model understood and refused is NOT re-sent — it would fail
+  the same way on Azure and cost money doing it.
+- **The breaker is process-wide**: one outage sends every call to Azure for
+  `APOLLO_LLM_FAILOVER_COOLDOWN_SEC` (120 s), then local is tried again.
+  Without it the live DJ would pay the local timeout on every turn. Log
+  lines: `[llm-failover] <where>: local LLM failing over (…) — using Azure
+  'gpt-4o' …` and `… answering again — back on it`.
+- **The model name never crosses**: the Azure call always uses
+  `APOLLO_LLM_FAILOVER_DEPLOYMENT` or `AZURE_OPENAI_DEPLOYMENT`.
+- **A stream is only failed over when it cannot be OPENED.** One that
+  breaks mid-way has already put words on the audience's screen. Once a
+  run failed over it stays on Azure for its remaining turns.
+- **`tools` is omitted when empty** — `[]` is a 400 on OpenAI/Azure and LM
+  Studio merely tolerated it.
+- **Every failover is paid Azure usage.** Off switch:
+  `APOLLO_LLM_FAILOVER=0`. The root `conftest.py` pins it to 0 because a
+  worktree's `load_dotenv` finds the main checkout's REAL Azure key;
+  failover tests opt in with fake env and fake SDK classes.
+
 ## Live visuals: shader scenes (2026-09-24)
 
 - **The default is `auto`**: one of four fullscreen shader scenes

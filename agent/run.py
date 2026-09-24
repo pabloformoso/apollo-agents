@@ -483,17 +483,38 @@ def _run_agent_anthropic(system_prompt, tool_fns, tool_index, messages, context_
 def _run_agent_ollama(system_prompt, tool_fns, tool_index, messages, context_variables, max_turns):
     """Run agent against an OpenAI-compatible endpoint (Ollama, LM Studio, or LiteLLM)."""
     from openai import OpenAI
+    from agent import llm_failover
     base_url, api_key = _openai_compat_config()
-    client = OpenAI(base_url=base_url, api_key=api_key)
+    # Local LM Studio only (not the LiteLLM proxy): a down model fails over
+    # to the Azure deployment — see agent/llm_failover.py.
+    use_failover = _PROVIDER == "ollama" and llm_failover.configured()
+    if use_failover:
+        client = OpenAI(base_url=base_url, api_key=api_key, timeout=llm_failover.local_timeout())
+    else:
+        client = OpenAI(base_url=base_url, api_key=api_key)
+    azure = None
     schemas = _build_openai_schemas(tool_fns)
     full_messages = [{"role": "system", "content": system_prompt}] + messages
     final_text = ""
+
+    def _on_azure(kwargs):
+        nonlocal azure
+        if azure is None:
+            azure = llm_failover.azure_client()
+        return azure.chat.completions.create(**{**kwargs, "model": llm_failover.deployment()})
 
     for turn in range(max_turns):
         kwargs: dict = {"model": _MODEL, "messages": full_messages}
         if schemas:
             kwargs["tools"] = schemas
-        response = client.chat.completions.create(**kwargs)
+        if azure is not None:
+            response = _on_azure(kwargs)
+        elif use_failover:
+            response = llm_failover.call(
+                "agent", lambda: client.chat.completions.create(**kwargs), lambda: _on_azure(kwargs),
+            )
+        else:
+            response = client.chat.completions.create(**kwargs)
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
         # Same leak as the streaming loop: a reasoning model can answer
