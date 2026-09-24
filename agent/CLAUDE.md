@@ -94,6 +94,15 @@
   e.g. quiet_pages×13) and are deliberately NOT collapsed. Known
   limitation: bare '-2' collision renames only link when display
   names align.
+- **The planner never repeats a piece to fill time (2026-09-23)**:
+  `propose_playlist` used to CYCLE its pool when the BPM cluster could
+  not cover the requested duration — a 5 h healing request became 28
+  pieces looped ~3x, and the broadcast replayed its opener at 90 min.
+  The endless no-repeat window never saw it: it guards only what the
+  ENGINE appends. A short catalog now yields a short playlist plus a
+  note saying so; endless mode fills the rest live. `swap_track` and
+  `insert_bridge_track` refuse a piece already in the playlist.
+  Sessions saved before this fix still carry their loops.
 - **Tool error strings coach the model**: on a bad id / ineligible
   track, tell the LLM exactly which tool to re-run (`pick_next_track`)
   — never a bare "not found".

@@ -26,7 +26,7 @@ from agent.eligibility import (
     filter_session_eligible,
     ineligibility_reason,
 )
-from agent.track_identity import dedupe_takes
+from agent.track_identity import dedupe_takes, piece_exclusion_set, shares_piece
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -654,20 +654,39 @@ def propose_playlist(
             except Exception:
                 pass  # never let UI plumbing break selection
 
-    # Fill to duration — deduplicate display_name first, then cycle
+    # Fill to duration — each piece at most once. This used to CYCLE the
+    # pool when the catalog ran short: a 5 h healing set (2026-09-23)
+    # was 28 pieces looped ~3x into 79 slots, and the live broadcast
+    # replayed its first track after 90 min. A short catalog now yields
+    # a short playlist; in a live set endless mode extends it with its
+    # own no-repeat window, which a pre-looped playlist bypassed.
     target_sec = duration_min * 60
     seen: set[str] = set()
     first_pass = [t for t in ordered if not (t["display_name"] in seen or seen.add(t["display_name"]))]  # type: ignore[func-returns-value]
 
     playlist: list[dict] = []
     total_sec = 0.0
-    pool = list(first_pass)
-    while total_sec < target_sec:
-        if not pool:
-            pool = list(first_pass)
-        track = pool.pop(0)
+    for track in first_pass:
+        if total_sec >= target_sec:
+            break
         playlist.append(track)
         total_sec += track.get("duration_sec") or 300  # fall back to 5 min if not cataloged
+
+    short_note = ""
+    if total_sec < target_sec:
+        covered_min = round(total_sec / 60)
+        print(
+            f"[propose_playlist] catalog short: {len(playlist)} distinct pieces "
+            f"cover ~{covered_min} of {duration_min} min for '{genre}' — "
+            "not repeating any",
+            flush=True,
+        )
+        short_note = (
+            f"\n\nNote: only {len(playlist)} distinct tracks fit the set's BPM "
+            f"range — ~{covered_min} of the {duration_min} min requested. "
+            "Tracks are never repeated to fill time; a live set in endless "
+            "mode keeps going with fresh picks after the last one."
+        )
 
     context_variables["playlist"] = playlist
     context_variables["genre"] = genre
@@ -681,7 +700,10 @@ def propose_playlist(
         context_variables.get("environment") or "unspecified",
     )
 
-    return _format_playlist(playlist, header=f"Proposed playlist ({len(playlist)} tracks, ~{duration_min} min) — mood: {mood}")
+    return _format_playlist(
+        playlist,
+        header=f"Proposed playlist ({len(playlist)} tracks, ~{round(total_sec / 60)} min) — mood: {mood}",
+    ) + short_note
 
 
 def show_playlist(context_variables: dict) -> str:
@@ -785,6 +807,17 @@ def swap_track(
         return (
             f"Track '{new_track.get('display_name', track_id)}' was NOT "
             f"swapped in: {reason}. Pick a longer track from get_catalog."
+        )
+
+    # No repeats: the replacement must not be (a take of) a piece that
+    # is already elsewhere in the playlist. The slot being replaced is
+    # left out, so swapping a take for another take of itself works.
+    others = playlist[: position - 1] + playlist[position:]
+    if shares_piece(new_track, piece_exclusion_set(others)):
+        return (
+            f"Track '{new_track.get('display_name', track_id)}' was NOT "
+            "swapped in: it is already in the playlist. Pick a track that "
+            "is not in the playlist yet from get_catalog."
         )
 
     old = playlist[position - 1]
@@ -1007,6 +1040,13 @@ def insert_bridge_track(after_position: int, track_id: str, context_variables: d
     new_track = next((c for c in catalog.get("tracks", []) if c.get("id") == track_id), None)
     if new_track is None:
         return f"Track ID '{track_id}' not found in catalog."
+
+    if shares_piece(new_track, piece_exclusion_set(playlist)):
+        return (
+            f"Track '{new_track.get('display_name', track_id)}' was NOT "
+            "inserted: it is already in the playlist. Use "
+            "suggest_bridge_track for a track that is not in it yet."
+        )
 
     playlist.insert(after_position, new_track)
     context_variables["playlist"] = playlist
