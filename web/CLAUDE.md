@@ -1267,6 +1267,55 @@ has to know.
   be asked and the page then plays on the mind's default: being unable to
   CHOOSE must never mean being unable to play.
 
+## Live visuals: shader scenes (2026-09-24)
+
+- **The default is `auto`**: one of four fullscreen shader scenes
+  (`lib/visualizer/effects/shader_scenes.ts` — aurora, prism, tunnel,
+  pulse) picked per track by `scene_picker.autoScene`. Beatless genres
+  (healing, aural, lofi-ambient, chillout) ALWAYS get aurora whatever
+  their BPM: the catalog's BPMs for those genres are detection artefacts,
+  and a healing broadcast in a strobing tunnel is the visual version of
+  the genre-drift bug. The genre comes from the id prefix because
+  `LiveTrackSummary` has no genre field. The v2.5 effects stay, as
+  "classic".
+- **They hear the set through ONE analyser on the master bus.**
+  `useLiveSession` fans both decks' gains into `analyserRef`, and nothing
+  leaves the analyser, so it cannot change what the set sounds like. This
+  is still one audio graph — the reason v2.5.3 refused an AnalyserNode was
+  a SECOND graph. Without an analyser (viewer before its first deck, the
+  lab) the scenes run on `syntheticFeatures(beat clock)`.
+- **Photosensitivity is enforced by construction, not a rate cap.** Only
+  `accent` may brighten a large area, and it fires once per bar (<3 Hz
+  below 720 BPM); `kick` moves thin lines and small areas. Keep new scenes
+  to that rule — this is a public YouTube broadcast.
+- **Tuning rule learned on the first pass: dark ground, light in the
+  structure.** The follower auto-gains every band towards ~1, so a term
+  like `col *= 0.5 + bass` is bright ALL the time and washes the picture
+  out. Use the bands as small modulations on top of a near-black base.
+- **Verify in a real browser, never only in vitest.** happy-dom mocks
+  three.js, so a GLSL compile error passes every unit test. `/visuals`
+  (the lab: genre, BPM, key, beat clock / audio file / mic) renders the
+  real thing; headless Chromium needs `--use-angle=swiftshader`. Reading
+  pixels back with `drawImage` returns black (no `preserveDrawingBuffer`),
+  so look at screenshots instead.
+- The mic in the lab needs a secure context, like AudioWorklet — it works
+  on localhost/HTTPS and says so over the tailnet IP.
+
+## Leaving a live page (2026-09-24)
+
+- **`LiveLeaveGuard` holds in-app links behind a dialog while a PRIMARY set
+  plays**, and arms `beforeunload` for reloads/closes. The browser is the
+  engine: unmounting the page closes the AudioContext and the WS, and the
+  backend stops the set — a single click on Catalog lost one on
+  2026-09-23. Clicks are caught in the CAPTURE phase on `document`, before
+  React's root listener, so `next/link` never sees them; `leavingTo` (pure,
+  tested) lets new-tab/modified/download/hash/same-page clicks through.
+  **Never render it on a viewer** — the OBS capture must not grow a modal.
+  Not covered: the Back button and programmatic `router.push`. The real
+  fix is a player that survives navigation (a root-level provider), which
+  must first split the hook's ~24 UI states from the engine and decide
+  what the catalog preview does during a set.
+
 ## Testing
 
 - Unit: `npx vitest run` in `web/frontend` (hook tests use the

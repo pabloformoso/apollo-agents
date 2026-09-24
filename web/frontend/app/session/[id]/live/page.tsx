@@ -12,6 +12,7 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 
 import LiveStage from "@/components/LiveStage";
+import LiveLeaveGuard from "@/components/LiveLeaveGuard";
 import { useAuth } from "@/lib/auth";
 import { getSession } from "@/lib/api";
 import { useLiveSession } from "@/lib/live";
@@ -107,6 +108,10 @@ export default function LiveSessionPage() {
         live={live}
         durationMin={session.duration_min}
         sessionName={session.session_name}
+      />
+      <LiveLeaveGuard
+        active={live.connected && live.currentTrack !== null}
+        trackName={live.currentTrack?.display_name}
       />
     </main>
   );

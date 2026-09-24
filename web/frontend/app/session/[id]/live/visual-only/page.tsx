@@ -19,6 +19,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 
+import LiveLeaveGuard from "@/components/LiveLeaveGuard";
 import VisualLayer from "@/components/VisualLayer";
 import { useAuth } from "@/lib/auth";
 import { useAuthQueryBootstrap } from "@/lib/auth-bootstrap";
@@ -61,8 +62,16 @@ function VisualOnlyPageInner() {
       data-testid="visual-only-root"
       className="fixed inset-0 bg-black overflow-hidden"
     >
+      <LiveLeaveGuard
+        active={live.connected && live.currentTrack !== null}
+        trackName={live.currentTrack?.display_name}
+      />
       <div className="absolute inset-0">
-        <VisualLayer audioRef={live.audioRef} currentTrack={live.currentTrack} />
+        <VisualLayer
+          audioRef={live.audioRef}
+          analyserRef={live.analyserRef}
+          currentTrack={live.currentTrack}
+        />
       </div>
 
       {live.autoplayBlocked && !dismissed ? (
