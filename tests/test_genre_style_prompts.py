@@ -151,3 +151,29 @@ def test_empty_user_prompt_still_carries_the_genre():
 def test_composed_prompt_is_trimmed_to_ace_step_caption_limit():
     """A long user prompt must fit ACE-Step 1.5's 512-character caption."""
     assert len(_compose()("x" * 5000, "healing")) == 512
+
+
+# --- the descriptor must leave the user room --------------------------------
+
+#: ACE's caption ceiling is 512 characters and the descriptor goes FIRST
+#: (``generator._compose_prompt``), so a long descriptor silently truncates
+#: the user's own words. 300 keeps >= 210 characters for them.
+STYLE_MAX_CHARS = 300
+
+
+@pytest.mark.parametrize("genre", sorted(GENRE_STYLE_PROMPTS))
+def test_style_descriptor_leaves_room_for_the_user(genre):
+    style = GENRE_STYLE_PROMPTS[genre]
+    assert len(style) <= STYLE_MAX_CHARS, (
+        f"{genre} descriptor is {len(style)} chars; the user's words would be cut"
+    )
+
+
+def test_aural_stays_beatless():
+    """Aural sets are broadcast as beatless ambient; a drum take can't be promoted.
+
+    The 2026-09-25 rewrite (after Polarity's Grid patch) must keep saying so.
+    """
+    style = GENRE_STYLE_PROMPTS["aural"]
+    assert "beatless" in style
+    assert "no drums" in style
