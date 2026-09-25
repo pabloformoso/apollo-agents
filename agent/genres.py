@@ -65,10 +65,20 @@ GENRE_DEFAULTS: dict[str, dict[str, Any]] = {
             "particle_color": [190, 232, 248],
             "bg_darken": 0.8,
         },
+        # 2026-09-25 — modelled on Polarity's Bitwig Grid patch "My Soundscape
+        # for Sleeping at the Edge of the Universe" (youtu.be/fsxvm6W4EoY),
+        # each phrase standing for one part of the patch: filtered white/pink
+        # noise; sine and saw oscillators moved by slow S/H LFOs; Dice/Chance
+        # triggers through a pitch quantizer; ±12 st pitch shift; the wall of
+        # all-pass delays. The Grid's own words ("S/H", "all-pass") mean
+        # nothing to ACE, so the template names the SOUND each part makes.
+        # 266 chars: the caption ceiling is 512 with the user's words after it.
         "style_prompt": (
-            'ethereal beatless ambient: weightless evolving pads, submarine '
-            'and cosmic textures, very long reverb, no drums, dark and '
-            'spacious with slow swells'
+            'generative beatless deep-space ambient: soft filtered noise beds, '
+            'slow drifting sine and saw drones, sparse random bell-like notes '
+            'in a minor scale, octave shimmer, long diffuse reverb tails, '
+            'faint distant signals drifting in and out, no drums, sleepy and '
+            'mysterious'
         ),
         "neighbours": frozenset(['chillout', 'healing', 'lofi - ambient']),
     },
