@@ -59,6 +59,12 @@ os.environ.setdefault("JWT_SECRET", "test-secret")
 #: ACE-Step box; an ambient `OLLAMA_BASE_URL` would point agent tests at
 #: a real LM Studio. Both are read at CALL time by design, so clearing
 #: them here is enough and does not need an import-order argument.
+#: A test must never fail over to the real Azure deployment: a worktree's
+#: `load_dotenv` finds the main checkout's `.env`, whose Azure key is real.
+#: Set before any module reads it; a failover test opts back in with
+#: monkeypatch. `load_dotenv` does not override an existing variable.
+os.environ["APOLLO_LLM_FAILOVER"] = "0"
+
 for _leaky in ("ACESTEP_BASE_URL", "ACESTEP_API_KEY", "ACESTEP_AUDIO_ROOT",
                "ACESTEP_CONTROL_URL", "ACESTEP_CONTROL_TOKEN"):
     os.environ.pop(_leaky, None)

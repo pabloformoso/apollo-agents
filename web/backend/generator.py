@@ -2147,15 +2147,34 @@ def _llm_paragraph(system: str, user: str, provider: str) -> str:
             api_key = "ollama"
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=CRITIQUE_TIMEOUT_SEC)
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        max_tokens=CRITIQUE_MAX_TOKENS,
-        temperature=0.2,
-    )
+    def _create(c: Any, m: str) -> Any:
+        return c.chat.completions.create(
+            model=m,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=CRITIQUE_MAX_TOKENS,
+            temperature=0.2,
+        )
+
+    from agent import llm_failover  # noqa: PLC0415
+
+    if provider in llm_failover.LOCAL_PROVIDERS and llm_failover.configured():
+        # Failover, not a retry: a DOWN local model (it fails fast — a 400
+        # "Failed to load model" or a refused connection) is replaced by
+        # Azure inside the same CRITIQUE_TIMEOUT_SEC budget the caller's
+        # wait_for enforces. A slow or refusing model is not re-asked.
+        resp = llm_failover.call(
+            "critique",
+            lambda: _create(client, model),
+            lambda: _create(
+                llm_failover.azure_client(timeout=CRITIQUE_TIMEOUT_SEC),
+                llm_failover.deployment(),
+            ),
+        )
+    else:
+        resp = _create(client, model)
     return resp.choices[0].message.content or ""
 
 
@@ -2182,6 +2201,10 @@ async def _critique_paragraph(
     req: CritiqueRequest, report: dict, bands: dict | None
 ) -> str | None:
     """The optional LLM read. **Never raises, never retries.**
+
+    (A local model that is DOWN fails over to Azure inside
+    ``_llm_paragraph`` — same budget, one call either way; see
+    ``agent/llm_failover.py``.)
 
     Degradation is the contract, not a safety net: no provider wired,
     ``AGENT_PROVIDER=mock``, a box that does not answer, a reply that is
