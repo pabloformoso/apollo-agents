@@ -56,7 +56,7 @@ describe("askMind", () => {
     await askMind({ code: 's("bd*4")', intent: "more space" });
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(MIND_ENDPOINT);
     const sent = JSON.parse(String(init.body));
     // The shared `mindRequest` always emits the fields the mind defaults
@@ -74,7 +74,7 @@ describe("askMind", () => {
   it("sends b2b only when true, and renames barsElapsed to the wire name", async () => {
     const fetchSpy = stubFetch(200, { code: "x", reason: "", stats: {} });
     await askMind({ code: "a", intent: "i", b2b: true, barsElapsed: 8 });
-    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body));
+    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1].body));
     expect(sent.b2b).toBe(true);
     expect(sent.bars_elapsed).toBe(8);
   });
@@ -152,14 +152,14 @@ describe("choosing a model", () => {
   it("sends `model` when one was picked", async () => {
     const fetchSpy = stubFetch(200, { code: "x", reason: "", stats: {}, model: "gpt-4o-mini" });
     await askMind({ code: "a", intent: "i", model: "gpt-4o-mini" });
-    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body));
+    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1].body));
     expect(sent.model).toBe("gpt-4o-mini");
   });
 
   it("omits `model` entirely when none was picked", async () => {
     const fetchSpy = stubFetch(200, { code: "x", reason: "", stats: {} });
     await askMind({ code: "a", intent: "i" });
-    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as [string, RequestInit])[1].body));
+    const sent = JSON.parse(String((fetchSpy.mock.calls[0] as unknown as [string, RequestInit])[1].body));
     expect("model" in sent).toBe(false);
   });
 

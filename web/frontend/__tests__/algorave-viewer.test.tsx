@@ -103,7 +103,7 @@ describe("the run mirror", () => {
       reason: "sparser",
       history: [], thinking: false, intent: "", model: null,
     });
-    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("/api/algorave/run?id=run-1");
     expect(JSON.parse(String(init.body)).pen).toBe("mind");
   });

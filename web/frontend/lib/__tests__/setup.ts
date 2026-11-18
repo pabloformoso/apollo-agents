@@ -27,3 +27,18 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
 });
+
+// happy-dom >= 21 implements the Web Animations API, so framer-motion now
+// drives real Animation objects and cancels them on unmount. The spec rejects
+// `animation.finished` with an AbortError on cancel AND marks that promise as
+// handled — browsers never report it. happy-dom skips the second half, so
+// every unmounted motion component surfaced as an unhandled rejection and
+// failed the run. Mark it handled before cancelling, as a browser would.
+const AnimationCtor = (globalThis as { Animation?: { prototype: Animation } }).Animation;
+if (AnimationCtor) {
+  const cancel = AnimationCtor.prototype.cancel;
+  AnimationCtor.prototype.cancel = function (this: Animation) {
+    this.finished?.catch(() => {});
+    return cancel.call(this);
+  };
+}

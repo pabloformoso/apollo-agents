@@ -56,7 +56,7 @@ describe("round trip", () => {
 describe("what it refuses to restore", () => {
   it("carries no pen and no b2b — the fields do not exist in the shape", () => {
     saveSession(session);
-    const back = loadSession() as Record<string, unknown>;
+    const back = loadSession() as unknown as Record<string, unknown>;
     // Asserted on the DATA, not on the caller's discipline: there is no field
     // to accidentally read, so a reload cannot inherit an armed scheduler.
     expect("pen" in back).toBe(false);
