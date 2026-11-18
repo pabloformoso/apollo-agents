@@ -132,11 +132,15 @@ fonts/
 
 ## Deploy & operations (read before touching prod)
 
-Prod = `docker compose` in the **main checkout**
-(`C:\Users\pablo\Documents\GitHub\apollo-agents`), which sits on
-`main` and tracks `origin/main` directly (the `deploy/*` branch era
-ended 2026-08-29). The repo is bind-mounted into the containers and
-the backend runs `uvicorn --reload`.
+Prod = `docker compose` in the **main checkout** on jarvis
+(`/home/pablo/code/apollo-agents`; it moved off Windows in September
+2026), which sits on `main` and tracks `origin/main` directly (the
+`deploy/*` branch era ended 2026-08-29). The repo is bind-mounted into
+the containers and the backend runs `uvicorn --reload`. The Algorave
+Mind and the ACE controller are NOT in compose: they are systemd user
+units on the same host (`systemctl --user restart apollo-mind`), defined
+in `deploy/acestep/` — a merge that touches the Mind needs that restart
+as well.
 
 The only sanctioned path to prod:
 
