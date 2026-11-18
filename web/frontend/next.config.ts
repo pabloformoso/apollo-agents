@@ -26,6 +26,12 @@ const nextConfig: NextConfig = {
   // captures. Build/runtime errors still raise the overlay; only the idle
   // badge goes.
   devIndicators: false,
+  // Since 16.4, `next dev` writes (and re-writes if deleted) a managed
+  // web/frontend/AGENTS.md whenever it detects an AI coding agent in its env.
+  // Worktree sessions run dev servers and the e2e suite under one, and the
+  // prod checkout must stay a pure mirror of origin/main — an untracked file
+  // appearing there is exactly the drift the deploy rules forbid.
+  agentRules: false,
   // Next 16 blocks cross-origin requests to dev resources by default. Without
   // 127.0.0.1 here, opening http://127.0.0.1:4010 leaves the page un-hydrated
   // (HMR WS + RSC payload both rejected) — symptoms: root /  doesn't redirect,
