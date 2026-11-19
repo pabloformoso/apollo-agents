@@ -45,8 +45,10 @@ services:
     # stack with exit 255 and you have to ``docker compose up`` again
     # to get it back.
     restart: unless-stopped
+    # Solo en local: desde fuera de jarvis se entra por nginx
+    # (apollo-api.pabloformoso.com), que solo deja pasar a la tailnet.
     ports:
-      - "4020:4020"
+      - "127.0.0.1:4020:4020"
     env_file:
       # ANTHROPIC_API_KEY, AZURE_OPENAI_*, etc. — same .env the CLI uses.
       - .env
@@ -104,8 +106,10 @@ services:
     container_name: apollo-frontend
     # Same self-healing policy as the backend.
     restart: unless-stopped
+    # Solo en local: desde fuera de jarvis se entra por nginx
+    # (apollo.pabloformoso.com).
     ports:
-      - "4010:4010"
+      - "127.0.0.1:4010:4010"
     environment:
       # next.config.ts already reads this — proxy /api/* into the
       # compose network instead of localhost (which would resolve
@@ -127,8 +131,8 @@ services:
       # <page host>:4020 — right over plain HTTP on the tailnet, and WRONG the
       # moment the page is served over HTTPS: it would ask for
       # wss://<host>:4020, where there is no TLS and cannot be. The backend
-      # container owns 0.0.0.0:4020, so nginx cannot terminate there without
-      # taking prod down.
+      # container owns 127.0.0.1:4020 (local only since 2026-10-25), so the
+      # port is not reachable from the tailnet at all.
       #
       # So an HTTPS deployment MUST set this, and set it in the same restart
       # that turns HTTPS on — not after. For apollo.pabloformoso.com the value
