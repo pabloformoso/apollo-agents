@@ -568,7 +568,34 @@ interface ServerDecision {
   picked_by?: string;
 }
 
+// Stall alarm (2026-11-19, agent/live_engine.py ``STALL_ALARM``): the
+// watchdog has forced ``consecutive`` advances in a row with no deck
+// position moving. ``holding`` says the engine stopped advancing because no
+// viewer can be hearing the set. Operator-only: it never reaches the
+// reasoning feed, which an OBS viewer puts on the public broadcast.
+interface ServerStallAlarm {
+  type: "stall_alarm";
+  state: "raised" | "cleared";
+  consecutive: number;
+  holding?: boolean;
+  track?: { id?: string; display_name?: string } | null;
+}
+
+/** Every stall-alarm banner starts with this, so "cleared" removes only its own. */
+export const STALL_ALARM_PREFIX = "Playback stalled";
+
+export function stallAlarmText(evt: {
+  consecutive: number;
+  holding?: boolean;
+}): string {
+  const what = `${STALL_ALARM_PREFIX}: ${evt.consecutive} tracks in a row were advanced by the watchdog without the deck playing.`;
+  return evt.holding
+    ? `${what} No viewer is attached, so the set is HELD until this tab plays again — reload it.`
+    : `${what} The viewer keeps the stream going; check the operator tab.`;
+}
+
 type ServerEvent =
+  | ServerStallAlarm
   | ServerLiveStateMessage
   | ServerEngineEvent
   | ServerEngineCommand
@@ -1656,6 +1683,14 @@ export function useLiveSession(
         // out of in-genre candidates. Surface to the agent via toast
         // semantics — the page wraps this into its UI banner.
         setError(evt.message || "Endless mode: no more candidates.");
+        break;
+      case "stall_alarm":
+        if (viewerModeRef.current) break;
+        if (evt.state === "raised") {
+          setError(stallAlarmText(evt));
+        } else {
+          setError((prev) => (prev?.startsWith(STALL_ALARM_PREFIX) ? null : prev));
+        }
         break;
       case "endless_mode":
         // Server-confirmed echo from set_endless_mode. We mirror the

@@ -216,6 +216,16 @@ class _Registry:
             # primary may still be publishing and a new viewer can
             # arrive at any time. ``drop_bus`` is the explicit teardown.
 
+    def viewer_count(self, user_id: int, session_id: str) -> int:
+        """How many read-only viewers are attached right now.
+
+        Lock-free on purpose: a single ``len`` on the event loop thread,
+        read by the stall watchdog every few seconds — a count one tick
+        stale is harmless, a lock round-trip per tick is not free.
+        """
+        bus = self._buses.get((user_id, session_id))
+        return len(bus.viewers) if bus is not None else 0
+
     async def drop_bus(self, user_id: int, session_id: str) -> None:
         """Called by the primary WS handler on disconnect.
 
@@ -244,6 +254,11 @@ async def subscribe_viewer(
 ) -> ViewerSubscription:
     """Public wrapper. See :meth:`_Registry.subscribe_viewer`."""
     return await _registry.subscribe_viewer(user_id, session_id, on_event)
+
+
+def viewer_count(user_id: int, session_id: str) -> int:
+    """Public wrapper. See :meth:`_Registry.viewer_count`."""
+    return _registry.viewer_count(user_id, session_id)
 
 
 async def drop_bus(user_id: int, session_id: str) -> None:

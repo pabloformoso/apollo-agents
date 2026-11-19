@@ -18,6 +18,8 @@ import { act, cleanup, renderHook } from "@testing-library/react";
 
 import {
   buildEqualPowerCurve,
+  stallAlarmText,
+  STALL_ALARM_PREFIX,
   useIsLiveActive,
   useLiveSession,
   type PhaseLockPayload,
@@ -2933,5 +2935,49 @@ describe("reasoning — the DJ's thinking reaches the hook", () => {
     ]);
     // The warning still reaches its own list too.
     expect(result.current.criticWarnings).toHaveLength(1);
+  });
+});
+
+describe("stall_alarm — the operator hears that the watchdog is churning", () => {
+  const raised = (holding: boolean) => ({
+    type: "stall_alarm",
+    state: "raised",
+    consecutive: 3,
+    holding,
+    track: { id: "t2", display_name: "Track t2" },
+  });
+
+  it("raises a banner that says whether the set is held", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-stall-1"));
+    await flushOpen();
+    act(() => FakeWebSocket.lastInstance!.pushServerEvent(raised(true)));
+    expect(result.current.error).toBe(stallAlarmText({ consecutive: 3, holding: true }));
+    expect(result.current.error).toContain("HELD");
+    expect(stallAlarmText({ consecutive: 3, holding: false })).toContain("viewer keeps");
+  });
+
+  it("clears its own banner on recovery, and nobody else's", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-stall-2"));
+    await flushOpen();
+    act(() => FakeWebSocket.lastInstance!.pushServerEvent(raised(false)));
+    expect(result.current.error?.startsWith(STALL_ALARM_PREFIX)).toBe(true);
+    act(() =>
+      FakeWebSocket.lastInstance!.pushServerEvent({ type: "stall_alarm", state: "cleared", consecutive: 3 }),
+    );
+    expect(result.current.error).toBeNull();
+
+    act(() => FakeWebSocket.lastInstance!.pushServerEvent({ type: "endless_warning", message: "cap reached" }));
+    act(() =>
+      FakeWebSocket.lastInstance!.pushServerEvent({ type: "stall_alarm", state: "cleared", consecutive: 3 }),
+    );
+    expect(result.current.error).toBe("cap reached");
+  });
+
+  it("never reaches an OBS viewer, nor the public reasoning feed", async () => {
+    const { result } = renderHook(() => useLiveSession("sid-stall-3", { viewer: true }));
+    await flushOpen();
+    act(() => FakeWebSocket.lastInstance!.pushServerEvent(raised(false)));
+    expect(result.current.error).toBeNull();
+    expect(result.current.reasoning).toEqual([]);
   });
 });

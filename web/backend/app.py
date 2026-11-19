@@ -1409,13 +1409,22 @@ async def live_session_ws(
     # so tests can monkeypatch the cadence/margin.
     import agent.live_engine as live_engine_mod  # noqa: PLC0415
 
+    # Stall alarm (2026-11-19): after LIVE_STALL_ALARM_AFTER forced
+    # advances in a row the engine raises ``stall_alarm``. Whether it may
+    # also HOLD is decided here, because only the backend knows who is
+    # listening: an attached OBS viewer follows engine commands and never
+    # pings, so for it the forced advances ARE the stream; with no viewer
+    # nothing can be hearing them and they only burn the catalog.
     async def run_stall_watchdog() -> None:
         while True:
             await asyncio.sleep(live_engine_mod.LIVE_STALL_CHECK_SEC)
             try:
+                can_hold = live_runtime.viewer_count(user["id"], session_id) == 0
                 # to_thread: a forced advance can run the endless
                 # fallback, which reads tracks.json from disk.
-                forced = await asyncio.to_thread(engine.check_stall)
+                forced = await asyncio.to_thread(
+                    engine.check_stall, can_hold=can_hold
+                )
             except Exception as exc:  # noqa: BLE001 — watchdog must outlive hiccups
                 print(
                     f"[live-ws {session_id}] check_stall failed: {exc}",
