@@ -59,20 +59,20 @@ def test_returns_none_when_user_no_longer_exists(client, monkeypatch):
 def test_returns_none_when_sub_is_not_integer(client):
     """A hand-rolled JWT with a non-integer subject claim must not crash."""
     from datetime import datetime, timedelta, timezone
-    from jose import jwt as jose_jwt
+    import jwt as pyjwt
 
     payload = {
         "sub": "not-an-int",
         "exp": datetime.now(timezone.utc) + timedelta(hours=1),
     }
-    bad = jose_jwt.encode(payload, auth.SECRET_KEY, algorithm=auth.ALGORITHM)
+    bad = pyjwt.encode(payload, auth.SECRET_KEY, algorithm=auth.ALGORITHM)
     assert auth.user_from_query_token(bad) is None
 
 
 def test_returns_none_when_sub_missing(client):
     from datetime import datetime, timedelta, timezone
-    from jose import jwt as jose_jwt
+    import jwt as pyjwt
 
     payload = {"exp": datetime.now(timezone.utc) + timedelta(hours=1)}
-    bad = jose_jwt.encode(payload, auth.SECRET_KEY, algorithm=auth.ALGORITHM)
+    bad = pyjwt.encode(payload, auth.SECRET_KEY, algorithm=auth.ALGORITHM)
     assert auth.user_from_query_token(bad) is None

@@ -50,15 +50,31 @@ Comprobar: `docker compose exec frontend node -e "console.log(require('next/pack
   una sesión completa. Primera sesión tras el deploy: mirar el vídeo.
 - fastapi 0.136 → 0.163 y cryptography 46 → 50 son saltos grandes; la suite
   pasa, pero vigilar el login Keycloak/JWT en prod.
-- Sin versión corregida todavía: python-jose (PYSEC-2026-4298), ecdsa
-  (PYSEC-2026-1325, dependencia de python-jose) y picomatch (dev, ReDoS).
-  Reemplazar python-jose por PyJWT o joserfc lo resolvería.
+- JWT: python-jose → PyJWT 2.15.1 (quita sus dos avisos y los de ecdsa).
+  Un token emitido por jose se decodifica igual con PyJWT (comprobado), así
+  que nadie pierde la sesión. PyJWT avisa (`InsecureKeyLengthWarning`, no
+  error) si `JWT_SECRET` tiene menos de 32 bytes: mirar su longitud en el
+  `.env` de prod; rotarlo cierra todas las sesiones, decidirlo aparte.
+- Sin versión corregida todavía: picomatch (dev, ReDoS).
 
 ## Next steps
 1. Mergear la PR de rescate y desplegar (arriba).
-2. Borrar las 130 ramas mergeadas (y las 4 superadas) — pendiente del OK de Pablo.
+2. Borrar 133 ramas remotas — aprobado por Pablo el 2026-11-19, pero esta
+   sesión solo puede escribir en su propia rama (GitHub responde 403), así que
+   hay que lanzar `delete-merged-branches.sh` desde un checkout propio.
+   Auditoría (punta de cada rama contra main y contra el head de cada PR
+   mergeada, clon completo): 23 en main, 102 dentro de una PR mergeada, 8 no.
+   Esas 8 solo viven en su rama; para restaurar una:
+   `git push origin <sha>:refs/heads/<rama>` desde un clon que la tenga.
+   - feat/gen-surge-cli b0e6815312ae, feat/gen-surge-cli-fix f59da895d0bb,
+     feat/gen-v32 69696f336d01 — parche idéntico en main (#78, #80, #76).
+   - claude/blissful-fermi-6fedfd 1fba8f1ccbf6 — el arreglo de genre_guard lo
+     resolvió el issue #23; lo demás era solo para Windows.
+   - spike/strudel-in-next 2f1b1553b8e9, feature/clever-matsumoto-9deb06
+     cb02dce73a78, claude/beat-matching-precision-7B5V2 61195003d728,
+     chore/refresh-frontend-lockfile 24d1fc4a6e3c — superadas.
 3. Stall-watchdog alarm (backlog de agent/CLAUDE.md): no existe en ninguna
    rama, hay que escribirla desde cero.
 4. Del handoff anterior, aún abiertos: VIDEO_ID del showcase en README.md,
    prefill `// reason:` del Mind, Qwen-Image para portadas, backups restic.
-5. Sustituir python-jose (ver riesgos).
+5. ~~Sustituir python-jose~~ — hecho (PyJWT).

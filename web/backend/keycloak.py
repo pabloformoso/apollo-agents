@@ -38,8 +38,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from jose import jwt
-from jose.exceptions import JWTError
+import jwt
 
 #: Realm base, e.g. https://id.example.com/realms/apollo — the issuer
 #: Keycloak stamps into every token it mints for that realm.
@@ -64,6 +63,10 @@ JWKS_TTL_SEC = int(os.getenv("KEYCLOAK_JWKS_TTL_SEC") or 3600)
 
 #: Clock skew tolerated on exp/iat, in seconds.
 LEEWAY_SEC = 30
+
+#: The only algorithms a realm token may carry. Asymmetric only: a
+#: symmetric alg would make the PUBLISHED key the secret.
+_ASYMMETRIC_ALGS = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"})
 
 
 def is_configured() -> bool:
@@ -139,7 +142,7 @@ def verify_token(token: str) -> dict[str, Any]:
         raise KeycloakError("Keycloak is not configured on this deployment")
     try:
         header = jwt.get_unverified_header(token)
-    except JWTError as exc:
+    except jwt.PyJWTError as exc:
         raise KeycloakError(f"malformed token header: {exc}") from exc
 
     # Reject anything not signed with an asymmetric algorithm BEFORE
@@ -147,10 +150,23 @@ def verify_token(token: str) -> dict[str, Any]:
     # alg=HS256 signed with the public key as the HMAC secret — the
     # classic JWT confusion attack, and the public key is public.
     alg = header.get("alg")
-    if alg not in {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}:
+    if alg not in _ASYMMETRIC_ALGS:
         raise KeycloakError(f"refusing token signed with alg={alg!r}")
 
-    key = _key_for(header.get("kid"))
+    jwk = _key_for(header.get("kid"))
+    try:
+        # A JWKS entry is a dict; PyJWT verifies against a key OBJECT.
+        key = jwt.PyJWK(jwk).key
+    except jwt.PyJWTError as exc:
+        raise KeycloakError(f"unusable realm key kid={jwk.get('kid')!r}: {exc}") from exc
+
+    options = {
+        "verify_signature": True,
+        "verify_exp": True,
+        "verify_iss": True,
+        "verify_aud": True,
+        "require": ["exp", "iss"],
+    }
     try:
         return jwt.decode(
             token,
@@ -158,15 +174,10 @@ def verify_token(token: str) -> dict[str, Any]:
             algorithms=[alg],
             issuer=ISSUER,
             audience=CLIENT_ID,
-            options={
-                "verify_signature": True,
-                "verify_exp": True,
-                "verify_iss": True,
-                "verify_aud": True,
-                "leeway": LEEWAY_SEC,
-            },
+            leeway=LEEWAY_SEC,
+            options=options,
         )
-    except JWTError as exc:
+    except jwt.PyJWTError as exc:
         # Keycloak omits `aud` when the token has no audience beyond the
         # requesting client, putting the client in `azp` instead. Retry
         # once WITHOUT audience verification and check `azp` by hand —
@@ -177,15 +188,10 @@ def verify_token(token: str) -> dict[str, Any]:
                 key,
                 algorithms=[alg],
                 issuer=ISSUER,
-                options={
-                    "verify_signature": True,
-                    "verify_exp": True,
-                    "verify_iss": True,
-                    "verify_aud": False,
-                    "leeway": LEEWAY_SEC,
-                },
+                leeway=LEEWAY_SEC,
+                options={**options, "verify_aud": False},
             )
-        except JWTError:
+        except jwt.PyJWTError:
             raise KeycloakError(f"token rejected: {exc}") from exc
         if claims.get("azp") != CLIENT_ID:
             raise KeycloakError(
