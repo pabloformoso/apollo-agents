@@ -85,6 +85,11 @@ agent/memory*.json
 logs/
 .routines/
 .claude/
+# Runtime state the backend writes as root through the bind mount
+# (main_llm.py: the operator's LLM choice). Mode 0700, so the build user
+# cannot even read it, and `docker compose build` dies with "open .tmp:
+# permission denied" — which is how the 2026-11-19 deploy found it.
+.tmp/
 
 # --- Docker self ---
 Dockerfile
