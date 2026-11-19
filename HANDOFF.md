@@ -76,7 +76,29 @@ Comprobar: `docker compose exec frontend node -e "console.log(require('next/pack
      cb02dce73a78, claude/beat-matching-precision-7B5V2 61195003d728,
      chore/refresh-frontend-lockfile 24d1fc4a6e3c — superadas.
 3. Stall-watchdog alarm (backlog de agent/CLAUDE.md): no existe en ninguna
-   rama, hay que escribirla desde cero.
+   rama, hay que escribirla desde cero. Pablo pidió empezarla el 2026-11-19;
+   la sesión cloud solo llegó a leer el código (sin cambios) y se pasó a
+   jarvis para poder mirar logs reales. Dónde está todo:
+   - `LiveEngineBrowser.check_stall()` (agent/live_engine.py ~2150) — fuerza
+     el avance; devuelve el track id cuando dispara. Dos armados (v3.9.2):
+     posición congelada `LIVE_STALL_MARGIN_SEC` (45 s), o nunca reportó
+     posición → fin esperado + margen.
+   - El bucle que la llama: `run_stall_watchdog()` en web/backend/app.py
+     (~1412), cada `LIVE_STALL_CHECK_SEC` (15 s); solo imprime.
+   - Lo que falta: contar avances forzados CONSECUTIVOS (reiniciar con
+     progreso real — un `playback_pos` que mueve la posición, o un
+     `track_ended` con `src=client`/`endgame`) y, al llegar a N, emitir un
+     evento al operador (+ reasoning feed) y dejar de quemar catálogo.
+   - La pregunta de diseño abierta, decidirla con los logs de jarvis:
+     con un visor OBS conectado, los avances forzados SÍ mantienen el stream
+     audible (el visor sigue los comandos del engine; v3.6.3 lo hace a
+     propósito), así que "parar tras N" mataría un stream que suena. El
+     incidente del 2026-08-01 (21 pistas anunciadas y nunca sonadas) — ¿había
+     visor? Si no lo había, una regla posible: alarma siempre; retener
+     (dejar de avanzar hasta que vuelva el progreso) solo si no hay ningún
+     visor `live` adjunto (`ws_manager`). Confirmarlo en
+     `docker logs apollo-backend | grep -E "check_stall|live-ws"` de ese día
+     si aún existen.
 4. Del handoff anterior, aún abiertos: VIDEO_ID del showcase en README.md,
    prefill `// reason:` del Mind, Qwen-Image para portadas, backups restic.
 5. ~~Sustituir python-jose~~ — hecho (PyJWT).
