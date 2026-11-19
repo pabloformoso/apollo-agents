@@ -29,7 +29,7 @@ y después retomar el backlog.
 
 ## Pendiente de despliegue (Pablo, en jarvis)
 Tras el squash-merge: comprobar que no hay set en directo
-(`docker logs --since 30m apollo-backend | grep live-ws`), luego
+(`docker logs --since 30m apollo-backend 2>&1 | grep -cE 'live/stream|\[live_dj\] turn'`; `grep live-ws` no ve un set en marcha, ver CLAUDE.md), luego
 `git fetch && git merge --ff-only origin/main`. Cambian dependencias, así
 que un restart NO basta, y `up --build` tampoco a secas:
 
