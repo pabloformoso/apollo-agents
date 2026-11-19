@@ -51,8 +51,9 @@ import os
 os.environ["APOLLO_AUTH_MODE"] = "local"
 
 #: Deterministic secret, matching `tests/web/conftest.py`. Set here too so
-#: suites outside `tests/web/` get it as well.
-os.environ.setdefault("JWT_SECRET", "test-secret")
+#: suites outside `tests/web/` get it as well. At least 32 bytes: PyJWT warns
+#: on every HS256 decode with a shorter key (RFC 7518 §3.2).
+os.environ.setdefault("JWT_SECRET", "test-secret-0123456789abcdef-hs256")
 
 #: Never let a real provider be reachable from a test run. An ambient
 #: `ACESTEP_BASE_URL` would point the generator suite at the actual

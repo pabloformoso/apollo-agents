@@ -54,7 +54,9 @@ Comprobar: `docker compose exec frontend node -e "console.log(require('next/pack
   Un token emitido por jose se decodifica igual con PyJWT (comprobado), así
   que nadie pierde la sesión. PyJWT avisa (`InsecureKeyLengthWarning`, no
   error) si `JWT_SECRET` tiene menos de 32 bytes: mirar su longitud en el
-  `.env` de prod; rotarlo cierra todas las sesiones, decidirlo aparte.
+  `.env` de prod. Rotarlo cierra todas las sesiones Y deja ilegibles los
+  tokens de YouTube guardados (la clave Fernet de `youtube_auth` se deriva
+  de él) — decidirlo aparte, con la reconexión de YouTube en mente.
 - Sin versión corregida todavía: picomatch (dev, ReDoS).
 
 ## Next steps
