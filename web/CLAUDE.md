@@ -1167,9 +1167,12 @@ has to know.
 
 - **Two subdomains, and that is load-bearing**: `apollo.pabloformoso.com` is the
   frontend, `apollo-api.pabloformoso.com` is the backend. They are separate
-  because the backend CONTAINER owns `0.0.0.0:4020` — nginx cannot terminate TLS
+  because the backend CONTAINER owns port 4020 — nginx cannot terminate TLS
   on that port without stopping prod, so the WebSocket gets its own vhost on 443
   instead.
+- **Since 2026-10-25 compose publishes both ports on `127.0.0.1` only**, so
+  `http://<tailscale ip>:4010` no longer answers — nginx (the two subdomains)
+  is the only way in from another machine.
 - **`NEXT_PUBLIC_WS_BASE` is mandatory under HTTPS, and must land in the SAME
   restart that turns HTTPS on.** Without it `wsBase()` derives
   `wss://<page host>:4020`, where there is no TLS and cannot be, and every

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt
+import jwt
 
 SECRET_KEY = os.getenv("JWT_SECRET", "apollo-agents-change-me-in-production")
 
@@ -93,7 +93,7 @@ def create_access_token(data: dict) -> str:
 def decode_token(token: str) -> dict | None:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
+    except jwt.PyJWTError:
         return None
 
 

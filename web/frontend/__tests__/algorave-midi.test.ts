@@ -75,12 +75,14 @@ describe("installMidi", () => {
 
   it("adds `.midi` to the Pattern it is given, and only once", () => {
     const { mod, Pattern } = fakeStrudel();
+    // `.midi` is what installMidi ADDS, so the fake's own type has no such key.
+    const proto = Pattern.prototype as unknown as { midi?: unknown };
     installMidi(mod as never);
-    expect(typeof Pattern.prototype.midi).toBe("function");
+    expect(typeof proto.midi).toBe("function");
     // Idempotent: a second boot must not wrap the method in itself.
-    const first = Pattern.prototype.midi;
+    const first = proto.midi;
     installMidi(mod as never);
-    expect(Pattern.prototype.midi).toBe(first);
+    expect(proto.midi).toBe(first);
   });
 
   it("registers a trigger rather than sending anything at build time", () => {

@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from jose import jwt
+import jwt
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT / "web") not in sys.path:
@@ -100,9 +100,10 @@ def test_a_realm_signed_token_is_accepted(kc, keypair):
 def test_alg_none_is_refused_before_any_key_lookup(kc):
     """The classic forgery: an unsigned token claiming to need no key.
 
-    Hand-rolled because python-jose refuses to MINT one — which is good
-    of it, but says nothing about what our verifier accepts. An attacker
-    has no such scruples, so the token is assembled the way they would.
+    Hand-rolled rather than minted by the JWT library, so the test says
+    what our verifier accepts and not what a library is willing to write.
+    An attacker has no such scruples, so the token is assembled the way
+    they would.
     """
     import base64
 
@@ -121,14 +122,31 @@ def test_alg_none_is_refused_before_any_key_lookup(kc):
 
 
 def test_hs256_signed_with_the_public_key_is_refused(kc, keypair):
-    """JWT confusion: the public key is public, so it must never be a secret."""
+    """JWT confusion: the public key is public, so it must never be a secret.
+
+    Signed by hand: PyJWT refuses to use a JWK-shaped string as an HMAC
+    secret, which is exactly the forgery being tested — an attacker uses
+    `hmac`, not a library with guard rails.
+    """
+    import base64
+    import hashlib
+    import hmac
+
     _, jwk = keypair
-    forged = jwt.encode(
-        {"iss": ISSUER, "aud": CLIENT, "sub": "attacker"},
-        key=json.dumps(jwk),
-        algorithm="HS256",
-        headers={"kid": "test-key-1"},
+
+    def seg(raw: bytes) -> str:
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    def js(obj) -> bytes:
+        return json.dumps(obj, separators=(",", ":")).encode()
+
+    signing_input = (
+        seg(js({"alg": "HS256", "typ": "JWT", "kid": "test-key-1"}))
+        + "."
+        + seg(js({"iss": ISSUER, "aud": CLIENT, "sub": "attacker", "exp": 9999999999}))
     )
+    mac = hmac.new(json.dumps(jwk).encode(), signing_input.encode(), hashlib.sha256)
+    forged = signing_input + "." + seg(mac.digest())
     with pytest.raises(kc.KeycloakError, match="alg"):
         kc.verify_token(forged)
 

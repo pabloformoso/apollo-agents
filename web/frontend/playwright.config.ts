@@ -53,7 +53,7 @@ export default defineConfig({
         AGENT_PROVIDER: "mock",
         APOLLO_DB_PATH: E2E_DB,
         APOLLO_CORS_ORIGINS: "http://localhost:3001,http://127.0.0.1:3001",
-        JWT_SECRET: "e2e-secret",
+        JWT_SECRET: "e2e-secret-0123456789abcdef-hs256",
         // The health URL hits a 401 without auth, which Playwright treats as up.
       },
       ignoreHTTPSErrors: true,

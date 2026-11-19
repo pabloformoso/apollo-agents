@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 # Deterministic JWT secret for all tests
-os.environ.setdefault("JWT_SECRET", "test-secret")
+os.environ.setdefault("JWT_SECRET", "test-secret-0123456789abcdef-hs256")
 
 # Make the project root importable so "from web.backend..." works
 _PROJECT_ROOT = Path(__file__).parent.parent.parent

@@ -1,87 +1,104 @@
 # Session Handoff
-Created: 2026-09-23 10:50 CEST
-Working dir: /home/pablo/code/apollo-agents (prod = checkout principal en jarvis; trabajar desde un worktree)
+Created: 2026-11-18
 Status: ready-to-resume
-Base commit: e2d64be (main tras #219; esta PR de handoff añade un commit encima)
-Working tree: clean
-Branch: main (el checkout principal); un worktree nuevo parte de origin/main
+Base commit: 91e6a9a (main tras #225, último merge 2026-09-25)
+Previous handoff: HANDOFF.2026-09-23.md (demo del 24-sep)
 
 ## Goal
-Presentar Apollo el jueves 2026-09-24 (open source, buscando sponsors, "el primer
-Music Entertainment System dirigido por IA"). La demo se apoya en el algorave en
-directo con el Mind entrando en back-to-back, el feed de razonamiento visible, y
-el generador tipo Suno con portadas. Pablo graba hoy un vídeo scripted del
-algorave (copia-pega de bloques, luego B2B) para el README y YouTube.
+Reactivar el proyecto tras ~2 meses parado: dejar main sin vulnerabilidades
+conocidas en el árbol de producción, la CI sin intermitencias y los docs al día,
+y después retomar el backlog.
 
-## Where I left off
-Ayer el Mind fallaba en directo ("no ha construido Strudel válido", o llegaba
-tarde). Diagnóstico con el log de LM Studio: 17 respuestas, 11 rechazadas, y
-gemma pensaba 6–11 s por respuesta. PR #219 (thinking apagado, reparación de
-bancos, bloque de rechazos en el prompt) mergeada y desplegada a las 10:44:
-ff en el checkout principal y `systemctl --user restart apollo-mind`. Smoke en
-prod: 4/4 frases válidas en 5–10 s. Después medí gpt-4o-mini (estudio abajo).
+## Estado al retomar (diagnóstico 2026-11-17)
+- main: CI verde en #225. Ninguna PR abierta.
+- Backend: 2787 tests pasan. Frontend: 748 tests, `next build` verde.
+- Ramas: 134 remotas, 130 ya en main (squash). Las 4 restantes están
+  superadas (spike/strudel-in-next, feature/clever-matsumoto-9deb06,
+  claude/beat-matching-precision-7B5V2, chore/refresh-frontend-lockfile).
+  No hay trabajo perdido en ninguna rama.
 
-## Decisions made (with rationale)
-- Thinking apagado por defecto en el Mind (`GENERATIVE_THINKING=1` lo enciende) — 6–11 s por respuesta sin ganar validez; una frase son 15 s.
-- `repair_banks()` antes del validador — el rechazo más frecuente era `sh` sobre la 909; el validador sigue siendo la puerta.
-- gemma-4-e4b se queda para el jueves; gpt-4o-mini NO se cambia antes de la demo — ver estudio.
-- Portadas: Azure gpt-image-1-mini por generación y al publicar, dirección de arte con gpt-4o-mini (`APOLLO_COVER_PROMPT_DEPLOYMENT`); Qwen-Image vía ComfyUI después del jueves. Ninguna llamada de pago nueva sin proponer coste antes.
-- Nav: Home · Catalog · Generations · Algorave · Settings (Create y Perform son viajes desde Home).
-- GPU compartida: gemma (5,9 GB) y ACE no caben juntos; Jarvis paró kev/laya y no los rearranca hasta el viernes 25.
+## Done (PR de rescate, rama feature/vigilant-mccarthy-a7wxbm)
+- Test intermitente del frontend (1 de cada 4 runs con exit 1): vitest con
+  `globals: false` nunca desmontaba lo renderizado — ver
+  web/frontend/lib/__tests__/setup.ts.
+- Next 16.2.4 → 16.4.6 y `npm audit fix`: `npm audit --omit=dev` = 0.
+- Python: starlette/fastapi, urllib3, requests, cryptography, weasyprint,
+  oauthlib, etc. al día en uv.lock; Pillow 11.3 → 13.0 con un
+  `override-dependencies` en pyproject.toml (moviepy 2.2.1 fija pillow<12).
+- CLAUDE.md: el checkout de prod está en jarvis, no en Windows.
 
-## Done
-- Mind: thinking off, `repair_banks`, `rejections_block` — [strudel_mind.py](agent/generative/strudel_mind.py), tests en [test_strudel_mind.py](tests/test_strudel_mind.py); transportes en [bench_strudel_mind.py:208](scripts/bench_strudel_mind.py:208) y [algorave_playground.py:347](scripts/algorave_playground.py:347).
-- Diez bloques Strudel validados para grabar — [algorave-showcase-blocks.md](docs/algorave-showcase-blocks.md).
-- Showcase mode, feed de razonamiento en `/live`, espejo del algorave para OBS — [showcase.md](docs/showcase.md), [reasoning.ts](web/frontend/lib/reasoning.ts), [AlgoraveClient.tsx](web/frontend/app/algorave/AlgoraveClient.tsx).
-- Generador tipo Suno con portadas y dirección de arte por canción — [GeneratorComposer.tsx](web/frontend/components/ember/GeneratorComposer.tsx), [covers.py](web/backend/covers.py).
-- Controlador ACE endurecido (Restart=always) — [apollo-ace-control.service](deploy/acestep/apollo-ace-control.service).
+## Pendiente de despliegue (Pablo, en jarvis)
+Tras el squash-merge: comprobar que no hay set en directo
+(`docker logs --since 30m apollo-backend | grep live-ws`), luego
+`git fetch && git merge --ff-only origin/main`. Cambian dependencias, así
+que un restart NO basta, y `up --build` tampoco a secas:
 
-## In progress
-- Grabación del showcase: seguir [showcase.md](docs/showcase.md) y los bloques; subir a YouTube y sustituir `VIDEO_ID` (dos veces) en [README.md](README.md). Next concrete step: grep `VIDEO_ID` README.md y pegar el id.
-- Ensayo completo antes del jueves: Settings → Load selected model → Home ▶ Showcase → curate → "take the booth" → `/live` → Algorave con B2B. Next concrete step: comprobar en Settings que gemma sigue cargado (`lms ps` en jarvis) y el Mind activo.
-
-## Dead ends (do not retry)
-- `reasoning_effort: "none"` para apagar el thinking — gemma piensa dentro del contenido (prosa donde va el código). Solo funciona `chat_template_kwargs.enable_thinking=false`, y no siempre: 3 de 4 respuestas en prod siguieron razonando ~490 tokens (5 s).
-- Decirle al modelo en el prompt que la 909 no tiene shaker — lo seguía haciendo; por eso la reparación mecánica.
-- Leer `.env`, `.tmp/*.json` o la BD de prod desde el worktree — permisos denegados; usar `docker exec apollo-backend` para leer ajustes.
-- El botón "Save settings" del panel Main LLM — guarda pero NO carga; la carga es "Load selected model". Ayer ninguna carga llegó al backend (se cargó con `lms load`).
-
-## Verification before resuming
 ```bash
-git merge-base --is-ancestor e2d64be HEAD && echo ok   # Expected: ok (main contiene #219)
-git status --porcelain     # Expected: vacío
-git branch --show-current  # Expected: main (checkout principal) o la rama del worktree
-~/.lmstudio/bin/lms ps     # Expected: google/gemma-4-e4b IDLE
-systemctl --user is-active apollo-mind apollo-ace-control   # Expected: active active
-nvidia-smi --query-gpu=memory.used --format=csv,noheader     # Expected: ~6500 MiB
+docker compose build backend frontend
+docker compose up -d -V   # -V: node_modules del frontend es un volumen ANÓNIMO; sin -V se queda el viejo
+docker compose exec backend uv sync --group web --group youtube --frozen   # el venv es el volumen apollo_backend_venv, la imagen nueva no lo pisa
+docker compose restart backend
+uv sync && systemctl --user restart apollo-mind apollo-ace-control         # servicios fuera de compose, venv del host
 ```
 
-Expected: gemma residente, Mind activo, GPU con 9 GB libres; pedir en /algorave responde en 5–10 s.
+Comprobar: `docker compose exec frontend node -e "console.log(require('next/package.json').version)"`
+→ 16.4.6, y `docker compose exec backend uv pip show pillow` → 13.0.0.
+
+## Riesgos conocidos
+- Pillow 13 por encima del límite de moviepy: tests + render de humo
+  (títulos, loop de artwork, resize de moviepy) OK, pero no se ha renderizado
+  una sesión completa. Primera sesión tras el deploy: mirar el vídeo.
+- fastapi 0.136 → 0.163 y cryptography 46 → 50 son saltos grandes; la suite
+  pasa, pero vigilar el login Keycloak/JWT en prod.
+- JWT: python-jose → PyJWT 2.15.1 (quita sus dos avisos y los de ecdsa).
+  Un token emitido por jose se decodifica igual con PyJWT (comprobado), así
+  que nadie pierde la sesión. PyJWT avisa (`InsecureKeyLengthWarning`, no
+  error) si `JWT_SECRET` tiene menos de 32 bytes: mirar su longitud en el
+  `.env` de prod. Rotarlo cierra todas las sesiones Y deja ilegibles los
+  tokens de YouTube guardados (la clave Fernet de `youtube_auth` se deriva
+  de él) — decidirlo aparte, con la reconexión de YouTube en mente.
+- Sin versión corregida todavía: picomatch (dev, ReDoS).
 
 ## Next steps
-1. Grabar el showcase con [algorave-showcase-blocks.md](docs/algorave-showcase-blocks.md); tras cada bloque, "ask" y luego B2B con 8 compases de frase.
-2. Sustituir `VIDEO_ID` en [README.md](README.md) y hacer PR.
-3. Opcional y barato (una PR pequeña): prefill de asistente `// reason:` en `make_llm` — en 4/4 pruebas anuló el razonamiento (5,2–5,6 s, 3/4 válidas). Medir 8 asks antes de mergear.
-4. Corregir el CLAUDE.md raíz: el checkout principal ya no está en Windows sino en jarvis (`/home/pablo/code/apollo-agents`).
-5. Después del jueves: Qwen-Image como proveedor alternativo de portadas; backups restic (scripts de Jarvis pendientes de que Pablo los lance).
-
-## Open questions for the user
-- ¿Quieres el prefill (paso 3) antes del jueves, o dejamos gemma como está (5–10 s, 4/4 válidas)?
-- El botón "Load selected model": ¿lo pulsaste ayer y no hizo nada, o pulsaste "Save settings"? Si fue lo primero hay un bug de front que no dejó rastro.
-
-## Estudio: gpt-4o-mini frente a gemma-4-e4b para el Algorave Mind (medido 2026-09-22/23)
-
-Mismo bloque de partida, misma intención, validador real, 8 ciclos, La menor, valla `deep`.
-
-| | gemma-4-e4b (LM Studio, local) | gpt-4o-mini (Azure) |
-|---|---|---|
-| Validez | con thinking 6/17; sin thinking 8/8 (bench) y 4/4 (prod) | 8/8 |
-| Latencia por intento | 5–6 s sin razonar; 10–17 s cuando razona | 6,8–8,5 s (media 7,9) |
-| Coste | 0 (5,9 GB de VRAM) | 0,08 c/ask (28,4k tokens in + 3,7k out por 8 asks = 0,65 c); una hora de set a una frase cada 15 s ≈ 20 c |
-| Variedad musical | alta: shaker, piano stabs, ride en vez de oh, arpegios, filtro del bajo | baja: 6 de 8 respuestas "abrir el filtro del bajo"; cambios tímidos |
-| Dependencias | GPU compartida con ACE (no caben juntos) | red en el escenario; deja la GPU libre para ACE |
-| Trabajo de código | ninguno | `mind_control.infer` responde 503 si el Main LLM no es LM Studio, `mind_supervisor` exige modelo residente, el servicio Mind apunta a `--base-url` de LM Studio: haría falta un transporte Azure en el playground y relajar las dos puertas |
-
-Recomendación: gemma para el jueves (ya funciona y es la historia "todo local"). gpt-4o-mini
-como plan B documentado si LM Studio falla en el escenario, o como opción de futuro cuando
-ACE tenga que generar durante el algorave. No es un cambio para hacer antes de la demo.
+1. Mergear la PR de rescate y desplegar (arriba).
+2. Borrar 133 ramas remotas — aprobado por Pablo el 2026-11-19, pero esta
+   sesión solo puede escribir en su propia rama (GitHub responde 403), así que
+   hay que lanzar `delete-merged-branches.sh` desde un checkout propio.
+   Auditoría (punta de cada rama contra main y contra el head de cada PR
+   mergeada, clon completo): 23 en main, 102 dentro de una PR mergeada, 8 no.
+   Esas 8 solo viven en su rama; para restaurar una:
+   `git push origin <sha>:refs/heads/<rama>` desde un clon que la tenga.
+   - feat/gen-surge-cli b0e6815312ae, feat/gen-surge-cli-fix f59da895d0bb,
+     feat/gen-v32 69696f336d01 — parche idéntico en main (#78, #80, #76).
+   - claude/blissful-fermi-6fedfd 1fba8f1ccbf6 — el arreglo de genre_guard lo
+     resolvió el issue #23; lo demás era solo para Windows.
+   - spike/strudel-in-next 2f1b1553b8e9, feature/clever-matsumoto-9deb06
+     cb02dce73a78, claude/beat-matching-precision-7B5V2 61195003d728,
+     chore/refresh-frontend-lockfile 24d1fc4a6e3c — superadas.
+3. Stall-watchdog alarm (backlog de agent/CLAUDE.md): no existe en ninguna
+   rama, hay que escribirla desde cero. Pablo pidió empezarla el 2026-11-19;
+   la sesión cloud solo llegó a leer el código (sin cambios) y se pasó a
+   jarvis para poder mirar logs reales. Dónde está todo:
+   - `LiveEngineBrowser.check_stall()` (agent/live_engine.py ~2150) — fuerza
+     el avance; devuelve el track id cuando dispara. Dos armados (v3.9.2):
+     posición congelada `LIVE_STALL_MARGIN_SEC` (45 s), o nunca reportó
+     posición → fin esperado + margen.
+   - El bucle que la llama: `run_stall_watchdog()` en web/backend/app.py
+     (~1412), cada `LIVE_STALL_CHECK_SEC` (15 s); solo imprime.
+   - Lo que falta: contar avances forzados CONSECUTIVOS (reiniciar con
+     progreso real — un `playback_pos` que mueve la posición, o un
+     `track_ended` con `src=client`/`endgame`) y, al llegar a N, emitir un
+     evento al operador (+ reasoning feed) y dejar de quemar catálogo.
+   - La pregunta de diseño abierta, decidirla con los logs de jarvis:
+     con un visor OBS conectado, los avances forzados SÍ mantienen el stream
+     audible (el visor sigue los comandos del engine; v3.6.3 lo hace a
+     propósito), así que "parar tras N" mataría un stream que suena. El
+     incidente del 2026-08-01 (21 pistas anunciadas y nunca sonadas) — ¿había
+     visor? Si no lo había, una regla posible: alarma siempre; retener
+     (dejar de avanzar hasta que vuelva el progreso) solo si no hay ningún
+     visor `live` adjunto (`ws_manager`). Confirmarlo en
+     `docker logs apollo-backend | grep -E "check_stall|live-ws"` de ese día
+     si aún existen.
+4. Del handoff anterior, aún abiertos: VIDEO_ID del showcase en README.md,
+   prefill `// reason:` del Mind, Qwen-Image para portadas, backups restic.
+5. ~~Sustituir python-jose~~ — hecho (PyJWT).

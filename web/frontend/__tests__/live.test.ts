@@ -14,7 +14,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { act, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
 
 import {
   buildEqualPowerCurve,
@@ -250,6 +250,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Unmount FIRST, while the fakes are still stubbed. The hook's cleanup
+  // closes its socket and clears its playback-pos interval, and it reads
+  // ``WebSocket.OPEN`` to do so. The global ``cleanup()`` in the setup file
+  // runs after this hook (vitest runs after-hooks as a stack), by which time
+  // ``unstubAllGlobals`` below has removed ``WebSocket``.
+  cleanup();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   FakeWebSocket.lastInstance = null;

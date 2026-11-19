@@ -54,7 +54,11 @@ dev = [
 web = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
-    "python-jose[cryptography]>=3.3.0",
+    # PyJWT, not python-jose: jose is unmaintained and carries advisories with
+    # no fixed release (PYSEC-2026-4298, and ecdsa's PYSEC-2026-1325 through
+    # it). 2.10+ also validates `sub`/`jti` types — auth already sends `sub`
+    # as a string.
+    "PyJWT[crypto]>=2.15.1",
     "bcrypt>=4.0.0",
     "email-validator>=2.0.0",
     "httpx>=0.27.0",
@@ -86,6 +90,11 @@ deus-obs = { path = "packages/py-obs", editable = true }
 # generative scripts (synth) or the web test suite (web) depending on
 # who synced last. This project's local dev = all three.
 default-groups = ["dev", "synth", "web"]
+# moviepy 2.2.1 (the latest) still declares pillow<12, which pinned Pillow at
+# 11.3.0 and its ~60 advisories (decoder overflows among them; covers and
+# artwork are decoded from generated and uploaded images). Pillow 13 is
+# lifted past that cap here. Remove this once moviepy releases without it.
+override-dependencies = ["pillow>=13.0.0"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
