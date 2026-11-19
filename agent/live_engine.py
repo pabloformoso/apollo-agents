@@ -218,6 +218,21 @@ ENDLESS_APPEND_CAP = _env_int("APOLLO_ENDLESS_APPEND_CAP", 10000)
 LIVE_STALL_CHECK_SEC = _env_int("APOLLO_LIVE_STALL_CHECK_SEC", 15)
 LIVE_STALL_MARGIN_SEC = _env_int("APOLLO_LIVE_STALL_MARGIN_SEC", 45)
 
+# Stall ALARM (2026-11-19). The watchdog above keeps a set moving, and on
+# its own it never stops: on 2026-08-01 it walked 21 tracks that were
+# announced and never heard. After this many CONSECUTIVE forced advances —
+# no reported position has moved in between — the engine emits one
+# ``stall_alarm`` and, if nobody can be hearing the set (no OBS viewer
+# attached; the caller decides, see ``check_stall(can_hold=...)``), stops
+# forcing advances until real playback progress returns. With a viewer
+# attached the forced advances ARE the audible stream (the viewer follows
+# engine commands and never pings), so it only alarms.
+LIVE_STALL_ALARM_AFTER = _env_int("APOLLO_LIVE_STALL_ALARM_AFTER", 3)
+
+#: Engine event: the watchdog has forced ``consecutive`` advances in a row.
+#: ``state`` is "raised" (with ``holding``) or "cleared" when progress returns.
+STALL_ALARM = "stall_alarm"
+
 # v3.9.3 — how close to the nominal end a reported position has to be for
 # a ``track_ended`` to count as a NATURAL end. The frontend also sends a
 # synthetic ``track_ended`` when a decode fails (skip-on-load-failure,
@@ -1326,6 +1341,13 @@ class LiveEngineBrowser:
         # by ~0.25 s and a previous-ping comparison can never clear the
         # threshold on a healthy deck (see report_playback_pos).
         self._last_pos_change_pos: float | None = None
+        # Stall alarm: forced advances since the last time a reported
+        # position actually MOVED. Not reset per track — a run of tracks
+        # that each never played is exactly what it counts.
+        self._consecutive_stalls: int = 0
+        self._stall_alarm_raised: bool = False
+        # Latch so a hold logs once, not every LIVE_STALL_CHECK_SEC.
+        self._stall_hold_logged: bool = False
 
         # v3.0 — phase-lock plan for the UPCOMING transition. Rebuilt
         # every time the current track changes (in ``play``,
@@ -1447,6 +1469,8 @@ class LiveEngineBrowser:
         sends ``{type: track_ended}`` over WS for the same situation; the
         two paths are independent so either one alone suffices.
         """
+        stall_cleared = False
+        stalls_before = 0
         with self._lock:
             if self._state == "idle" or self._idx >= len(self.playlist):
                 return
@@ -1484,8 +1508,19 @@ class LiveEngineBrowser:
                 or self._last_pos_change_pos is None
                 or abs(self._reported_pos_sec - self._last_pos_change_pos) > 0.5
             ):
+                # The FIRST ping of a track only stamps a baseline; a deck
+                # that decoded and froze at ~0 sends that much and no more.
+                # Movement past the baseline is the only proof of playback,
+                # so only it ends a run of forced advances.
+                moved = self._last_pos_change_pos is not None
                 self._last_pos_change_mono = time.monotonic()
                 self._last_pos_change_pos = self._reported_pos_sec
+                if moved and self._consecutive_stalls:
+                    stall_cleared = self._stall_alarm_raised
+                    stalls_before = self._consecutive_stalls
+                    self._consecutive_stalls = 0
+                    self._stall_alarm_raised = False
+                    self._stall_hold_logged = False
             cf_sec = self._cf_point_seconds(current_track)
             secs_to_cf = cf_sec - self._reported_pos_sec
             approached = self._approached
@@ -1498,6 +1533,19 @@ class LiveEngineBrowser:
 
         # Emit edges outside the lock so the consumer can call back into
         # other methods without deadlocking.
+        if stall_cleared:
+            print(
+                f"[engine stall-alarm] cleared — playback moving again on "
+                f"{current_track.get('id')!r} after {stalls_before} forced "
+                f"advance(s)",
+                flush=True,
+            )
+            self._emit(
+                STALL_ALARM,
+                state="cleared",
+                consecutive=stalls_before,
+                track=current_track,
+            )
         if not approached and secs_to_cf <= self.approach_warn_sec and next_track:
             with self._lock:
                 self._approached = True
@@ -2147,7 +2195,7 @@ class LiveEngineBrowser:
         self._emit_decision(pick, tier)
         return True
 
-    def check_stall(self) -> str | None:
+    def check_stall(self, *, can_hold: bool = False) -> str | None:
         """Force-advance when the browser stopped driving playback (v3.6.3).
 
         The browser engine has no clock of its own — every transition is
@@ -2177,6 +2225,16 @@ class LiveEngineBrowser:
         machinery can append a successor. Any attached viewer (OBS) picks
         up the resulting command and keeps the stream audible. Returns the
         stalled track id when it forced an advance, else None.
+
+        Stall alarm (2026-11-19): after ``LIVE_STALL_ALARM_AFTER`` forced
+        advances in a row with no reported position moving in between, emit
+        one ``stall_alarm`` (``state="raised"``). ``can_hold`` is the
+        caller's verdict that nobody can be hearing the set (no OBS viewer
+        attached): then the alarm also HOLDS — no further forced advances
+        until a moving ``playback_pos`` clears it — instead of announcing
+        track after track that never sounds (2026-08-01: 21 of them). With a
+        viewer the forced advances are what keeps the stream audible, so it
+        alarms and carries on. The default ``False`` never holds.
         """
         with self._lock:
             if self._state != "playing" or self._idx >= len(self.playlist):
@@ -2191,6 +2249,7 @@ class LiveEngineBrowser:
                 if self._idx + 1 < len(self.playlist)
                 else None
             )
+            alarm_raised = self._stall_alarm_raised
         if started is None:
             return None
         now = time.monotonic()
@@ -2222,6 +2281,18 @@ class LiveEngineBrowser:
             where = "never reported a position"
 
         tid = str(track.get("id") or "")
+        if alarm_raised and can_hold:
+            with self._lock:
+                first_hold = not self._stall_hold_logged
+                self._stall_hold_logged = True
+            if first_hold:
+                print(
+                    f"[engine stall-alarm] holding on {tid!r} — no viewer "
+                    f"attached, so nobody can hear a forced advance; waiting "
+                    f"for playback to move",
+                    flush=True,
+                )
+            return None
         print(
             f"[engine check_stall] no playback progress on {tid!r} "
             f"({(track.get('display_name') or '?')[:40]!r}) — "
@@ -2240,6 +2311,31 @@ class LiveEngineBrowser:
             # Last track: go through report_track_ended so the endless
             # gate runs and appends a successor (or ends the session).
             self.report_track_ended(tid, source="stall")
+
+        with self._lock:
+            self._consecutive_stalls += 1
+            consecutive = self._consecutive_stalls
+            raise_now = (
+                not self._stall_alarm_raised
+                and LIVE_STALL_ALARM_AFTER > 0
+                and consecutive >= LIVE_STALL_ALARM_AFTER
+            )
+            if raise_now:
+                self._stall_alarm_raised = True
+        if raise_now:
+            print(
+                f"[engine stall-alarm] RAISED — {consecutive} forced advances "
+                f"in a row, last past {tid!r}; "
+                f"{'holding' if can_hold else 'viewer attached, carrying on'}",
+                flush=True,
+            )
+            self._emit(
+                STALL_ALARM,
+                state="raised",
+                consecutive=consecutive,
+                track=track,
+                holding=can_hold,
+            )
         return tid
 
     def set_crossfade_point(self, position_sec: float) -> str:

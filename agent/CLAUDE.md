@@ -119,13 +119,29 @@
   to the model's own `tool_call`s; the two are different sentences on
   purpose.
 
+- **The stall watchdog alarms, and holds only when nobody can hear it
+  (2026-11-19)**: `LiveEngineBrowser.check_stall` counts forced advances
+  since a reported position last MOVED (a first ping is a baseline, not
+  progress — a deck frozen at ~0 sends that much). At
+  `LIVE_STALL_ALARM_AFTER` (3, env `APOLLO_LIVE_STALL_ALARM_AFTER`, 0 =
+  off) it emits one `stall_alarm` (`state: raised`, `holding`) and, if
+  the WS watchdog passes `can_hold=True` — no OBS viewer attached
+  (`live_runtime.viewer_count`) — stops advancing until a moving
+  `playback_pos` emits `state: cleared`. With a viewer it only alarms:
+  the viewer follows engine commands and never pings, so with the
+  operator tab frozen the forced advances ARE the audible stream, and
+  holding would kill a broadcast that sounds. Without one, advancing
+  only announced tracks nobody heard (2026-08-01: 21 of them). The
+  event is not in `_classify` (no LLM turn) and the frontend shows it to
+  the operator as a banner, never in the reasoning feed, which OBS puts
+  on the public stream. The 2026-08-01 logs were gone by the time this
+  was built, so whether that set had a viewer is unknown — the rule is
+  safe either way.
+
 ## Known issues / gotchas
 
 - Local LLM (gemma via LM Studio) **hallucinates track ids** shaped
   like real ones but with non-hex UUID chars — `extend_set` rejects
   them; the `[llm-shim]` recovers textual tool calls.
-- **Pending**: stall-watchdog alarm — after N consecutive forced
-  advances it should stop/alert instead of silently burning the
-  catalog (2026-08-01: 21 tracks announced but never played).
 - Poisoned BPMs in catalog: a handful of lofi@150 and synthware
   176–212 entries act as genre-drift bridges.

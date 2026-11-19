@@ -208,3 +208,27 @@ async def test_subscribe_replays_the_reasoning_tail(fresh_registry):
     tail = [e for e in received if e["type"] == "tool_call"]
     assert len(tail) == REASONING_REPLAY_MAX
     assert tail[-1]["name"] == f"t{REASONING_REPLAY_MAX + 4}"
+
+
+@pytest.mark.asyncio
+async def test_viewer_count_tracks_attach_detach_and_sessions(fresh_registry):
+    """The stall watchdog holds a set only when this says nobody is watching."""
+
+    async def noop(ev: dict) -> None:
+        pass
+
+    # No bus yet (primary never published, no viewer) → zero, not KeyError.
+    assert fresh_registry.viewer_count(1, "s1") == 0
+
+    sub_a = await fresh_registry.subscribe_viewer(1, "s1", noop)
+    await fresh_registry.subscribe_viewer(1, "s1", noop)
+    await fresh_registry.subscribe_viewer(1, "other", noop)
+    assert fresh_registry.viewer_count(1, "s1") == 2
+    # Keyed by (user, session): another user's same-named session is separate.
+    assert fresh_registry.viewer_count(2, "s1") == 0
+
+    await sub_a.detach()
+    assert fresh_registry.viewer_count(1, "s1") == 1
+
+    await fresh_registry.drop_bus(1, "s1")
+    assert fresh_registry.viewer_count(1, "s1") == 0
