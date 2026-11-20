@@ -18,7 +18,7 @@ ACE-Step 1.5 es un modelo de generación de música (canción completa con voz a
 | Health | `GET /health` |
 | Carga del servidor | `GET /v1/stats` → jobs queued/running, `avg_job_seconds`, tamaño de cola |
 
-**⚠️ GPU compartida (protocolo de VRAM):** la GPU de 16 GB se comparte con el LM Studio del DJ de Apollo. El server ACE-Step hace lazy-load (no toca VRAM hasta el primer request), pero **una vez cargado retiene ~12.5 GB**. Reglas: no invocar generación durante un directo (`docker logs --since 30m apollo-backend | grep live-ws` para comprobar); al terminar un lote, parar el server o coordinarlo con Pablo. Diseñad el flujo de Apollo asumiendo que ACE-Step puede estar apagado: comprobar `/health` y, si no responde, mostrar "generador no disponible" en vez de fallar.
+**⚠️ GPU compartida (protocolo de VRAM):** la GPU de 16 GB se comparte con el LM Studio del DJ de Apollo. El server ACE-Step hace lazy-load (no toca VRAM hasta el primer request), pero **una vez cargado retiene ~12.5 GB**. Reglas: no invocar generación durante un directo (`docker logs --since 30m apollo-backend 2>&1 | grep -cE 'live/stream|\[live_dj\] turn'` para comprobar; `grep live-ws` no ve un set en marcha); al terminar un lote, parar el server o coordinarlo con Pablo. Diseñad el flujo de Apollo asumiendo que ACE-Step puede estar apagado: comprobar `/health` y, si no responde, mostrar "generador no disponible" en vez de fallar.
 
 ---
 

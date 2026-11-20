@@ -157,8 +157,17 @@ Hard rules:
   says `main`); investigate, don't force a merge.
 - **Never merge into the main checkout or restart containers while a
   live session is running** — `--reload` watches `agent/` and `web/`,
-  so a merge mid-stream kills the broadcast. Check first:
-  `docker logs --since 30m apollo-backend | grep live-ws`.
+  so a merge mid-stream kills the broadcast. Check first — non-zero
+  means a set is (or was just) on:
+  `docker logs --since 30m apollo-backend 2>&1 | grep -cE 'live/stream|\[live_dj\] turn'`.
+  NOT `grep live-ws`: the `[live-ws <id>]` lines are printed when the
+  socket loop EXITS, so a running set shows none. That check said 0 twice
+  for a set that had started minutes earlier, and the #228 ff-merge
+  reloaded the backend under it (2026-11-19). `live/stream` is uvicorn's
+  line for the open socket; `[live_dj] turn` fires on every track change.
+  The grep is a heuristic; the authoritative answer is `blocked_by_live`
+  in `GET /api/generator/health` (needs a login), read from the same
+  `ws_manager` registry the 409 VRAM guard uses.
 - Ports **4010/4020 are the prod stack** — dev servers go on 4011/4021.
 - **The first backend start after the migrations PR converts
   `web/backend/apollo.db` to WAL and writes one
@@ -175,7 +184,7 @@ Hard rules:
 - **The `tunel` GPU (16 GB) is SHARED** with the ACE-Step project
   (music generation, same box as LM Studio). Protocol agreed 2026-08-29:
   ACE never holds VRAM idle (lazy-load, unload after batches) and never
-  during a live session (same `live-ws` check as above); it pings this
+  during a live session (same live-set check as above); it pings this
   project's session via SendMessage when it frees the GPU. Symptom of a
   violation: LM Studio returns 400 "Failed to load model" for EVERY
   model while `/v1/models` still lists them — *listed ≠ loadable*; check

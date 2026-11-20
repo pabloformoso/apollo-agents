@@ -338,7 +338,7 @@ persistence rule — result files are immortal, so each phase can run with
 the GPU in a different hands:
 
 1. **Coordinate** with the ACE session: server up on :8001, no live set
-   (`live-ws` check), GPU handed to ACE. **The exclusivity is
+   (live-set check, see CLAUDE.md), GPU handed to ACE. **The exclusivity is
    SYMMETRIC** (learned the hard way, first real batch 2026-08-29:
    LM Studio JIT-loaded e4b mid-phase-A — a playground /mind click is
    enough — and ACE's 5 Hz LM died OOM at init): before phase A,
@@ -382,7 +382,7 @@ backup — reversible; scheduled to avoid any catalog build.
 ### G5b — deploy the wizard to prod (GATED on Pablo's explicit OK)
 
 The sanctioned path, nothing new: merge `origin/main` into the deploy
-branch in the main checkout (live-ws check first — never mid-broadcast),
+branch in the main checkout (live-set check first — never mid-broadcast),
 set `ACESTEP_BASE_URL` (+ optionally `ACESTEP_AUDIO_ROOT`,
 `GENERATIVE_MODEL`) in `.env`, recreate backend (`up -d backend` — a
 restart keeps old env), verify `/api/generator/health` from the wizard.
