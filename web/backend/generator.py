@@ -50,8 +50,10 @@ the page supplies the source take's decoded path.
 hear, so the SCORE comes from machinery that can — ``bench_wav``, the
 project's own definition-of-done gate — and the LLM only adds the read.
 Both halves degrade: a genre with no committed references answers
-``passed: null`` with a note, and any LLM trouble answers
-``critique: null``. Scoring never gates publishing.
+``passed: null`` with a note, any LLM trouble answers
+``critique: null``, and a local LLM is never asked while ACE may hold
+the shared GPU (``critique: null`` plus a note saying so). Scoring never
+gates publishing.
 
 ``GET /api/generator/generations``, ``PATCH
 /api/generator/generations/{id}/takes/{idx}`` and ``POST
@@ -2242,6 +2244,83 @@ async def _critique_paragraph(
     return _clean_paragraph(raw)
 
 
+#: Bound on asking the ACE controller whether ACE holds the GPU. Its own
+#: client waits 25 s, which is longer than the whole read is worth; a
+#: controller that has not answered in this long is treated as UNKNOWN,
+#: and unknown is never idle.
+CRITIQUE_ACE_CHECK_TIMEOUT_SEC = 5.0
+
+#: ACE controller states in which ACE holds NO VRAM. Everything else —
+#: ``starting``, ``running``, ``stopping``, ``unresponsive``, ``unknown`` —
+#: may be holding it, the same set ``ace_control.live_admission`` refuses.
+_ACE_GPU_FREE_STATES = frozenset({"stopped", "failed"})
+
+_ACE_HOLDS_GPU_NOTE = (
+    "No LLM read: ACE is {state} on the shared GPU, and asking the main LLM "
+    "now would load it beside ACE. Stop ACE in Generations, then score "
+    "again for a read."
+)
+_ACE_STATE_UNKNOWN_NOTE = (
+    "No LLM read: the ACE controller did not say whether ACE holds the "
+    "shared GPU, and asking the main LLM while it does would load it beside "
+    "ACE. Score again once ACE's status is back."
+)
+_ACE_UNMANAGED_NOTE = (
+    "No LLM read: ACE is reachable and no service controller is configured "
+    "to confirm it has released the shared GPU, so asking the main LLM could "
+    "load it beside ACE."
+)
+
+
+async def _llm_read_blocked_by_ace() -> str | None:
+    """Why the LLM read must be skipped right now, or ``None`` to ask.
+
+    The read's provider is LM Studio on the GPU ACE shares, and a REQUEST
+    alone makes LM Studio JIT-load the main model — the 15 s timeout
+    abandons the answer, not the load. Prod 2026-11-21: a critique with
+    ACE resident timed out and still left ``gemma-4-e4b`` (4.7 GB) beside
+    ACE's ~11 GB, and the next ``POST /tasks`` was refused by the
+    controller ("The main LLM still holds the GPU"). So the read is asked
+    only when ACE is KNOWN to hold nothing.
+
+    * a provider that is not local (Anthropic, Azure, LiteLLM) or ``mock``
+      cannot load anything on this GPU — no check, no controller call;
+    * no controller configured: ACE is reachable by construction (this
+      handler just downloaded the take from it) and nothing can say it is
+      idle — skip;
+    * controller state ``stopped``/``failed`` → ask; any other state, or
+      a controller that errors or does not answer in
+      :data:`CRITIQUE_ACE_CHECK_TIMEOUT_SEC` → skip. Unknown is never idle.
+
+    Never raises: like the read itself, this is never load-bearing.
+    """
+    from agent import llm_failover  # noqa: PLC0415 — same lazy import as _llm_paragraph
+
+    if detect_provider() not in llm_failover.LOCAL_PROVIDERS:
+        return None
+    if not ace_control.configured():
+        return _ACE_UNMANAGED_NOTE
+    try:
+        state = await asyncio.wait_for(
+            ace_control.controller(), timeout=CRITIQUE_ACE_CHECK_TIMEOUT_SEC
+        )
+    except Exception as exc:  # noqa: BLE001 — 503, timeout, anything: unknown
+        print(
+            f"[generator] critique: ACE state unknown ({exc!r}) — "
+            "scoring without a read",
+            flush=True,
+        )
+        return _ACE_STATE_UNKNOWN_NOTE
+    if state.state in _ACE_GPU_FREE_STATES:
+        return None
+    print(
+        f"[generator] critique: ACE is {state.state} — skipping the LLM read "
+        "so LM Studio does not load the main model beside it",
+        flush=True,
+    )
+    return _ACE_HOLDS_GPU_NOTE.format(state=state.state)
+
+
 @router.post("/api/generator/critique")
 async def critique_take(
     req: CritiqueRequest,
@@ -2269,19 +2348,16 @@ async def critique_take(
       error; see :func:`_no_verdict`.
     * **200 with ``critique: null``** — the LLM layer was off or did not
       answer in time. Also not an error.
+    * **200 with ``critique: null`` and a ``note``** — ACE may hold the
+      shared GPU, so the read was never asked (:func:`_llm_read_blocked_by_ace`).
 
-    **No 409, deliberately** — publish's exemption, with one wrinkle
-    worth naming. The VRAM guard exists because releasing a task parks
-    ~12.5 GB of ACE-Step on the GPU the live DJ's model needs, and it
-    does not give it back. This endpoint parks nothing: it reads a file
-    ACE rendered earlier and runs the bench on the CPU. The LLM read is
-    the wrinkle — it does travel to the same tunnelled gateway the live
-    DJ speaks to, so it is not literally free during a set. But it is
-    ONE short completion under :data:`CRITIQUE_TIMEOUT_SEC`, competing
-    for a few seconds of queue rather than for resident VRAM, and it
-    abandons itself rather than waiting. Refusing an operator the score
-    on a take they are about to publish, for that, would be the wrong
-    trade — the guard protects residency, not politeness.
+    **No 409, deliberately** — publish's exemption: the bench reads a file
+    ACE rendered earlier and runs on the CPU, so the score is always
+    given. The LLM read is NOT free, though, and is skipped rather than
+    refused: against a local provider a single request makes LM Studio
+    JIT-load the main model, and a timeout abandons the answer, not the
+    load. With ACE resident that puts two models on a 16 GB GPU and
+    leaves ACE refusing the next generation (prod, 2026-11-21).
     """
     client = _client()
     if not client.enabled():
@@ -2330,6 +2406,10 @@ async def critique_take(
         centroid_ratio=bench.CENTROID_RATIO_MAX,
         tilt_delta=bench.TILT_DELTA_MAX,
     )
+    # Checked AFTER the bench, so a take with no verdict (which never asks
+    # the LLM) never pays for a controller round trip either.
+    blocked = await _llm_read_blocked_by_ace()
+    critique = None if blocked else await _critique_paragraph(req, report, bands)
     return {
         "passed": bool(passed),
         "reference_genre": genre,
@@ -2339,8 +2419,10 @@ async def critique_take(
         # The bench's own words, so the chips and the sentence under them
         # cannot drift apart.
         "failures": list(report.get("reference_informed_failures") or []),
-        "critique": await _critique_paragraph(req, report, bands),
-        "note": None,
+        "critique": critique,
+        # Says why there is no read when ACE is the reason; any other
+        # missing read (timeout, no provider) stays a quiet null.
+        "note": blocked,
     }
 
 
