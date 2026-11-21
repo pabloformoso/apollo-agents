@@ -36,8 +36,11 @@ import soundfile as sf
 from agent.generative.bench import load_wav_mono
 from agent.generative.quality import NORM_TARGET_LUFS, analyze_wav
 from agent.generative.render_audio import SR
+from fastapi import HTTPException
+
 from web.backend import acestep_client as ac
 from web.backend import generator
+from web.backend.ace_control_contract import ServiceState
 from web.backend.ws_manager import ws_manager
 
 
@@ -222,11 +225,32 @@ def out_of_band(tmp_path, take, monkeypatch) -> dict:
     return metrics
 
 
-def _stub_llm(monkeypatch, fn):
-    """Wire the ONE seam that talks to a provider, and turn the gate on."""
+def _ace_state(monkeypatch, state: str | Exception) -> list[int]:
+    """A configured ACE controller answering ``state`` (or raising it)."""
+    calls: list[int] = []
+
+    async def controller(action=None):
+        calls.append(1)
+        if isinstance(state, Exception):
+            raise state
+        return ServiceState(state=state)
+
+    monkeypatch.setenv("ACESTEP_CONTROL_URL", "http://ace-control.test:8012")
+    monkeypatch.setattr(generator.ace_control, "controller", controller)
+    return calls
+
+
+def _stub_llm(monkeypatch, fn, *, ace: str | Exception = "stopped"):
+    """Wire the ONE seam that talks to a provider, and turn the gate on.
+
+    The provider is local, so the read is only asked while ACE is known
+    to hold no VRAM — ``stopped`` by default, so the read tests below
+    exercise the read and the ACE tests pass a state of their own.
+    """
     monkeypatch.setenv("AGENT_PROVIDER", "ollama")
     monkeypatch.setenv("AGENT_MODEL", "test-model")
     monkeypatch.setattr(generator, "_llm_paragraph", fn)
+    return _ace_state(monkeypatch, ace)
 
 
 # ══ Auth ═════════════════════════════════════════════════════════════
@@ -569,6 +593,144 @@ def test_critique_llm_sees_the_failures_when_the_bench_fails(
     assert payload["critique"] == "Too bright for the genre."
     assert "Bench verdict: FAIL" in seen["user"]
     assert "centroid" in seen["user"]
+
+
+# ══ The shared GPU: no local read while ACE may hold it ═════════════
+#
+# Prod 2026-11-21: with ACE resident a critique timed out its read after
+# 15 s, but LM Studio had already started JIT-loading the main model
+# beside ACE, and the next generation was refused. A local read is asked
+# ONLY when the controller says ACE holds nothing.
+
+
+def _never(system: str, user: str, provider: str) -> str:
+    raise AssertionError("the LLM must not be asked while ACE may hold the GPU")
+
+
+@pytest.mark.parametrize(
+    "state", ["running", "starting", "stopping", "unresponsive", "unknown"]
+)
+def test_critique_skips_the_read_while_ace_holds_the_gpu(
+    auth_client, ace_on, monkeypatch, take, in_band, state
+):
+    audio, _ = take
+    _install_ace(monkeypatch, audio=audio)
+    checks = _stub_llm(monkeypatch, _never, ace=state)
+
+    r = auth_client.post("/api/generator/critique", json=_body())
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    # The bench still ran: the score is the load-bearing half.
+    assert payload["passed"] is True
+    assert payload["reference_informed"] is not None
+    assert payload["critique"] is None
+    assert f"ACE is {state}" in payload["note"]
+    assert "Stop ACE" in payload["note"]
+    assert checks == [1]
+
+
+@pytest.mark.parametrize("state", ["stopped", "failed"])
+def test_critique_reads_when_ace_holds_nothing(
+    auth_client, ace_on, monkeypatch, take, in_band, state
+):
+    audio, _ = take
+    _install_ace(monkeypatch, audio=audio)
+    _stub_llm(monkeypatch, lambda s, u, p: "Fine.", ace=state)
+
+    payload = auth_client.post("/api/generator/critique", json=_body()).json()
+
+    assert payload["critique"] == "Fine."
+    assert payload["note"] is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        HTTPException(503, "ACE controller is unavailable."),
+        asyncio.TimeoutError(),
+        RuntimeError("anything else"),
+    ],
+    ids=["503", "timeout", "other"],
+)
+def test_critique_skips_the_read_when_ace_state_is_unknown(
+    auth_client, ace_on, monkeypatch, take, in_band, failure
+):
+    """Unknown is never idle — and it is still never a 5xx."""
+    audio, _ = take
+    _install_ace(monkeypatch, audio=audio)
+    _stub_llm(monkeypatch, _never, ace=failure)
+
+    r = auth_client.post("/api/generator/critique", json=_body())
+
+    assert r.status_code == 200, r.text
+    assert r.json()["passed"] is True
+    assert r.json()["critique"] is None
+    assert "did not say whether ACE holds" in r.json()["note"]
+
+
+def test_critique_bounds_the_ace_state_check(monkeypatch):
+    """A hung controller costs the read a bounded wait, not its 25 s."""
+    monkeypatch.setenv("AGENT_PROVIDER", "ollama")
+    monkeypatch.setattr(generator, "CRITIQUE_ACE_CHECK_TIMEOUT_SEC", 0.05)
+    monkeypatch.setenv("ACESTEP_CONTROL_URL", "http://ace-control.test:8012")
+
+    async def hung(action=None):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(generator.ace_control, "controller", hung)
+
+    async def timed():
+        started = time.monotonic()
+        note = await generator._llm_read_blocked_by_ace()
+        return note, time.monotonic() - started
+
+    note, elapsed = asyncio.run(timed())
+
+    assert note is not None and "did not say" in note
+    assert elapsed < 1.0
+
+
+def test_critique_skips_the_read_without_a_controller(
+    auth_client, ace_on, monkeypatch, take, in_band
+):
+    """ACE answered the download, and nothing can say it is idle."""
+    audio, _ = take
+    _install_ace(monkeypatch, audio=audio)
+    _stub_llm(monkeypatch, _never)
+    monkeypatch.delenv("ACESTEP_CONTROL_URL")
+
+    payload = auth_client.post("/api/generator/critique", json=_body()).json()
+
+    assert payload["passed"] is True
+    assert payload["critique"] is None
+    assert "no service controller is configured" in payload["note"]
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "azure", "litellm"])
+def test_critique_remote_provider_ignores_ace(monkeypatch, provider):
+    """A remote LLM cannot load anything on this GPU: no controller call."""
+    monkeypatch.setenv("AGENT_PROVIDER", provider)
+    checks = _ace_state(monkeypatch, "running")
+
+    assert asyncio.run(generator._llm_read_blocked_by_ace()) is None
+    assert checks == []
+
+
+def test_critique_without_a_verdict_never_asks_the_controller(
+    auth_client, ace_on, monkeypatch, take, in_band
+):
+    audio, _ = take
+    _install_ace(monkeypatch, audio=audio)
+    checks = _stub_llm(monkeypatch, _never, ace="running")
+
+    payload = auth_client.post(
+        "/api/generator/critique", json=_body(genre_folder="techno")
+    ).json()
+
+    assert payload["passed"] is None
+    assert "no references for genre 'techno'" in payload["note"]
+    assert checks == []
 
 
 # ══ Refusals ═════════════════════════════════════════════════════════
