@@ -19,6 +19,7 @@ those endpoints. Two more guards sit in front of the backend's own:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,13 @@ ON_AIR = (
     "A live set is on air. ACE would take ~11 GB of the shared GPU from the live DJ, "
     "so nothing that loads ACE runs until the set ends."
 )
+ACE_HOLDS_GPU = (
+    "ACE is running. Scoring asks the main LLM for its reading, and LM Studio would load "
+    "that model on the GPU beside ACE — the shared-GPU protocol forbids both at once "
+    "(it also blocks the next generation). Stop ACE with ace_service first, then score."
+)
+#: Any state in which ACE may hold VRAM. ``stopped``/``failed`` are the only safe ones.
+ACE_SAFE_STATES = {"stopped", "failed"}
 MAX_WAIT_SEC = 1800
 
 
@@ -77,6 +85,8 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
     http = http or httpx.AsyncClient(timeout=httpx.Timeout(60.0, connect=10.0))
     session = Session(config, http, TokenStore(config.token_file))
     api = ApolloClient(config.base_url, http, session)
+    # One INFO line per request on stderr is noise in the client's MCP log.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     mcp = MCPServer("apollo")
 
     async def call(coro):
@@ -173,7 +183,8 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
         the genre's window). ``lyrics`` carries structure tags such as
         ``[Intro - ambient]``, ``[Build]``, ``[Drop]``, ``[Breakdown]``,
         ``[Outro]``; ``[Instrumental]`` for no structure. ``audio_duration``
-        is seconds. Refused while a live set is on air.
+        is seconds, 120-600 (Apollo's catalog floor; default 180). ``batch_size``
+        is 1-8 takes. Refused while a live set is on air.
         """
         await refuse_if_on_air()
         body: dict[str, Any] = {
@@ -244,11 +255,16 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
 
     @mcp.tool()
     async def critique_take(task_id: str, take_index: int, genre_folder: str) -> dict[str, Any]:
-        """Score a take against its genre's reference bands (CPU only) plus an LLM reading.
+        """Score a take against its genre's reference bands plus an LLM reading of the numbers.
 
         Advisory: it never gates anything. ``passed`` is null when the genre
-        has no references.
+        has no references. Only while ACE is STOPPED: the LLM reading loads
+        the main model, which must never share the GPU with ACE — batch the
+        generations, stop ACE, then score.
         """
+        service = await call(api.service())
+        if service.get("state") not in ACE_SAFE_STATES:
+            raise ToolError(ACE_HOLDS_GPU)
         take = await find_take(task_id, take_index)
         metas = take.get("metas") or {}
         body = {

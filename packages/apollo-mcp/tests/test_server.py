@@ -124,6 +124,7 @@ async def test_download_take_streams_the_file_unrewritten(server, config):
 
 @respx.mock
 async def test_critique_sends_the_decoded_path_and_metas(server):
+    respx.get(BASE + "/api/generator/service").respond(200, json={**service(), "state": "stopped"})
     respx.get(BASE + "/api/generator/tasks/t1").respond(200, json=TASK_DONE)
     crit = respx.post(BASE + "/api/generator/critique").respond(200, json={"passed": True})
     await call(server, "critique_take", {"task_id": "t1", "take_index": 0, "genre_folder": "deep house"})
@@ -159,3 +160,24 @@ async def test_login_status_never_returns_the_token(server, signed_in):
 async def test_unauthenticated_tool_says_how_to_sign_in(config, http):
     with pytest.raises(RuntimeError, match="apollo-mcp login"):
         await call(build_server(config, http), "list_genres")
+
+
+@respx.mock
+async def test_validation_errors_name_the_argument(server):
+    respx.get(BASE + "/api/generator/service").respond(200, json=service())
+    respx.post(BASE + "/api/generator/tasks").respond(422, json={"detail": [
+        {"type": "greater_than_equal", "loc": ["body", "audio_duration"],
+         "msg": "Input should be greater than or equal to 120", "input": 60.0}]})
+    with pytest.raises(RuntimeError, match=r"422: audio_duration: Input should be greater than or equal to 120$"):
+        await call(server, "generate", {"prompt": "x", "genre_folder": "deep house", "audio_duration": 60})
+
+
+@respx.mock
+async def test_critique_refused_while_ace_runs(server):
+    # The critique's LLM read JIT-loads the main model beside ACE (seen on
+    # prod 2026-11-21: gemma 4.7 GB next to ACE, next generate 409'd).
+    respx.get(BASE + "/api/generator/service").respond(200, json=service())
+    crit = respx.post(BASE + "/api/generator/critique")
+    with pytest.raises(RuntimeError, match="ACE is running"):
+        await call(server, "critique_take", {"task_id": "t1", "take_index": 0, "genre_folder": "deep house"})
+    assert not crit.called

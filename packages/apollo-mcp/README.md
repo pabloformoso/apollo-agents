@@ -19,7 +19,7 @@ so its generations land in the operator's own `/generations` feed.
 | `get_task`, `wait_for_task` | `GET /api/generator/tasks/{id}` |
 | `download_take` | `GET /api/generator/audio` |
 | `list_generations`, `mark_take` | `GET /api/generator/generations`, `PATCH …/takes/{idx}` |
-| `critique_take` | `POST /api/generator/critique` |
+| `critique_take` | `POST /api/generator/critique` — only while ACE is stopped (its LLM read loads the main model) |
 | `search_catalog`, `list_sessions` | `GET /api/catalog`, `GET /api/sessions` (read-only) |
 
 **Not exposed, by design**: publishing to the catalog, edits, anything live,

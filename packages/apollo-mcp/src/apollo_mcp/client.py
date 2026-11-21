@@ -146,4 +146,10 @@ def _detail(resp: httpx.Response) -> str:
     detail = body.get("detail") if isinstance(body, dict) else None
     if isinstance(detail, str):
         return detail
+    if isinstance(detail, list) and all(isinstance(e, dict) and "msg" in e for e in detail):
+        # FastAPI's 422: one "field: message" per error, the field without
+        # the "body" prefix, so the agent can fix the argument it sent.
+        return "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', []) if p != 'body')}: {e['msg']}" for e in detail
+        )
     return str(detail if detail is not None else body)[:500]
