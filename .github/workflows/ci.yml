@@ -69,6 +69,24 @@ jobs:
         working-directory: web/frontend
         run: npm run build
 
+  # packages/apollo-mcp is a standalone client of Apollo's API with its own
+  # pyproject and lockfile, so the backend job's `pytest tests/` never sees it.
+  apollo-mcp:
+    name: apollo-mcp
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "latest"
+
+      - name: Test
+        working-directory: packages/apollo-mcp
+        run: uv run --extra test pytest -v --tb=short
+
   e2e:
     name: E2E (Playwright)
     runs-on: ubuntu-latest
