@@ -93,6 +93,10 @@ packages/
   py-obs/                      # `deus_obs` — OTel traces to Phoenix.
                                #   Standalone, zero-dependency, NOT apollo_*
                                #   on purpose. Its own README.
+  apollo-mcp/                  # MCP server over the REST API (generate,
+                               #   poll, download, critique). Signs in AS the
+                               #   operator; publish/live/delete are left out
+                               #   of the tool list on purpose. Its own README.
 agent/
   run.py                       # Apollo orchestrator + all agent loops
   tools.py                     # Tool functions (catalog, playlist, validator, memory)
