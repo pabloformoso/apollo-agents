@@ -241,7 +241,7 @@ work here. That Phoenix is **SHARED with eOS/SynapseFlow**: always set
   `host.docker.internal` resolve on Linux (checked from a container: its
   `/healthz` answers 200). The auth header is NOT blanked — it is not
   host-specific, so it reaches the container through `env_file:`.
-- **Turning it on in prod** (none of this is done yet):
+- **Turning it on in prod** (1–2 done 2026-11-23; 3–4 wait for the merge):
   1. Phoenix UI → Settings → API keys → a **system** key for Apollo (needs
      an admin; see the 403 above).
   2. In the main checkout's `.env`:

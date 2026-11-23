@@ -513,8 +513,11 @@ mechanism; read its comment before adding a second sentinel.
   untouched) proved the header path: compose passes
   `OTEL_EXPORTER_OTLP_HEADERS` through from `env_file` unquoted and NOT
   blanked, the exporter sends it (Phoenix identifies the user), no header
-  is `401` plus the startup warning, and every refusal is printed. No span
-  landed yet: the key was a VIEWER's (`403`), see root CLAUDE.md.
+  is `401` plus the startup warning, and every refusal is printed. With a
+  system key both runs landed the full 12-span tree in their own projects;
+  reading them back, the 30 stored attribute keys were all metadata and no
+  planted key, JWT, prompt or tool-result text appeared. Test projects are
+  deletable afterwards (`DELETE /v1/projects/<name>` → 204).
 - Config, precedence and the container gotcha: `packages/py-obs/README.md`.
 
 ## Strudel in the app (§11 S3)
