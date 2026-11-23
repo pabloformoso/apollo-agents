@@ -30,6 +30,7 @@ import time
 from queue import Empty, Queue
 from typing import Any, Awaitable, Callable
 
+from agent import tracing
 from agent.live_engine import (
     APPROACHING_CF,
     CROSSFADE_FINISHED,
@@ -488,23 +489,37 @@ async def run_live_session_async(
             # Forward to LLM. The streaming runner publishes its own
             # text_delta / tool_call / tool_result events via emit, so we
             # only need to add a final assistant chat marker.
-            try:
-                response = await run_agent_streaming(
-                    _LIVE_DJ_SYSTEM,
-                    _LIVE_TOOLS,
-                    messages,
-                    context_variables,
-                    emit,
-                    max_turns=5,
-                )
-            except Exception as exc:  # noqa: BLE001 — surface to UI
-                print(
-                    f"[live_dj] run_agent_streaming RAISED: "
-                    f"{type(exc).__name__}: {_ascii(str(exc))}",
-                    flush=True,
-                )
-                await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
-                response = ""
+            # One trace per turn: what woke the DJ (event TYPES and a count of
+            # audience inputs — never their text, which is viewers' chat) and
+            # the agent run underneath it. The except below swallows the error
+            # for the UI, so the span is flagged here or it would read green.
+            with tracing.span(
+                "live_dj.turn",
+                **{
+                    "apollo.lane": "live_dj",
+                    "apollo.live.events": [str(t) for t in evt_types] or None,
+                    "apollo.live.user_inputs": len(user_inputs),
+                },
+            ) as turn_span:
+                try:
+                    response = await run_agent_streaming(
+                        _LIVE_DJ_SYSTEM,
+                        _LIVE_TOOLS,
+                        messages,
+                        context_variables,
+                        emit,
+                        max_turns=5,
+                    )
+                except Exception as exc:  # noqa: BLE001 — surface to UI
+                    print(
+                        f"[live_dj] run_agent_streaming RAISED: "
+                        f"{type(exc).__name__}: {_ascii(str(exc))}",
+                        flush=True,
+                    )
+                    tracing.mark_error(turn_span, exc)
+                    await emit({"type": "error", "message": f"{type(exc).__name__}: {exc}"})
+                    response = ""
+                tracing.set_attrs(turn_span, **{"apollo.response_chars": len(response or "")})
 
             print(
                 f"[live_dj] turn done: response_len={len(response) if response else 0} "

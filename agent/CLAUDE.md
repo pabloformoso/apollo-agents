@@ -10,6 +10,10 @@
   pings or `track_ended` from the browser). The v3.6.3 stall watchdog
   exists because a wedged browser stops pinging and the set dies.
 - `tools.py` — all LLM-callable tools.
+- `tracing.py` — the ONE guarded door to `deus_obs` (spans, LLM spans,
+  token counts, `@traced`). Import it, never `deus_obs`: the `obs` group
+  is absent in CI. Metadata only, never prompt/tool content — see
+  `web/CLAUDE.md` → Tracing.
 - `eligibility.py` — session-eligibility rules (v3.9.1): tracks under
   `MIN_TRACK_DURATION_SEC` (120 s, env `APOLLO_MIN_TRACK_DURATION_SEC`)
   are never SELECTED into a session.

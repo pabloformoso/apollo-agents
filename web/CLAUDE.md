@@ -423,7 +423,7 @@ mechanism; read its comment before adding a second sentinel.
   behaviour change, not a hardening — its own PR, with `PRAGMA
   foreign_key_check` run against prod first (it comes back clean today).
 
-## Tracing (`packages/py-obs`, stage 1)
+## Tracing (`packages/py-obs`, stage 2 — 2026-11-23)
 
 - **`import deus_obs` in `app.py` is inside a `try`, and the guard must
   stay.** The `obs` dependency group is deliberately NOT in
@@ -448,9 +448,68 @@ mechanism; read its comment before adding a second sentinel.
   the last seconds — the end of a live session, the error that stopped
   it — are still buffered when the process goes away. Nothing else ran
   after the `yield` before this.
-- Nothing is instrumented yet. Stage 1 is the bootstrap; the spans in
-  Phoenix so far come only from explicit `deus_obs.span()` /
-  `@deus_obs.tool` call sites, of which there are none in the backend.
+- **Every call site imports `agent/tracing.py`, never `deus_obs`.** That
+  module holds the one guarded import, so `generator.py` & co. cannot break
+  a backend without the `obs` group. It lives in `agent/` because
+  `live_dj.py` needs it and `agent/` must not import `web/`.
+- **Metadata only, whatever `OBS_CAPTURE` says.** Model, provider, token
+  counts, sizes, outcomes, the NAMES of a tool's arguments — never a
+  prompt, a completion, an argument value or a tool result. The live DJ's
+  prompts carry viewers' chat, `context_variables` carries API keys, and
+  the store is shared. `tests/web/test_tracing_spans.py` plants a fake key
+  and a prompt marker and asserts neither reaches any span attribute.
+  Content capture behind the capture level is its own change.
+- **FastAPI's native telemetry is OFF (`app._FASTAPI_TELEMETRY`), and must
+  stay off until two things exist.** FastAPI 0.163 traces itself the moment
+  a global provider exists, which `install()` creates: a request span plus
+  dependency/endpoint/serialization spans for every call — the wizard's
+  3 s poll alone is a root trace every 3 s per tab — and its `url.query`
+  redaction knows only cloud-signature parameters, so the `?token=<JWT>`
+  that the audio proxy and cover routes take would be stored verbatim. Found
+  when a test for "a poll emits nothing" came back with 12 spans. Turning
+  request spans on needs a `telemetry["exclude"]` for the polls AND a scrub
+  of `url.query` first.
+- **The span tree.** `agent.<lane>` (AGENT: `genre_guard`, `planner`,
+  `critic`, `editor`, `validator`) wraps one phase's run, opened at the
+  CALL site by `pipeline._agent_span` — not inside `run_agent_streaming`,
+  whose signature a dozen tests fake. Under it, one `llm.stream` (LLM) per
+  turn and one TOOL span per tool call (`_run_tool_traced`, which flags
+  the `"Tool error: …"` strings `_run_tool` returns instead of raising).
+  The live set is `live_dj.turn` (event TYPES and an input COUNT, never the
+  text) over the same `run_agent_streaming` — one trace per turn, not one
+  per set. `llm.brief_parser`, `llm.critique` and
+  `llm.cover_art_direction` are one span per ATTEMPT, so a failover reads
+  as a failed local span followed by an Azure one; `llm.stream` reads its
+  model and provider AFTER the stream opens, because `acall` may have
+  flipped it to Azure.
+- **Streaming token counts are often absent, and that is not a bug.** The
+  OpenAI-compatible stream only carries `usage` with
+  `stream_options.include_usage`, which the runner does not send (changing
+  the request shape of the live DJ is not this change's call). Anthropic's
+  final message and every non-streaming call do carry it.
+- **The generator lane**: `generator.release` / `.edit` (with
+  `ace.release_task` under them, `http.status_code` on a 409/429/502),
+  `generator.publish`, `generator.critique` (`apollo.critique.read` says
+  `given` / `none` / `skipped_ace_gpu` — the last is the 2026-11-21 gate
+  doing its job, not a failure), `generator.takes_done` over one
+  `generator.take_copy` per take, and `covers.render` (the Azure image
+  call, the one that costs money). Long handlers use `@tracing.traced`
+  UNDER `@router.*` plus `tracing.annotate()`, so their bodies are not
+  re-indented; `functools.wraps` keeps the signature FastAPI builds the
+  route from (asserted in `tests/test_tracing.py`).
+- **Polls are never spanned, on purpose** — `GET /tasks/{id}` and
+  `query_result` run every 3 s per open wizard and each would be a root
+  trace. Only the done-poll's real work (`takes_done`, `take_copy`) is,
+  and a re-poll that finds the copy in place emits nothing.
+- Errors the code handles instead of raising (a brief that parses to
+  all-null, a take copy that fails, a live turn that errored) are flagged
+  with `tracing.mark_error`, or they would read green in Phoenix.
+- Verified 2026-11-23 against a throwaway Phoenix 21.3 (auth off), both
+  from the host venv and from inside the rebuilt backend image, through the
+  real lifespan bootstrap and OTLP exporter: the expected 12-span tree in
+  its own project, nothing from the pending poll, no key or JWT in any
+  span. NOT yet verified against the shared Phoenix — that needs its API
+  key (root CLAUDE.md → Observability).
 - Config, precedence and the container gotcha: `packages/py-obs/README.md`.
 
 ## Strudel in the app (§11 S3)

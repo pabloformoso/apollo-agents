@@ -42,6 +42,8 @@ from urllib.parse import quote
 
 import httpx
 
+from agent import tracing
+
 
 # ── Env ──────────────────────────────────────────────────────────────
 
@@ -467,6 +469,11 @@ class AceStepClient:
         data = await self._request("GET", "/v1/stats")
         return data if isinstance(data, dict) else {"value": data}
 
+    # The one GPU-touching call, spanned at the client so the HTTP round
+    # trip to ACE is its own bar under ``generator.release`` / ``.edit``.
+    # Polls (``query_result``, every 3 s per open wizard) are deliberately
+    # NOT spanned: each would be a root trace of its own and bury the rest.
+    @tracing.traced("ace.release_task")
     async def release_task(
         self,
         payload: dict[str, Any],
@@ -490,6 +497,7 @@ class AceStepClient:
         downloaded take attached instead. The default stays JSON, so no
         existing caller changes shape.
         """
+        tracing.annotate(**{"apollo.ace.upload": files is not None})
         data = await self._request(
             "POST", "/release_task", json_body=payload, files=files
         )

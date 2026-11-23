@@ -64,12 +64,20 @@ WORKDIR /app
 #                      and the poller silently never starts, leaving the
 #                      pill stuck on ``disconnected`` regardless of
 #                      whether the user has linked YouTube).
+#   --group obs      → the OTel SDK behind ``deus_obs`` (packages/py-obs),
+#                      a path source, hence the COPY of that one directory
+#                      before the sync. Installed is NOT enabled: with
+#                      APOLLO_OTLP_ENDPOINT unset (compose's default) the
+#                      backend never imports the SDK and records nothing.
+#                      Without it here, setting the endpoint printed
+#                      "tracing disabled (… `uv sync --group obs` is not)".
 COPY pyproject.toml uv.lock ./
+COPY packages/py-obs ./packages/py-obs
 ARG INSTALL_BEATGRID=0
 RUN if [ "$INSTALL_BEATGRID" = "1" ]; then \
-        uv sync --group web --group youtube --extra beatgrid --frozen ; \
+        uv sync --group web --group youtube --group obs --extra beatgrid --frozen ; \
     else \
-        uv sync --group web --group youtube --frozen ; \
+        uv sync --group web --group youtube --group obs --frozen ; \
     fi
 
 # Source — overwritten by the bind mount at runtime, but COPY-ing it

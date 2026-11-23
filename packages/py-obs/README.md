@@ -70,6 +70,13 @@ Everything is environment variables. Nothing is required.
 | `OBS_SAMPLE_RATIO` | `1.0` | `ParentBased(TraceIdRatioBased(r))`. Clamped to `[0,1]`; a typo reads as `1.0`. |
 | `OBS_CONSOLE` | `false` | Also print spans to stdout. Debugging only. |
 
+**Authentication is the exporter's, not this package's.** A collector that
+wants a bearer (Phoenix with `PHOENIX_ENABLE_AUTH=true`) gets it from the
+standard `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>` — the OTLP
+exporter reads it itself, and the value is URL-encoded per the spec. Without
+it every batch is a `401` logged on a background thread; `install()` cannot
+see that, so the host should say when the header is missing.
+
 Precedence for the endpoint, highest first:
 
 ```

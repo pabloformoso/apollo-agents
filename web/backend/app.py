@@ -61,6 +61,13 @@ _OBS_ENDPOINT_VARS = (
     "OBS_ENDPOINT",
 )
 
+#: Read by the OTLP exporter itself (``Authorization=Bearer%20<key>``, the
+#: OTel spec's URL-encoded form); named here only to say when it is missing.
+_OBS_HEADER_VARS = (
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+    "OTEL_EXPORTER_OTLP_HEADERS",
+)
+
 
 def _start_tracing() -> None:
     """Configure tracing and say, in one line, what happened.
@@ -77,7 +84,14 @@ def _start_tracing() -> None:
     trace store that simply stays empty.
     """
     if deus_obs is not None:
-        print(deus_obs.install().status_line())
+        cfg = deus_obs.install()
+        line = cfg.status_line()
+        if cfg.enabled and not any(os.getenv(name) for name in _OBS_HEADER_VARS):
+            # The Phoenix on jarvis runs with auth on (2026-11): without a
+            # bearer header it answers 401 to every batch, on the exporter's
+            # background thread, and the app looks perfectly healthy.
+            line += " [no OTLP auth header set: an authenticated collector will refuse every span]"
+        print(line)
     elif any(os.getenv(name) for name in _OBS_ENDPOINT_VARS):
         print("deus_obs: tracing disabled (an endpoint is set, but `uv sync --group obs` is not)")
 
@@ -96,7 +110,25 @@ async def lifespan(_: FastAPI):
         deus_obs.shutdown()
 
 
-app = FastAPI(title="ApolloAgents API", version="2.0.0", lifespan=lifespan)
+#: FastAPI (0.163+) traces itself the moment a global TracerProvider exists —
+#: which ``deus_obs.install()`` creates. Left on, that is a request span plus
+#: dependency/endpoint/serialization spans for EVERY call: the generator
+#: wizard's 3-second poll alone would be a root trace every 3 s per open tab,
+#: drowning the spans this app opens on purpose in a Phoenix shared with two
+#: other projects. And its ``url.query`` attribute redacts only cloud
+#: signature parameters — ``?token=<JWT>``, which the audio proxy and the
+#: cover routes take because ``<audio>``/``<img>`` cannot set a header, would
+#: be stored verbatim. So the app's spans are the explicit ones only
+#: (``agent/tracing.py``). Turning request spans on is a decision of its own:
+#: it needs an ``exclude`` for the polls and a scrub of ``url.query`` first.
+_FASTAPI_TELEMETRY = {"tracing": False, "metrics": False, "logs": False}
+
+app = FastAPI(
+    title="ApolloAgents API",
+    version="2.0.0",
+    lifespan=lifespan,
+    telemetry=_FASTAPI_TELEMETRY,
+)
 
 _DEFAULT_ORIGINS = "http://localhost:4010,http://127.0.0.1:4010"
 _ALLOWED_ORIGINS = [

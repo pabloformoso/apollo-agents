@@ -200,32 +200,63 @@ Hard rules:
   JIT-loads a model and OOMs ACE's 5 Hz LM at init (first real batch,
   2026-08-29). LLM work resumes when ACE frees the GPU.
 
-## Observability (`packages/py-obs`, stage 1)
+## Observability (`packages/py-obs`, stage 2: instrumented)
 
 Traces go to the **Arize Phoenix on this box** (`http://localhost:6006`,
-OTLP/HTTP on that same port — 20.x has no separate receiver port, and its
-gRPC 4317 is exposed but not published, so gRPC cannot work here). That
-Phoenix is **SHARED with eOS/SynapseFlow**: always set `OBS_PROJECT`, or
-Apollo's spans land in `default` next to theirs.
+container `phoenix-e14a`, 21.x, host network; UI at
+`observability.pabloformoso.com`). OTLP/HTTP is on that same port — there is
+no separate receiver port, and gRPC 4317 is not published, so gRPC cannot
+work here. That Phoenix is **SHARED with eOS/SynapseFlow**: always set
+`OBS_PROJECT`, or Apollo's spans land in `default` next to theirs.
 
+- **It runs with auth ON** (`PHOENIX_ENABLE_AUTH=true`, measured
+  2026-11-23): OTLP without a bearer answers `401 Invalid token`, on the
+  exporter's background thread, while the app looks healthy. The exporter
+  reads the standard `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>`
+  (URL-encoded space) — a SYSTEM key from Phoenix's Settings → API keys.
+  Startup appends `[no OTLP auth header set …]` to the `deus_obs:` line
+  when tracing is on and neither header variable is set.
 - Opt-in by design: `uv sync --group obs`. The group is NOT in
   `default-groups`, so CI never installs the OTel SDK and "unconfigured is
   a no-op" is enforced structurally rather than by a runtime flag.
   Unconfigured saves ~80 ms of interpreter start per process — the whole
-  reason the SDK import lives inside `install()`.
+  reason the SDK import lives inside `install()`. The backend IMAGE does
+  install it (installed is not enabled; see below).
 - **`localhost:6006` in `.env` is the HOST's Phoenix and would be the
   CONTAINER itself.** Both compose files pin `OTEL_EXPORTER_OTLP_*` and
   `OBS_ENDPOINT` to empty under `environment:` (which beats `env_file:`)
   and read `APOLLO_OTLP_ENDPOINT` instead — a different name, so the host
-  value cannot leak in. Turning it on in a container means putting
-  `APOLLO_OTLP_ENDPOINT=http://host.docker.internal:6006` in `.env`;
-  `extra_hosts: host-gateway` is what makes that name resolve on Linux.
+  value cannot leak in. `extra_hosts: host-gateway` makes
+  `host.docker.internal` resolve on Linux (checked from a container: its
+  `/healthz` answers 200). The auth header is NOT blanked — it is not
+  host-specific, so it reaches the container through `env_file:`.
+- **Turning it on in prod** (none of this is done yet):
+  1. Phoenix UI → Settings → API keys → a system key for Apollo.
+  2. In the main checkout's `.env`:
+     `APOLLO_OTLP_ENDPOINT=http://host.docker.internal:6006` and
+     `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>`.
+  3. The `obs` group into the RUNNING venv. `/opt/venv` is the named volume
+     `apollo_backend_venv`, which Docker seeds from the image only when it
+     is EMPTY — a rebuilt image alone never reaches it:
+     `docker compose exec backend uv sync --frozen --inexact --group web --group youtube --group obs --extra beatgrid`
+     (it installs packages only; `--reload` watches `web/` and `agent/`, so
+     it reloads nothing). Rebuild the image too so a wiped volume keeps it.
+  4. `docker compose up -d backend` (recreates it with the new env) — only
+     with no live set on (the check above), and expect
+     `deus_obs: tracing -> http://host.docker.internal:6006/v1/traces (project=apollo-agents)`
+     with no `[no OTLP auth header …]` suffix in `docker logs apollo-backend`.
 - `OBS_CAPTURE` defaults to `metadata` — argument names and return types,
   never values. Apollo passes `context_variables` (which carries API keys)
-  into every agent tool, and the trace store is shared.
-- Stage 1 wires the bootstrap only: `install()`/`shutdown()` in the FastAPI
-  lifespan. Nothing is instrumented yet, so a configured backend that has
-  served no explicitly-spanned code sends no spans at all.
+  into every agent tool, and the trace store is shared. Apollo's own spans
+  (`agent/tracing.py`) go further and record metadata ONLY at every level:
+  no prompt, completion or tool payload ever, `OBS_CAPTURE=full` included.
+- **What is spanned** — LLM calls (`llm.*`, OpenInference LLM kind, model +
+  provider + token counts), the agent phases and the live DJ's turns
+  (`agent.<lane>`, `live_dj.turn`, one TOOL span per tool call), and the
+  generator lane (`generator.release|takes_done|take_copy|publish|edit|critique`,
+  `ace.release_task`, `covers.render`). The why of each, and what is
+  deliberately NOT spanned (polls, FastAPI's own request spans), is in
+  `web/CLAUDE.md` → Tracing.
 - Everything else — precedence table, the ten public names, why this is not
   `arize-phoenix-otel` — is in `packages/py-obs/README.md`.
 
