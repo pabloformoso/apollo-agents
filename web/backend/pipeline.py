@@ -16,9 +16,9 @@ from typing import Callable
 
 from . import main_llm
 
-# Make the project root importable
+# The project root is put on sys.path by ``backend/__init__.py``, which runs
+# before this module whatever the import order.
 _PROJECT_DIR = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_PROJECT_DIR))
 
 # ---------------------------------------------------------------------------
 # Import system prompts, parsers, and schema helpers from existing agent code
