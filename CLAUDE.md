@@ -214,8 +214,19 @@ work here. That Phoenix is **SHARED with eOS/SynapseFlow**: always set
   exporter's background thread, while the app looks healthy. The exporter
   reads the standard `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>`
   (URL-encoded space) — a SYSTEM key from Phoenix's Settings → API keys.
-  Startup appends `[no OTLP auth header set …]` to the `deus_obs:` line
-  when tracing is on and neither header variable is set.
+  **A user key is not enough unless that user can write**: Pablo's Keycloak
+  account is a `VIEWER`, and its key answers `403 "Viewers cannot perform
+  this action."` to every batch while the same key reads the REST API fine
+  (2026-11-23). Write the space as `%20`: a raw space and a quoted value
+  both work today (python-dotenv and compose's `env_file` strip the
+  quotes, the exporter parses leniently), but OTel's STRICT header parser
+  logs the whole header — key included — when it meets a raw space.
+- **What each failure looks like in `docker logs apollo-backend`**: no
+  header → the `deus_obs:` line ends `[no OTLP auth header set …]` and
+  `Failed to export spans batch code: 401`; a wrong key → `401`; a viewer
+  key → `403`. The `Failed to export` lines come from the exporter on its
+  background thread (stderr), so they appear minutes after start, not with
+  the banner.
 - Opt-in by design: `uv sync --group obs`. The group is NOT in
   `default-groups`, so CI never installs the OTel SDK and "unconfigured is
   a no-op" is enforced structurally rather than by a runtime flag.
@@ -231,7 +242,8 @@ work here. That Phoenix is **SHARED with eOS/SynapseFlow**: always set
   `/healthz` answers 200). The auth header is NOT blanked — it is not
   host-specific, so it reaches the container through `env_file:`.
 - **Turning it on in prod** (none of this is done yet):
-  1. Phoenix UI → Settings → API keys → a system key for Apollo.
+  1. Phoenix UI → Settings → API keys → a **system** key for Apollo (needs
+     an admin; see the 403 above).
   2. In the main checkout's `.env`:
      `APOLLO_OTLP_ENDPOINT=http://host.docker.internal:6006` and
      `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>`.

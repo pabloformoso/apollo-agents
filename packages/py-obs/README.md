@@ -73,9 +73,12 @@ Everything is environment variables. Nothing is required.
 **Authentication is the exporter's, not this package's.** A collector that
 wants a bearer (Phoenix with `PHOENIX_ENABLE_AUTH=true`) gets it from the
 standard `OTEL_EXPORTER_OTLP_HEADERS=Authorization=Bearer%20<key>` — the OTLP
-exporter reads it itself, and the value is URL-encoded per the spec. Without
-it every batch is a `401` logged on a background thread; `install()` cannot
-see that, so the host should say when the header is missing.
+exporter reads it itself, and the value is URL-encoded per the spec — write
+the space as `%20`: the exporter tolerates a raw one, but OTel's strict parser
+logs the entire header, credential included, when it meets one. Without it
+every batch is a `401` logged on a background thread; with a key whose user
+may only read, a `403`. `install()` sees neither, so the host should say when
+the header is missing.
 
 Precedence for the endpoint, highest first:
 

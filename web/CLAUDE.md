@@ -508,8 +508,13 @@ mechanism; read its comment before adding a second sentinel.
   from the host venv and from inside the rebuilt backend image, through the
   real lifespan bootstrap and OTLP exporter: the expected 12-span tree in
   its own project, nothing from the pending poll, no key or JWT in any
-  span. NOT yet verified against the shared Phoenix — that needs its API
-  key (root CLAUDE.md → Observability).
+  span. Against the SHARED Phoenix (auth on), the same run from the host
+  and from a throwaway compose project (`-p apollo-pr234-verify`, prod
+  untouched) proved the header path: compose passes
+  `OTEL_EXPORTER_OTLP_HEADERS` through from `env_file` unquoted and NOT
+  blanked, the exporter sends it (Phoenix identifies the user), no header
+  is `401` plus the startup warning, and every refusal is printed. No span
+  landed yet: the key was a VIEWER's (`403`), see root CLAUDE.md.
 - Config, precedence and the container gotcha: `packages/py-obs/README.md`.
 
 ## Strudel in the app (§11 S3)
