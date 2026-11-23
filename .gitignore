@@ -15,6 +15,8 @@ artwork/
 
 # Generated output
 output/
+# Apollo's copy of every finished ACE take (web/backend/take_store.py)
+generations/
 
 # Track catalog (generated — use tracks.json.example as template)
 tracks/tracks.json

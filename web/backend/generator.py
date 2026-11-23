@@ -85,7 +85,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from . import ace_control, acestep_client, auth, covers, db, permissions
+from . import ace_control, acestep_client, auth, covers, db, permissions, take_store
 from .brief_parser import detect_provider
 from .ws_manager import ws_manager
 
@@ -964,6 +964,39 @@ def _decoded_take_path(file: str | None) -> str | None:
         return None
 
 
+async def _copy_take_to_store(file: str | None, decoded_path: str | None) -> None:
+    """Copy one finished take into Apollo's store. **Never raises.**
+
+    Same rule as :func:`_store`: the poll this hangs off must not 5xx.
+    A take that cannot be copied stays playable through ACE while ACE
+    runs, and ``scripts/backfill_take_store.py`` can be re-run for it.
+    """
+    if take_store.name_for(decoded_path) is None or take_store.local_copy(decoded_path):
+        return
+    client = _client()
+    if not client.enabled():
+        return
+    part = None
+    try:
+        part = take_store.staging_path(decoded_path)
+        await _stream_from_ace(client, validate_ace_audio_path(file or "").api_path, str(part))
+        if part.stat().st_size == 0:
+            # A copy that would shadow the real file forever is worse
+            # than none: every reader prefers the store.
+            raise ValueError("ACE served an empty file")
+        os.replace(part, take_store.stored_path(decoded_path))
+    except Exception as exc:  # noqa: BLE001 — a missing copy degrades, never breaks
+        print(
+            f"[generator] take store — could not copy {decoded_path}: {exc}",
+            flush=True,
+        )
+        if part is not None:
+            try:
+                part.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def _cover_on_release() -> bool:
     """Read at CALL time, the env rule every generator flag follows."""
     return os.getenv("APOLLO_COVER_ON_RELEASE", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -1011,11 +1044,19 @@ async def _record_takes(user_id: int, task_id: str, takes: list[dict]) -> None:
 
     ``takes`` is the poll's own response list; the decoded path is added
     to a COPY so the wire shape stays exactly the poll contract.
+
+    Each take's audio is copied into :mod:`take_store` BEFORE the row
+    turns ``done``: while it is still ``pending``, ACE's stop guard
+    (``ace_control.pending_results``) refuses to stop the box, so the
+    copy cannot lose its source halfway. A re-poll finds the copies in
+    place and copies nothing.
     """
     records = [
         {**take, "decoded_path": _decoded_take_path(take.get("file"))}
         for take in takes
     ]
+    for record in records:
+        await _copy_take_to_store(record.get("file"), record.get("decoded_path"))
     saved = await _store(
         f"save takes of {task_id}", db.save_generation_takes, task_id, user_id, records
     )
@@ -1417,7 +1458,7 @@ async def proxy_take_audio(
     path: str = Query(..., min_length=1),
     token: str | None = Query(None),
 ):
-    """Stream a take's audio from ACE-Step. Allowed during a live set.
+    """Stream a take's audio — Apollo's copy, else ACE. Allowed during a live set.
 
     The browser never talks to :8001: auth (header or ``?token=``, since
     ``<audio>`` cannot set headers) and LAN isolation live here.
@@ -1435,6 +1476,12 @@ async def proxy_take_audio(
     """
     _authorize_audio(request, token)
     safe_path = _validate_proxy_path(path)
+
+    # A finished take is a file Apollo holds: serve it from disk, with
+    # ``FileResponse``'s own Range support, whether ACE is up or not.
+    local = take_store.local_copy(_inner_path_of(safe_path))
+    if local is not None:
+        return FileResponse(local, media_type="audio/wav")
 
     client = _client()
     if not client.enabled():
@@ -1483,7 +1530,23 @@ async def proxy_take_audio(
 
 
 async def _download_take(client: acestep_client.AceStepClient, api_path: str, dest: str):
-    """Stream one take's audio to ``dest``. Typed refusals, no buffering."""
+    """Put one take's audio at ``dest``: Apollo's own copy first, ACE second.
+
+    The local copy is what makes publish, critique and the edit's upload
+    work while ACE is stopped. Only when Apollo has none does the take
+    have to come from ACE, and only then can ACE being off be a 503.
+    """
+    local = take_store.local_copy(_inner_path_of(api_path))
+    if local is not None:
+        await asyncio.to_thread(shutil.copyfile, local, dest)
+        return
+    if not client.enabled():
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+    await _stream_from_ace(client, api_path, dest)
+
+
+async def _stream_from_ace(client: acestep_client.AceStepClient, api_path: str, dest: str):
+    """Stream one take's audio from ACE to ``dest``. Typed refusals, no buffering."""
     stream = client.stream_audio(api_path)
     try:
         upstream = await stream.__aenter__()
@@ -1513,10 +1576,9 @@ async def publish_take(
 
     Refusal ladder:
 
-    * **503** — the generator is disabled or the box is unreachable.
-      Unlike every other refusal here this one is structural: the take's
-      audio only exists on the ACE box, so without it there is nothing
-      to publish.
+    * **503** — the generator is disabled or the box is unreachable AND
+      Apollo holds no copy of the take (:mod:`take_store`). With a copy
+      ACE is not needed at all.
     * **422** — a bad body, a ``file`` that is not an ACE result path,
       or an INGEST refusal (short track, unknown genre, out-of-window
       bpm, unparseable keyscale, id collision). Ingest refusals are
@@ -1550,13 +1612,15 @@ async def publish_take(
             ),
         )
     client = _client()
-    if not client.enabled():
-        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
-
     try:
         resolved = validate_ace_audio_path(req.file, resolve_file=True)
     except AceAudioPathError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # ACE being off is only a 503 when Apollo holds no copy of the take
+    # (``_download_take`` decides); checked here too so a take that has to
+    # come from ACE is refused before any work, as it always was.
+    if not client.enabled() and take_store.local_copy(resolved.file_path) is None:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
 
     # Cheap pre-flight: refuse a take that could never be selected into a
     # session BEFORE pulling 35 MB across the LAN. The ingest re-checks
@@ -2259,9 +2323,8 @@ async def critique_take(
     poll endpoint's rule: a UI that has to feature-detect its own
     contract eventually gets it wrong.
 
-    * **503** — the generator is disabled or the box unreachable.
-      Structural, exactly as on publish: the take's audio exists only on
-      the ACE box, so there is nothing to measure without it.
+    * **503** — the generator is disabled or the box unreachable AND
+      Apollo holds no copy of the take, exactly as on publish.
     * **422** — a ``file`` that is not an ACE result path.
     * **404 / 502** — the result file is gone, or ACE broke serving it.
     * **200 with ``passed: null`` and a ``note``** — the bench refused
@@ -2284,13 +2347,15 @@ async def critique_take(
     trade — the guard protects residency, not politeness.
     """
     client = _client()
-    if not client.enabled():
-        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
-
     try:
         resolved = validate_ace_audio_path(req.file, resolve_file=True)
     except AceAudioPathError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # ACE being off is only a 503 when Apollo holds no copy of the take
+    # (``_download_take`` decides); checked here too so a take that has to
+    # come from ACE is refused before any work, as it always was.
+    if not client.enabled() and take_store.local_copy(resolved.file_path) is None:
+        raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
 
     work_dir = tempfile.mkdtemp(prefix="apollo-critique-")
     try:

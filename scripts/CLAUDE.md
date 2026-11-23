@@ -207,6 +207,11 @@
     system prompt is deliberately untouched, so a B2B session stays
     comparable to `bench_strudel_mind.py`.
 - `smoke_azure.py` — same idea for the Azure OpenAI path.
+- `backfill_take_store.py` — copies every take recorded in `apollo.db`
+  that Apollo has no copy of from ACE's disk into the take store
+  (`web/CLAUDE.md`, "A finished take is Apollo's file"). Run on jarvis
+  from the main checkout, `--dry-run` first. Idempotent; exits 1 when a
+  recorded take is missing from ACE's disk, which the output names.
 
 Convention: scripts are operator-facing and safe to run against the
 main checkout; none of them mutate `tracks/` or `output/` without
