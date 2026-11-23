@@ -112,6 +112,7 @@ def test_decoded_take_path_keeps_plus_and_bare_paths():
 
 @respx.mock
 async def test_download_take_streams_the_file_unrewritten(server, config):
+    respx.get(BASE + "/api/generator/generations").respond(200, json=[])
     respx.get(BASE + "/api/generator/tasks/t1").respond(200, json=TASK_DONE)
     audio = respx.get(BASE + "/api/generator/audio").respond(
         200, content=b"RIFF....WAVE", headers={"content-type": "audio/wav"})
@@ -125,6 +126,7 @@ async def test_download_take_streams_the_file_unrewritten(server, config):
 @respx.mock
 async def test_critique_sends_the_decoded_path_and_metas(server):
     respx.get(BASE + "/api/generator/service").respond(200, json={**service(), "state": "stopped"})
+    respx.get(BASE + "/api/generator/generations").respond(200, json=[])
     respx.get(BASE + "/api/generator/tasks/t1").respond(200, json=TASK_DONE)
     crit = respx.post(BASE + "/api/generator/critique").respond(200, json={"passed": True})
     await call(server, "critique_take", {"task_id": "t1", "take_index": 0, "genre_folder": "deep house"})
@@ -181,3 +183,46 @@ async def test_critique_refused_while_ace_runs(server):
     with pytest.raises(RuntimeError, match="ACE is running"):
         await call(server, "critique_take", {"task_id": "t1", "take_index": 0, "genre_folder": "deep house"})
     assert not crit.called
+
+
+LIBRARY_ROW = {
+    "id": "t1", "status": "done", "created_at": "2026-11-21T09:49:38+00:00",
+    "request": {"genre_folder": "chillout"},
+    "takes": [{**TASK_DONE["takes"][0], "decoded_path": "/home/p/api_audio/a+b.wav",
+               "state": "fresh", "published_track_id": None}],
+}
+
+
+@respx.mock
+async def test_critique_finds_the_take_in_the_library_with_ace_stopped(server):
+    # Prod 2026-11-23: ACE stopped, its task records gone — the take is in
+    # the library and its audio in Apollo's own store.
+    respx.get(BASE + "/api/generator/service").respond(200, json={**service(), "state": "stopped"})
+    respx.get(BASE + "/api/generator/generations").respond(200, json=[LIBRARY_ROW])
+    task = respx.get(BASE + "/api/generator/tasks/t1")
+    crit = respx.post(BASE + "/api/generator/critique").respond(200, json={"passed": True})
+    await call(server, "critique_take", {"task_id": "t1", "take_index": 0, "genre_folder": "chillout"})
+    assert not task.called
+    assert json.loads(crit.calls.last.request.content)["file"] == "/home/p/api_audio/a+b.wav"
+
+
+@respx.mock
+async def test_a_take_missing_from_the_library_falls_back_to_ace(server):
+    respx.get(BASE + "/api/generator/generations").respond(200, json=[{**LIBRARY_ROW, "id": "other"}])
+    respx.get(BASE + "/api/generator/tasks/t1").respond(200, json=TASK_DONE)
+    audio = respx.get(BASE + "/api/generator/audio").respond(
+        200, content=b"RIFF", headers={"content-type": "audio/wav"})
+    out = await call(server, "download_take", {"task_id": "t1", "take_index": 0})
+    assert audio.called and out["bytes"] == 4
+
+
+@respx.mock
+async def test_the_library_scan_pages_until_it_runs_out(server):
+    pages = respx.get(BASE + "/api/generator/generations").mock(side_effect=[
+        respx.MockResponse(200, json=[{**LIBRARY_ROW, "id": f"g{i}"} for i in range(100)]),
+        respx.MockResponse(200, json=[LIBRARY_ROW]),
+    ])
+    respx.get(BASE + "/api/generator/audio").respond(200, content=b"RIFF", headers={"content-type": "audio/wav"})
+    await call(server, "download_take", {"task_id": "t1", "take_index": 0})
+    assert pages.call_count == 2
+    assert pages.calls[1].request.url.params["offset"] == "100"

@@ -20,6 +20,11 @@ so its generations land in the operator's own `/generations` feed.
 | `download_take` | `GET /api/generator/audio` |
 | `list_generations`, `mark_take` | `GET /api/generator/generations`, `PATCH …/takes/{idx}` |
 | `critique_take` | `POST /api/generator/critique` — only while ACE is stopped (its LLM read loads the main model) |
+
+Takes are looked up in Apollo's library first (`GET /api/generator/generations`),
+not in ACE's task records: those expire after 24 h and do not answer while ACE
+is stopped. Apollo keeps its own copy of every finished take, so downloading
+and scoring work with ACE off — which is the state scoring needs anyway.
 | `search_catalog`, `list_sessions` | `GET /api/catalog`, `GET /api/sessions` (read-only) |
 
 **Not exposed, by design**: publishing to the catalog, edits, anything live,

@@ -48,6 +48,17 @@ def no_host_controller(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_take_store(tmp_path, monkeypatch):
+    """Every done-poll copies its takes into the take store; never the repo's.
+
+    Without this a test that polls a finished task would write WAVs into
+    ``<repo>/generations/takes`` — and a test that should exercise the ACE
+    path would find a copy left behind by another one.
+    """
+    monkeypatch.setenv("APOLLO_TAKES_DIR", str(tmp_path / "take-store"))
+
+
+@pytest.fixture(autouse=True)
 def no_image_api(monkeypatch):
     """No test may buy a DALL·E image.
 

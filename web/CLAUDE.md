@@ -88,6 +88,25 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   cannot fix) becomes a 502. A take's `result_parse_error` is carried
   through, never raised. Keys are always present so the poll loop never
   feature-detects.
+- **A finished take is Apollo's file, not ACE's (2026-11-23,
+  `take_store.py`).** The first done-poll copies every take from ACE into
+  `generations/takes/<ace basename>` (`APOLLO_TAKES_DIR`, gitignored and
+  dockerignored), and the proxy, publish, critique and the edit's upload
+  fallback all read that copy first — ACE is asked only when Apollo has
+  none. Before this the take lived ONLY in ACE's tmp dir behind
+  `/v1/audio`, a leftover of the era when Apollo ran on Windows and ACE on
+  another box: ten finished, unpublished "Chapter" takes went silent the
+  moment ACE was stopped, and critique could run neither with ACE stopped
+  (503, no audio) nor safely with it running (the LLM read loads a model
+  beside ACE). Three rules hold it together: the copy happens BEFORE the
+  row turns `done`, so ACE's stop guard (`pending_results`) cannot pull the
+  source mid-copy; a copy that fails or comes back EMPTY is never stored,
+  because every reader prefers the store and a bad copy would shadow the
+  real file forever; and the proxy validates the path (root check) BEFORE
+  looking in the store. A missing copy degrades to the old ACE path and is
+  repaired by `scripts/backfill_take_store.py` (idempotent, stdlib only,
+  run on jarvis from the main checkout — it reads ACE's disk directly).
+  Edit/repaint still needs ACE: it is GPU work on the source file.
 - **`GET /api/generator/audio` is a streaming proxy, not a redirect** —
   the browser never talks to :8001 (auth + LAN isolation live here).
   `path` is the take's `file`, forwarded UNREWRITTEN to

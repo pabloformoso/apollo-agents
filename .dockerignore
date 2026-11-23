@@ -56,6 +56,8 @@ env/
 tracks/
 output/
 artwork/
+# Apollo's copy of every finished ACE take (web/backend/take_store.py)
+generations/
 
 # Agent memory + session DB stay on the host so they persist across
 # rebuilds (the bind mount surfaces them inside the container).

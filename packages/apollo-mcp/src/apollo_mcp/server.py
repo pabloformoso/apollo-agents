@@ -45,6 +45,9 @@ ACE_HOLDS_GPU = (
 #: Any state in which ACE may hold VRAM. ``stopped``/``failed`` are the only safe ones.
 ACE_SAFE_STATES = {"stopped", "failed"}
 MAX_WAIT_SEC = 1800
+#: How far back ``find_take`` looks in the library before asking ACE.
+LIBRARY_PAGE = 100
+LIBRARY_SCAN = 1000
 
 
 def _take_view(take: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +108,22 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
             raise ToolError(ON_AIR)
 
     async def find_take(task_id: str, take_index: int) -> dict[str, Any]:
+        """The take as Apollo's library recorded it; ACE's task record as a fallback.
+
+        Library first: ACE's job records expire after 24 h and are not
+        reachable at all while ACE is stopped, while the library (and,
+        since the take store, the audio) outlive both.
+        """
+        for offset in range(0, LIBRARY_SCAN, LIBRARY_PAGE):
+            rows = await call(api.generations(LIBRARY_PAGE, offset))
+            row = next((r for r in rows if r.get("id") == task_id), None)
+            if row is not None:
+                for take in row.get("takes") or []:
+                    if take.get("index") == take_index:
+                        return take
+                break
+            if len(rows) < LIBRARY_PAGE:
+                break
         task = await call(api.task(task_id))
         for take in task.get("takes") or []:
             if take.get("index") == take_index:
@@ -221,7 +240,10 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
 
     @mcp.tool()
     async def download_take(task_id: str, take_index: int = 0, dest_dir: str | None = None) -> dict[str, Any]:
-        """Save a take's audio locally (through Apollo's proxy) to listen to or analyse it."""
+        """Save a take's audio locally (through Apollo's proxy) to listen to or analyse it.
+
+        Works with ACE stopped: Apollo serves finished takes from its own copy.
+        """
         take = await find_take(task_id, take_index)
         file = str(take.get("file") or "")
         directory = Path(dest_dir).expanduser() if dest_dir else config.download_dir
@@ -260,7 +282,8 @@ def build_server(config: Config | None = None, http: httpx.AsyncClient | None = 
         Advisory: it never gates anything. ``passed`` is null when the genre
         has no references. Only while ACE is STOPPED: the LLM reading loads
         the main model, which must never share the GPU with ACE — batch the
-        generations, stop ACE, then score.
+        generations, stop ACE, then score. ACE does not need to be running:
+        Apollo keeps its own copy of every finished take.
         """
         service = await call(api.service())
         if service.get("state") not in ACE_SAFE_STATES:
