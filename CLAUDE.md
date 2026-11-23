@@ -369,3 +369,17 @@ List parameters are passed as JSON strings to stay within the schema builder's t
 Managed with `uv`. Install: `uv sync`
 
 Key libs: `librosa`, `pyrubberband`, `moviepy`, `pydub`, `openai`, `anthropic`, `Pillow`
+
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in GitHub Issues on `pabloformoso/apollo-agents` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles use their default label names (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root, created lazily. See `docs/agents/domain.md`.
