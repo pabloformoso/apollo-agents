@@ -218,11 +218,32 @@ Ports 4010/4020 are the live prod stack — dev servers go on 4011/4021.
   `reference_min`/`reference_max`. `APOLLO_BENCH_REFERENCES` overrides
   the references file (read at CALL time; it is also how the tests inject
   bands measured around a synthetic take). **No 409**: the bench runs on
-  the CPU and parks no VRAM. The LLM read does travel to the same
-  tunnelled gateway the live DJ uses, but it is ONE completion under
-  `CRITIQUE_TIMEOUT_SEC` (15 s, `asyncio.wait_for` over the SDK's own
-  timeout — a thread that outlives it is abandoned), never retried; the
-  guard protects GPU residency, not politeness. Provider detection is
+  the CPU and parks no VRAM, so the score is always given. **The LLM
+  read is NOT free while ACE holds the GPU, and is skipped rather than
+  refused** (`_llm_read_blocked_by_ace`, 2026-11-21). It used to be
+  argued harmless as "one short completion" — wrong for a local
+  provider: a REQUEST alone makes LM Studio JIT-load the main model, and
+  `CRITIQUE_TIMEOUT_SEC` abandons the answer, not the load. On prod a
+  critique with ACE resident timed out at 15 s, left `gemma-4-e4b`
+  (4.7 GB) beside ACE's ~11 GB, and the next `POST /tasks` got the
+  controller's 409 "The main LLM still holds the GPU". So for a LOCAL
+  provider (`llm_failover.LOCAL_PROVIDERS`) the read is asked only when
+  `ace_control.controller()` answers `stopped`/`failed`; any other
+  state, a controller error or no answer within
+  `CRITIQUE_ACE_CHECK_TIMEOUT_SEC` (5 s — unknown is never idle), and an
+  install with NO controller configured (ACE just served the download,
+  and nothing can say it is idle) all answer **200, bench intact,
+  `critique: null` + a `note` saying why**. Remote providers (Anthropic,
+  Azure, LiteLLM) and `mock` skip the check — no controller call. It is
+  checked after the bench, so a verdict-less take never asks. It does
+  NOT fail over to Azure: that would be a paid call per Score click. A
+  check-then-ask window remains (ACE starting in the ≤15 s after a
+  `stopped` answer); the gate is deliberately not held for the read, and
+  the controller's admission check still refuses a generation while the
+  main LLM is resident (the 409 above). When the read
+  does run it is ONE completion under `CRITIQUE_TIMEOUT_SEC` (15 s,
+  `asyncio.wait_for` over the SDK's own timeout — a thread that outlives
+  it is abandoned), never retried. Provider detection is
   `brief_parser.detect_provider()` (one definition, read at CALL time,
   `AGENT_PROVIDER=mock` short-circuits before any SDK import); the model
   is `GENERATIVE_MODEL` > `AGENT_MODEL` > provider default, the #123
