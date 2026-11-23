@@ -16,14 +16,15 @@ from typing import Callable
 
 from . import main_llm
 
-# Make the project root importable
+# The project root is put on sys.path by ``backend/__init__.py``, which runs
+# before this module whatever the import order.
 _PROJECT_DIR = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(_PROJECT_DIR))
 
 # ---------------------------------------------------------------------------
 # Import system prompts, parsers, and schema helpers from existing agent code
 # ---------------------------------------------------------------------------
 from agent import llm_failover  # noqa: E402
+from agent import tracing  # noqa: E402
 from agent.run import (  # noqa: E402
     _GENRE_GUARD_SYSTEM,
     _PLANNER_SYSTEM,
@@ -491,6 +492,42 @@ def _install_progress_hook(ctx: dict, tool_name: str, emit: Callable) -> None:
 # Async streaming agent runner
 # ---------------------------------------------------------------------------
 
+def _agent_span(lane: str):
+    """The AGENT span around one phase's agent run (``planner``, ``critic``…).
+
+    Opened at the CALL site rather than inside ``run_agent_streaming`` so
+    that function keeps its signature — a dozen tests replace it with a
+    fake of exactly that shape. One trace then reads as "the critic took
+    three turns and called two tools" instead of a pile of anonymous calls.
+    """
+    return tracing.span(
+        f"agent.{lane}",
+        kind="AGENT",
+        **{"apollo.lane": lane, "apollo.provider": _PROVIDER},
+    )
+
+
+def _run_tool_traced(name: str, inputs: dict, ctx: dict, tool_index: dict) -> str:
+    """``_run_tool`` inside a TOOL span: the tool's name and argument NAMES.
+
+    Runs in ``asyncio.to_thread``, which copies the context, so the span
+    nests under the turn that asked for it. ``_run_tool`` turns a raising
+    tool into a ``"Tool error: …"`` string, so a failure is flagged on the
+    span from that prefix rather than from an exception that never escapes.
+    """
+    with tracing.tool_span(name, inputs) as sp:
+        result = _run_tool(name, inputs, ctx, tool_index)
+        text = str(result)
+        tracing.set_attrs(
+            sp,
+            **{
+                "apollo.tool.error": text.startswith(("Tool error:", "Unknown tool:")),
+                "apollo.tool.result_chars": len(text),
+            },
+        )
+        return result
+
+
 async def _run_anthropic_streaming(
     system: str,
     tool_fns: list[Callable],
@@ -506,20 +543,33 @@ async def _run_anthropic_streaming(
     tool_index = {fn.__name__: fn for fn in tool_fns}
     final_text = ""
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
         full_text = ""
+        model = main_llm.persisted_model() or _MODEL
 
-        async with client.messages.stream(
-            model=main_llm.persisted_model() or _MODEL,
-            system=system,
-            tools=schemas or [],
-            messages=messages,
-            max_tokens=4096,
-        ) as stream:
-            async for text in stream.text_stream:
-                full_text += text
-                await emit({"type": "text_delta", "content": text})
-            final_msg = await stream.get_final_message()
+        with tracing.llm_span(
+            "llm.stream", provider="anthropic", model=model, **{"apollo.turn": turn},
+        ) as sp:
+            async with client.messages.stream(
+                model=model,
+                system=system,
+                tools=schemas or [],
+                messages=messages,
+                max_tokens=4096,
+            ) as stream:
+                async for text in stream.text_stream:
+                    full_text += text
+                    await emit({"type": "text_delta", "content": text})
+                final_msg = await stream.get_final_message()
+            tracing.record_usage(sp, final_msg)
+            tracing.set_attrs(
+                sp,
+                **{
+                    "apollo.stop_reason": final_msg.stop_reason,
+                    "apollo.tool_calls": sum(1 for b in final_msg.content if b.type == "tool_use"),
+                    "apollo.text_chars": len(full_text),
+                },
+            )
 
         # Serialize content blocks for next-turn messages
         assistant_content = []
@@ -546,7 +596,7 @@ async def _run_anthropic_streaming(
                 _install_progress_hook(ctx, block.name, emit)
                 try:
                     result = await asyncio.to_thread(
-                        _run_tool, block.name, block.input, ctx, tool_index
+                        _run_tool_traced, block.name, block.input, ctx, tool_index
                     )
                 finally:
                     ctx.pop("_progress", None)
@@ -646,37 +696,63 @@ async def _run_openai_streaming(
                 **tools_kw,
             )
 
-        if on_azure:
-            stream = await _open_azure()
-        elif use_failover:
-            stream = await llm_failover.acall("pipeline", _open_local, _open_azure)
-        else:
-            stream = await _open_local()
+        # One LLM span per turn. The model and provider are read AFTER the
+        # stream opens: a failover inside ``acall`` flips ``on_azure``, and a
+        # span labelled with the local model for an Azure answer would send
+        # whoever reads it to the wrong box.
+        with tracing.llm_span("llm.stream", provider=None, model=None, **{"apollo.turn": turn}) as sp:
+            if on_azure:
+                stream = await _open_azure()
+            elif use_failover:
+                stream = await llm_failover.acall("pipeline", _open_local, _open_azure)
+            else:
+                stream = await _open_local()
+            if on_azure:
+                provider, model = "azure", llm_failover.deployment()
+            else:
+                provider = _PROVIDER if base_url else "azure"
+                model = main_llm.persisted_model() or _MODEL
+            llm_provider, llm_system = tracing.provider_labels(provider)
+            tracing.set_attrs(
+                sp,
+                **{
+                    tracing.LLM_MODEL: model,
+                    tracing.LLM_PROVIDER: llm_provider,
+                    tracing.LLM_SYSTEM: llm_system,
+                    "apollo.provider": provider,
+                    "apollo.failed_over": on_azure and bool(base_url),
+                },
+            )
 
-        async for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if not delta:
-                continue
-            if delta.content:
-                safe = ctl.feed(delta.content)
-                if safe:
-                    full_text += safe
-                    await emit({"type": "text_delta", "content": safe})
-            if delta.tool_calls:
-                for tc in delta.tool_calls:
-                    idx = tc.index
-                    if idx not in tool_calls_acc:
-                        tool_calls_acc[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
-                    if tc.function:
-                        if tc.function.name:
-                            tool_calls_acc[idx]["name"] += tc.function.name
-                        if tc.function.arguments:
-                            tool_calls_acc[idx]["arguments"] += tc.function.arguments
+            async for chunk in stream:
+                tracing.record_usage(sp, chunk)  # only the last chunk carries it, if any
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if not delta:
+                    continue
+                if delta.content:
+                    safe = ctl.feed(delta.content)
+                    if safe:
+                        full_text += safe
+                        await emit({"type": "text_delta", "content": safe})
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_acc:
+                            tool_calls_acc[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_acc[idx]["name"] += tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
 
-        tail = ctl.flush()
-        if tail:
-            full_text += tail
-            await emit({"type": "text_delta", "content": tail})
+            tail = ctl.flush()
+            if tail:
+                full_text += tail
+                await emit({"type": "text_delta", "content": tail})
+            tracing.set_attrs(
+                sp,
+                **{"apollo.tool_calls": len(tool_calls_acc), "apollo.text_chars": len(full_text)},
+            )
 
         if tool_calls_acc:
             tc_list = [
@@ -696,7 +772,7 @@ async def _run_openai_streaming(
                 await emit({"type": "tool_call", "name": name, "input": inputs})
                 _install_progress_hook(ctx, name, emit)
                 try:
-                    result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                    result = await asyncio.to_thread(_run_tool_traced, name, inputs, ctx, tool_index)
                 finally:
                     ctx.pop("_progress", None)
                 await emit({"type": "tool_result", "name": name, "result": str(result)})
@@ -730,7 +806,7 @@ async def _run_openai_streaming(
                 await emit({"type": "tool_call", "name": name, "input": inputs})
                 _install_progress_hook(ctx, name, emit)
                 try:
-                    result = await asyncio.to_thread(_run_tool, name, inputs, ctx, tool_index)
+                    result = await asyncio.to_thread(_run_tool_traced, name, inputs, ctx, tool_index)
                 finally:
                     ctx.pop("_progress", None)
                 await emit({"type": "tool_result", "name": name, "result": str(result)})
@@ -793,7 +869,8 @@ async def phase_genre_guard(
     except Exception:  # noqa: BLE001 — no catalog → generic prompt, no backstop
         genres = []
     system = genre_guard_system(genres or None)
-    response = await run_agent_streaming(system, _GENRE_TOOLS, history, ctx, emit)
+    with _agent_span("genre_guard"):
+        response = await run_agent_streaming(system, _GENRE_TOOLS, history, ctx, emit)
     history.append({"role": "assistant", "content": response})
     parsed = _parse_confirmed_block(response)
     # Every user turn counts — the genre may have been named before the
@@ -862,7 +939,8 @@ async def phase_plan(ctx: dict, emit: Callable, memory_summary: str = "") -> str
             prompt += f"\n\n{user_summary}"
 
     messages = [{"role": "user", "content": prompt}]
-    return await run_agent_streaming(_PLANNER_SYSTEM, _PLANNER_TOOLS, messages, ctx, emit)
+    with _agent_span("planner"):
+        return await run_agent_streaming(_PLANNER_SYSTEM, _PLANNER_TOOLS, messages, ctx, emit)
 
 
 async def phase_critique(
@@ -882,7 +960,8 @@ async def phase_critique(
     if memory_summary:
         prompt += f"\n\nMemory context:\n{memory_summary}"
     messages = [{"role": "user", "content": prompt}]
-    response = await run_agent_streaming(_CRITIC_SYSTEM, _CRITIC_TOOLS, messages, ctx, emit)
+    with _agent_span("critic"):
+        response = await run_agent_streaming(_CRITIC_SYSTEM, _CRITIC_TOOLS, messages, ctx, emit)
     verdict, problems, structured_problems = _parse_critic_response(
         response, ctx.get("playlist")
     )
@@ -913,7 +992,8 @@ async def phase_editor(
     """
     await _hydrate_user_context(ctx)
     history.append({"role": "user", "content": message})
-    response = await run_agent_streaming(_EDITOR_SYSTEM, _WEB_EDITOR_TOOLS, history, ctx, emit)
+    with _agent_span("editor"):
+        response = await run_agent_streaming(_EDITOR_SYSTEM, _WEB_EDITOR_TOOLS, history, ctx, emit)
     history.append({"role": "assistant", "content": response})
     return response
 
@@ -951,7 +1031,8 @@ def _append_dislike_problems(
 async def phase_validate(session_name: str, ctx: dict, emit: Callable) -> tuple[str, list[str]]:
     """Run Validator. Returns (status, issues)."""
     messages = [{"role": "user", "content": f"Session '{session_name}' was just built. Validate its audio quality."}]
-    response = await run_agent_streaming(_VALIDATOR_SYSTEM, _VALIDATOR_TOOLS, messages, ctx, emit)
+    with _agent_span("validator"):
+        response = await run_agent_streaming(_VALIDATOR_SYSTEM, _VALIDATOR_TOOLS, messages, ctx, emit)
     return _parse_validator_response(response)
 
 

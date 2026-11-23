@@ -31,6 +31,8 @@ import os
 import re
 from pathlib import Path
 
+from agent import tracing
+
 #: Covers live beside session artwork but in their own directory, so a
 #: `--build-catalog` or a session render never collides with them.
 COVER_DIR_NAME = "catalog"
@@ -127,14 +129,16 @@ def _ask_art_direction(deployment: str, system: str, user: str) -> str:
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
     )
-    response = client.chat.completions.create(
-        model=deployment,
-        messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
-        max_tokens=200,
-        temperature=1.0,
-        timeout=20,
-    )
-    return (response.choices[0].message.content or "").strip()
+    with tracing.llm_span("llm.cover_art_direction", provider="azure", model=deployment) as sp:
+        response = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+            max_tokens=200,
+            temperature=1.0,
+            timeout=20,
+        )
+        tracing.record_usage(sp, response)
+        return (response.choices[0].message.content or "").strip()
 
 
 def user_words(words: str | None, genre_folder: str) -> str:
@@ -206,16 +210,31 @@ def _render(
     """
     if path.is_file():
         return str(path)
-    try:
-        main = importlib.import_module("main")
-        theme = main.GENRE_THEMES.get((genre_folder or "").strip().lower())
-        return main._generate_artwork(
-            name, str(directory), theme, cache_name=cache_name,
-            prompt=art_direction(name, words, genre_folder),
-        )
-    except Exception as exc:  # noqa: BLE001 — a cover is never worth a 500
-        print(f"[covers] cover generation failed for {cache_name}: {exc}", flush=True)
-        return None
+    # A span only for real work: a cached cover is a stat() and not worth a
+    # trace. This is the call that spends money (an Azure image), so it is
+    # the one an operator wants to count.
+    with tracing.span(
+        "covers.render",
+        **{
+            "apollo.genre": genre_folder or None,
+            "apollo.cover.namespace": directory.name,
+            "apollo.cover.image_deployment": os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT") or None,
+        },
+    ) as sp:
+        try:
+            main = importlib.import_module("main")
+            theme = main.GENRE_THEMES.get((genre_folder or "").strip().lower())
+            prompt = art_direction(name, words, genre_folder)
+            tracing.set_attrs(sp, **{"apollo.cover.art_directed": prompt is not None})
+            result = main._generate_artwork(
+                name, str(directory), theme, cache_name=cache_name, prompt=prompt,
+            )
+            tracing.set_attrs(sp, **{"apollo.cover.drawn": bool(result)})
+            return result
+        except Exception as exc:  # noqa: BLE001 — a cover is never worth a 500
+            print(f"[covers] cover generation failed for {cache_name}: {exc}", flush=True)
+            tracing.mark_error(sp, exc)
+            return None
 
 
 def generate_cover(

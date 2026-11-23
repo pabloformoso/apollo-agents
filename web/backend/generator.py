@@ -87,6 +87,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from agent import tracing
+
 from . import ace_control, acestep_client, auth, covers, db, permissions, take_store
 from .brief_parser import detect_provider
 from .ws_manager import ws_manager
@@ -979,24 +981,30 @@ async def _copy_take_to_store(file: str | None, decoded_path: str | None) -> Non
     if not client.enabled():
         return
     part = None
-    try:
-        part = take_store.staging_path(decoded_path)
-        await _stream_from_ace(client, validate_ace_audio_path(file or "").api_path, str(part))
-        if part.stat().st_size == 0:
-            # A copy that would shadow the real file forever is worse
-            # than none: every reader prefers the store.
-            raise ValueError("ACE served an empty file")
-        os.replace(part, take_store.stored_path(decoded_path))
-    except Exception as exc:  # noqa: BLE001 — a missing copy degrades, never breaks
-        print(
-            f"[generator] take store — could not copy {decoded_path}: {exc}",
-            flush=True,
-        )
-        if part is not None:
-            try:
-                part.unlink(missing_ok=True)
-            except OSError:
-                pass
+    # Spanned only past the early returns: a re-poll that finds the copy
+    # in place is a stat(), not an event worth a trace.
+    with tracing.span("generator.take_copy") as sp:
+        try:
+            part = take_store.staging_path(decoded_path)
+            await _stream_from_ace(client, validate_ace_audio_path(file or "").api_path, str(part))
+            size = part.stat().st_size
+            tracing.set_attrs(sp, **{"apollo.take.bytes": size})
+            if size == 0:
+                # A copy that would shadow the real file forever is worse
+                # than none: every reader prefers the store.
+                raise ValueError("ACE served an empty file")
+            os.replace(part, take_store.stored_path(decoded_path))
+        except Exception as exc:  # noqa: BLE001 — a missing copy degrades, never breaks
+            tracing.mark_error(sp, exc)
+            print(
+                f"[generator] take store — could not copy {decoded_path}: {exc}",
+                flush=True,
+            )
+            if part is not None:
+                try:
+                    part.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def _cover_on_release() -> bool:
@@ -1037,6 +1045,7 @@ async def _record_release(
     )
 
 
+@tracing.traced("generator.takes_done")
 async def _record_takes(user_id: int, task_id: str, takes: list[dict]) -> None:
     """Done-poll hook: persist the takes and mark the generation ``done``.
 
@@ -1057,6 +1066,7 @@ async def _record_takes(user_id: int, task_id: str, takes: list[dict]) -> None:
         {**take, "decoded_path": _decoded_take_path(take.get("file"))}
         for take in takes
     ]
+    tracing.annotate(**{"apollo.task_id": task_id, "apollo.takes": len(records)})
     for record in records:
         await _copy_take_to_store(record.get("file"), record.get("decoded_path"))
     saved = await _store(
@@ -1284,6 +1294,7 @@ async def generator_health(
 
 
 @router.post("/api/generator/tasks", dependencies=[Depends(ace_control.generation_access)])
+@tracing.traced("generator.release")
 async def create_generation_task(
     req: GenerationRequest,
     background: BackgroundTasks,
@@ -1326,6 +1337,13 @@ async def create_generation_task(
         )
 
     payload = _release_payload(req, bpm, genre_key)
+    tracing.annotate(**{
+        "apollo.genre": genre_key,
+        "apollo.bpm": bpm,
+        "apollo.audio_duration_sec": req.audio_duration,
+        "apollo.batch_size": req.batch_size,
+        "apollo.has_lyrics": bool(req.lyrics.strip()),
+    })
     try:
         released = await client.release_task(payload)
     except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
@@ -1359,6 +1377,10 @@ async def create_generation_task(
         )
 
     stats = await _stats_or_none(client)
+    tracing.annotate(**{
+        "apollo.task_id": released.task_id,
+        "apollo.queue_position": released.queue_position,
+    })
     return {
         "task_id": released.task_id,
         "queue_position": released.queue_position,
@@ -1540,10 +1562,12 @@ async def _download_take(client: acestep_client.AceStepClient, api_path: str, de
     """
     local = take_store.local_copy(_inner_path_of(api_path))
     if local is not None:
+        tracing.annotate(**{"apollo.take.source": "store"})
         await asyncio.to_thread(shutil.copyfile, local, dest)
         return
     if not client.enabled():
         raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE)
+    tracing.annotate(**{"apollo.take.source": "ace"})
     await _stream_from_ace(client, api_path, dest)
 
 
@@ -1569,6 +1593,7 @@ async def _stream_from_ace(client: acestep_client.AceStepClient, api_path: str, 
 
 
 @router.post("/api/generator/publish")
+@tracing.traced("generator.publish")
 async def publish_take(
     req: PublishRequest,
     background: BackgroundTasks,
@@ -1703,6 +1728,13 @@ async def publish_take(
     await _record_publish(
         current_user["id"], resolved.file_path or req.file, entry["id"]
     )
+    tracing.annotate(**{
+        "apollo.genre": req.genre_folder,
+        "apollo.track_id": entry["id"],
+        "apollo.bpm": entry.get("bpm"),
+        "apollo.camelot_key": entry.get("camelot_key"),
+        "apollo.is_variant": bool(req.variant_of),
+    })
 
     # G7: give the new track a cover. 510 of the catalog's 513 tracks
     # already show one (imported from Suno with a remote cover_url); the
@@ -1784,6 +1816,7 @@ async def _release_edit(
 
 
 @router.post("/api/generator/edit", dependencies=[Depends(ace_control.generation_access)])
+@tracing.traced("generator.edit")
 async def edit_take(
     req: EditRequest,
     current_user: dict = Depends(auth.get_current_user),
@@ -1838,6 +1871,7 @@ async def edit_take(
         req, resolved.file_path or req.file, bpm, genre_key
     )
     try:
+        tracing.annotate(**{"apollo.edit.mode": str(req.mode), "apollo.genre": req.genre_folder})
         released = await _release_edit(client, payload, resolved)
     except (acestep_client.AceStepDisabled, acestep_client.AceStepUnavailable) as exc:
         raise HTTPException(status_code=503, detail=UNAVAILABLE_MESSAGE) from exc
@@ -1858,6 +1892,10 @@ async def edit_take(
     )
 
     stats = await _stats_or_none(client)
+    tracing.annotate(**{
+        "apollo.task_id": released.task_id,
+        "apollo.queue_position": released.queue_position,
+    })
     return {
         "task_id": released.task_id,
         "queue_position": released.queue_position,
@@ -2183,12 +2221,14 @@ def _llm_paragraph(system: str, user: str, provider: str) -> str:
         from anthropic import Anthropic  # noqa: PLC0415 — heavy, optional SDK
 
         anthropic_client = Anthropic(timeout=CRITIQUE_TIMEOUT_SEC)
-        message = anthropic_client.messages.create(
-            model=model,
-            max_tokens=CRITIQUE_MAX_TOKENS,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
+        with tracing.llm_span("llm.critique", provider="anthropic", model=model) as sp:
+            message = anthropic_client.messages.create(
+                model=model,
+                max_tokens=CRITIQUE_MAX_TOKENS,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+            tracing.record_usage(sp, message)
         return "".join(b.text for b in message.content if hasattr(b, "text"))
 
     if provider == "azure":
@@ -2213,16 +2253,20 @@ def _llm_paragraph(system: str, user: str, provider: str) -> str:
             api_key = "ollama"
         client = OpenAI(base_url=base_url, api_key=api_key, timeout=CRITIQUE_TIMEOUT_SEC)
 
-    def _create(c: Any, m: str) -> Any:
-        return c.chat.completions.create(
-            model=m,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            max_tokens=CRITIQUE_MAX_TOKENS,
-            temperature=0.2,
-        )
+    def _create(c: Any, m: str, on: str = provider) -> Any:
+        # Per ATTEMPT, so a failover reads as two LLM spans, local then Azure.
+        with tracing.llm_span("llm.critique", provider=on, model=m) as sp:
+            resp = c.chat.completions.create(
+                model=m,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                max_tokens=CRITIQUE_MAX_TOKENS,
+                temperature=0.2,
+            )
+            tracing.record_usage(sp, resp)
+            return resp
 
     from agent import llm_failover  # noqa: PLC0415
 
@@ -2237,6 +2281,7 @@ def _llm_paragraph(system: str, user: str, provider: str) -> str:
             lambda: _create(
                 llm_failover.azure_client(timeout=CRITIQUE_TIMEOUT_SEC),
                 llm_failover.deployment(),
+                "azure",
             ),
         )
     else:
@@ -2386,6 +2431,7 @@ async def _llm_read_blocked_by_ace() -> str | None:
 
 
 @router.post("/api/generator/critique")
+@tracing.traced("generator.critique")
 async def critique_take(
     req: CritiqueRequest,
     current_user: dict = Depends(auth.get_current_user),
@@ -2459,6 +2505,7 @@ async def critique_take(
             # case here, and it is a normal state — the catalog grows
             # faster than the reference sweep.
             print(f"[generator] no bench verdict for '{genre}': {exc}", flush=True)
+            tracing.annotate(**{"apollo.bench.genre": genre, "apollo.bench.verdict": "none"})
             return _no_verdict(genre, str(exc))
     finally:
         # The WAV's whole job was to be measured. The LLM read below
@@ -2475,6 +2522,13 @@ async def critique_take(
     # the LLM) never pays for a controller round trip either.
     blocked = await _llm_read_blocked_by_ace()
     critique = None if blocked else await _critique_paragraph(req, report, bands)
+    tracing.annotate(**{
+        "apollo.bench.genre": genre,
+        "apollo.bench.verdict": "passed" if passed else "failed",
+        # WHY there was no read is the question this span exists for: the
+        # ACE gate (2026-11-21) skips it on purpose, a timeout does not.
+        "apollo.critique.read": "skipped_ace_gpu" if blocked else ("given" if critique else "none"),
+    })
     return {
         "passed": bool(passed),
         "reference_genre": genre,

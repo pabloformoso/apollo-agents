@@ -35,7 +35,7 @@ import logging
 import os
 from typing import TypedDict
 
-from agent import llm_failover
+from agent import llm_failover, tracing
 
 from . import main_llm
 
@@ -245,14 +245,16 @@ def _parse_anthropic(brief: str) -> ParsedBrief:
     # the module importable in environments without the SDK (e.g. unit
     # tests that monkeypatch this function).
     client = Anthropic()
-    resp = client.messages.create(
-        model=MODEL,
-        max_tokens=512,
-        system=_SYSTEM,
-        tools=[_TOOL],
-        tool_choice={"type": "tool", "name": "report_brief"},
-        messages=[{"role": "user", "content": brief}],
-    )
+    with tracing.llm_span("llm.brief_parser", provider="anthropic", model=MODEL) as sp:
+        resp = client.messages.create(
+            model=MODEL,
+            max_tokens=512,
+            system=_SYSTEM,
+            tools=[_TOOL],
+            tool_choice={"type": "tool", "name": "report_brief"},
+            messages=[{"role": "user", "content": brief}],
+        )
+        tracing.record_usage(sp, resp)
     for block in resp.content:
         if getattr(block, "type", None) == "tool_use" and \
                 getattr(block, "name", None) == "report_brief":
@@ -338,13 +340,21 @@ def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
         {"role": "user", "content": brief},
     ]
 
-    def _create(c, m):
-        return c.chat.completions.create(
-            model=m,
-            messages=messages,
-            max_tokens=_OPENAI_MAX_TOKENS,
-            temperature=0.0,  # extraction, not composition
-        )
+    def _create(c, m, on: str = provider):
+        # The span is per ATTEMPT, so a failover reads as a failed local
+        # span followed by an Azure one — which is what happened.
+        with tracing.llm_span("llm.brief_parser", provider=on, model=m) as sp:
+            resp = c.chat.completions.create(
+                model=m,
+                messages=messages,
+                max_tokens=_OPENAI_MAX_TOKENS,
+                temperature=0.0,  # extraction, not composition
+            )
+            tracing.record_usage(sp, resp)
+            tracing.set_attrs(
+                sp, **{"apollo.finish_reason": getattr(resp.choices[0], "finish_reason", None)}
+            )
+            return resp
 
     if provider in llm_failover.LOCAL_PROVIDERS and llm_failover.configured():
         # The 2026-09-24 demo: two briefs parsed to all-null while LM
@@ -353,7 +363,7 @@ def _parse_openai_compatible(brief: str, provider: str) -> ParsedBrief:
             "brief_parser",
             lambda: _create(client, model),
             lambda: _create(
-                llm_failover.azure_client(timeout=TIMEOUT_SEC), llm_failover.deployment(),
+                llm_failover.azure_client(timeout=TIMEOUT_SEC), llm_failover.deployment(), "azure",
             ),
         )
     else:
@@ -379,10 +389,19 @@ def parse(brief: str) -> ParsedBrief:
     provider = detect_provider()
     if provider == "mock":
         return _empty()
-    try:
-        if provider == "anthropic":
-            return _parse_anthropic(brief)
-        return _parse_openai_compatible(brief, provider)
-    except Exception as exc:  # noqa: BLE001 — never crash a session POST
-        log.exception("brief_parser failure: %s", exc)
+    with tracing.span("brief_parser.parse", **{"apollo.provider": provider}) as sp:
+        try:
+            if provider == "anthropic":
+                parsed = _parse_anthropic(brief)
+            else:
+                parsed = _parse_openai_compatible(brief, provider)
+            # How many fields came back — all-null is the silent failure
+            # this parser has shipped twice (see web/CLAUDE.md).
+            tracing.set_attrs(
+                sp, **{"apollo.brief.fields": sum(1 for v in parsed.values() if v is not None)}
+            )
+            return parsed
+        except Exception as exc:  # noqa: BLE001 — never crash a session POST
+            log.exception("brief_parser failure: %s", exc)
+            tracing.mark_error(sp, exc)
     return _empty()
